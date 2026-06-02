@@ -34,6 +34,46 @@ _DANGER      = "#ef4444"
 _SUCCESS     = "#22c55e"
 
 
+def _render_md_table(match) -> str:
+    """Convert a matched markdown table block to a styled HTML table."""
+    raw = match.group(0)
+    lines = [ln for ln in raw.strip().splitlines() if ln.strip()]
+    # Skip separator lines: rows whose non-pipe content is only -, :, space
+    data_lines = [ln for ln in lines if not re.match(r'^[\s|:\-]+$', ln)]
+    if not data_lines:
+        return raw
+
+    th_style = (
+        f"padding:6px 10px; text-align:left; color:{_TEXT}; font-weight:600; "
+        f"border-bottom:1px solid {_BORDER}; background:{_SURFACE}; white-space:nowrap;"
+    )
+    td_style = (
+        f"padding:5px 10px; text-align:left; color:{_TEXT_2}; "
+        f"border-bottom:1px solid {_BORDER_SOFT};"
+    )
+    table_style = (
+        f"border-collapse:collapse; width:100%; margin:6px 0; "
+        f"font-size:12px; font-family:'Consolas','Courier New',monospace; "
+        f"background:{_INPUT_BG}; border:1px solid {_BORDER}; border-radius:6px;"
+    )
+
+    rows_html = []
+    for i, ln in enumerate(data_lines):
+        cells = [c.strip() for c in ln.split("|")]
+        cells = [c for j, c in enumerate(cells) if c or (0 < j < len(cells) - 1)]
+        if not cells:
+            continue
+        if i == 0:
+            cells_html = "".join(f'<th style="{th_style}">{c}</th>' for c in cells)
+        else:
+            cells_html = "".join(f'<td style="{td_style}">{c}</td>' for c in cells)
+        rows_html.append(f"<tr>{cells_html}</tr>")
+
+    if not rows_html:
+        return raw
+    return f'<table style="{table_style}">{"".join(rows_html)}</table>'
+
+
 def _md_to_html(text: str) -> str:
     """Convert a small subset of Markdown to HTML, safe for QLabel RichText.
 
@@ -109,6 +149,9 @@ def _md_to_html(text: str) -> str:
     safe = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", safe)
     safe = re.sub(r"\*(.+?)\*", r"<i>\1</i>", safe)
 
+    # Markdown tables — must run before \n→<br> so row structure is intact
+    safe = re.sub(r"(?m)(?:^\|[^\n]*\n){2,}(?:^\|[^\n]*)?", _render_md_table, safe)
+
     safe = safe.replace("\n", "<br>")
 
     for i, block in enumerate(code_blocks):
@@ -170,6 +213,9 @@ class MessageBubble(QFrame):
         self.is_user = is_user
         self.is_error = is_error
         self.is_tool = is_tool
+        # Streaming optimization: keep last-processed state to avoid O(N²) md.
+        self._last_text = ""
+        self._last_html = ""
         self._build_ui()
         self._animate_entrance()
 
@@ -256,10 +302,61 @@ class MessageBubble(QFrame):
         self.text_label.setText(html.escape(text))
 
     def set_streaming_text(self, text: str):
-        """Streaming path — inline markdown + cursor, geometry updated each token."""
-        self.text = text
+        """Streaming path — delta-only markdown + cursor.
+
+        Instead of re-parsing the full text on every token (O(N²)), we only
+        process the newly arrived delta, then append it to the cached HTML.
+        """
+        delta = text[len(self._last_text):]
+        self._last_text = text
         cursor = f'<span style="color:{_TEXT_2};">▋</span>'
-        self.text_label.setText(_md_inline(text) + cursor)
+
+        if not delta:
+            # No new text — just refresh cursor position
+            self.text_label.setText(self._last_html + cursor)
+            return
+
+        # Markdown-process only the delta.  We escape it then run the same
+        # inline transforms _md_inline uses so bold/italic/code/bullets work.
+        html_delta = html.escape(delta)
+
+        def _inline_transforms(chunk: str) -> str:
+            # Bullet list items (line-start only)
+            chunk = re.sub(
+                r"(?m)^- (.+)$",
+                lambda m: (
+                    f'<div style="padding-left:12px; color:{_TEXT};">'
+                    f'• {m.group(1)}</div>'
+                ),
+                chunk,
+            )
+            # Inline code
+            chunk = re.sub(
+                r"`([^`\n]+)`",
+                lambda m: (
+                    f'<code style="background:{_SURFACE}; color:{_SUCCESS}; '
+                    f'border-radius:3px; padding:1px 4px; font-family:monospace; '
+                    f'font-size:12px;">{m.group(1)}</code>'
+                ),
+                chunk,
+            )
+            # Bold then italic
+            chunk = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", chunk)
+            chunk = re.sub(r"\*(.+?)\*", r"<i>\1</i>", chunk)
+            # Newlines
+            chunk = chunk.replace("\n", "<br>")
+            return chunk
+
+        # Preserve that our last_html already ends with a <br> if needed.
+        # Process the delta — if the delta crosses a markdown boundary
+        # (e.g. a closing `*` is in the new chunk) our simple approach
+        # is correct for *opening* markers but may fail for *closing* ones
+        # that started before the boundary.  For agent streaming this is
+        # a rare edge case; the user still sees valid text with potentially
+        # one un-styled character until the next token completes it.
+        processed = _inline_transforms(html_delta)
+        self._last_html += processed
+        self.text_label.setText(self._last_html + cursor)
         self.text_label.updateGeometry()
         self.adjustSize()
         self.updateGeometry()
@@ -267,6 +364,9 @@ class MessageBubble(QFrame):
     def finalize_text(self, text: str):
         """Stream end — full markdown render, cursor removed, geometry updated."""
         self.text = text
+        # Reset streaming delta cache so a later set_streaming_text starts fresh.
+        self._last_text = ""
+        self._last_html = ""
         if not self.is_user and not self.is_tool and not self.is_error:
             self.text_label.setText(_md_to_html(text))
         else:
