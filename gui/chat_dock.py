@@ -22,11 +22,10 @@ from qgis.PyQt.QtWidgets import (
 )
 
 from ..backends.base import AgentEvent, EventType
+from .agent_turn_bubble import AgentTurnBubble
 from .chart_widget import ChartWidget
-from .code_block import CodeBlockWidget
 from .message_bubble import MessageContainer
 from .stats_widget import StatsWidget
-from .tool_call_bubble import ToolCallBubble
 from .typing_indicator import TypingIndicator
 
 # ── Design Tokens (dark-minimal palette) ─────────────────────────────
@@ -81,9 +80,9 @@ class ChatDock(QgsDockWidget):
         self._streaming = False
         self._pending_tool = None
         self._typing_widget = None
-        self._current_bubble_container = None
-        self._current_tool_bubble = None
-        self._current_text = ""
+        self._current_agent_turn = None   # AgentTurnBubble for the active turn
+        self._current_tool_row = None      # ToolRowWidget awaiting its result
+        self._current_text = ""            # accumulated streaming text
         self._scroll_locked = False
         self._programmatic_scroll = False
         self._build_ui()
@@ -352,26 +351,25 @@ class ChatDock(QgsDockWidget):
     def _add_user_message(self, text: str):
         self._add_widget(MessageContainer(text, sender_name="You", is_user=True))
 
-    def _add_agent_message(self, text: str = "") -> MessageContainer:
-        wc = MessageContainer(text, sender_name="AgenticGIS", is_user=False)
-        self._add_widget(wc)
-        return wc
-
-    def _add_tool_use(self, name: str, tool_input: dict):
-        bubble = ToolCallBubble(name, tool_input)
-        self._add_widget(bubble)
-        self._current_tool_bubble = bubble
-        return bubble
-
-    def _add_tool_result(self, name: str, result_str: str, is_error: bool = False):
-        if self._current_tool_bubble is not None:
-            self._current_tool_bubble.set_result(result_str, is_error)
-            self._current_tool_bubble = None
-        else:
-            from .tool_call_bubble import ToolCallBubble
-            bubble = ToolCallBubble(name, {})
-            self._add_widget(bubble)
-            bubble.set_result(result_str, is_error)
+    def _get_or_create_agent_turn(self) -> AgentTurnBubble:
+        """Return the active AgentTurnBubble, creating and adding one if needed."""
+        if self._current_agent_turn is None:
+            self._hide_typing()
+            container = QWidget()
+            container.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+            vl = QVBoxLayout(container)
+            vl.setContentsMargins(16, 0, 16, 0)
+            vl.setSpacing(3)
+            sender = QLabel("AgenticGIS")
+            sender.setStyleSheet(
+                f"color:{_TEXT_3}; font-size:10px; background:transparent; border:none;"
+            )
+            vl.addWidget(sender)
+            turn = AgentTurnBubble()
+            vl.addWidget(turn)
+            self._add_widget(container)
+            self._current_agent_turn = turn
+        return self._current_agent_turn
 
     def _add_chart(self, chart_data):
         self._add_widget(ChartWidget(chart_data))
@@ -404,8 +402,8 @@ class ChatDock(QgsDockWidget):
             f"<span style='color:{_TEXT_3}; font-size:11px;'>Ready</span>"
         )
         self._typing_widget = None
-        self._current_bubble_container = None
-        self._current_tool_bubble = None
+        self._current_agent_turn = None
+        self._current_tool_row = None
         self._current_text = ""
         self._scroll_locked = False
 
@@ -430,7 +428,8 @@ class ChatDock(QgsDockWidget):
         self._streaming = False
         self._pending_tool = None
         self._current_text = ""
-        self._current_bubble_container = None
+        self._current_agent_turn = None
+        self._current_tool_row = None
         self._scroll_locked = False
 
         self.send_btn.setEnabled(False)
@@ -461,33 +460,31 @@ class ChatDock(QgsDockWidget):
         if ev.type == EventType.TEXT:
             if not self._streaming:
                 self._streaming = True
-                self._hide_typing()
-                self._current_bubble_container = self._add_agent_message("")
                 self._current_text = ""
-
             delta = ev.data.get("text", "")
             if delta:
                 self._current_text += delta
-                if self._current_bubble_container is not None:
-                    self._current_bubble_container.set_streaming_text(self._current_text)
+                turn = self._get_or_create_agent_turn()
+                turn.set_streaming_text(self._current_text)
                 self._maybe_scroll_to_bottom()
 
         elif ev.type == EventType.TOOL_USE:
-            self._hide_typing()
             self._finish_streaming()
             tool_name = ev.data.get("name", "tool")
             tool_input = ev.data.get("input", {})
             self._pending_tool = (tool_name, tool_input)
-            self._add_tool_use(tool_name, tool_input)
+            turn = self._get_or_create_agent_turn()
+            self._current_tool_row = turn.add_tool(tool_name, tool_input)
+            self._maybe_scroll_to_bottom()
 
         elif ev.type == EventType.TOOL_RESULT:
-            self._hide_typing()
             result = ev.data.get("result", "")
             is_err = str(result).startswith("Error") or str(result).startswith("error")
-            tool_name = self._pending_tool[0] if self._pending_tool else ""
-            self._add_tool_result(tool_name, str(result), is_err)
+            if self._current_tool_row is not None:
+                self._current_tool_row.set_result(str(result), is_err)
+                self._current_tool_row = None
             self._pending_tool = None
-            self._show_typing()
+            self._maybe_scroll_to_bottom()
 
         elif ev.type == EventType.VISUALIZATION:
             viz = ev.data.get("type")
@@ -513,6 +510,7 @@ class ChatDock(QgsDockWidget):
             self._hide_typing()
             self._finish_streaming()
             self._streaming = False
+            self._current_agent_turn = None
             self.status.setText(
                 f"<span style='color:{_SUCCESS};'>&#9679;</span> "
                 f"<span style='color:{_TEXT_3}; font-size:11px;'>Ready</span>"
@@ -521,10 +519,9 @@ class ChatDock(QgsDockWidget):
             self._pending_tool = None
 
     def _finish_streaming(self):
-        """Finalize the current streaming bubble — applies markdown and clears state."""
-        if self._current_bubble_container is not None and self._current_text:
-            self._current_bubble_container.finalize_text(self._current_text)
-            self._current_bubble_container = None
+        """Finalize streaming text in current agent turn — applies full markdown."""
+        if self._current_agent_turn is not None and self._current_text:
+            self._current_agent_turn.finalize_text(self._current_text)
             self._current_text = ""
 
     def _on_finished(self, history):
