@@ -8,7 +8,7 @@ mode (default) and respects QGIS's own theme via neutral grays.
 import html
 
 from qgis.gui import QgsDockWidget
-from qgis.PyQt.QtCore import Qt, QEvent, QThread, pyqtSignal
+from qgis.PyQt.QtCore import Qt, QEvent, QThread, pyqtSignal, QTimer
 from qgis.PyQt.QtWidgets import (
     QFrame,
     QHBoxLayout,
@@ -425,6 +425,7 @@ class ChatDock(QgsDockWidget):
 
         self.input.clear()
         self._add_user_message(message)
+        self._scroll_to_bottom()
         self._streaming = False
         self._pending_tool = None
         self._current_text = ""
@@ -464,9 +465,13 @@ class ChatDock(QgsDockWidget):
             delta = ev.data.get("text", "")
             if delta:
                 self._current_text += delta
+                # Render every token immediately for real-time feel —
+                # the delta-based renderer in AgentTurnBubble is cheap,
+                # so no debounce is needed.
                 turn = self._get_or_create_agent_turn()
                 turn.set_streaming_text(self._current_text)
-                self._maybe_scroll_to_bottom()
+                if not self._scroll_locked:
+                    self._scroll_to_bottom()
 
         elif ev.type == EventType.TOOL_USE:
             self._finish_streaming()
@@ -519,10 +524,21 @@ class ChatDock(QgsDockWidget):
             self._pending_tool = None
 
     def _finish_streaming(self):
-        """Finalize streaming text in current agent turn — applies full markdown."""
-        if self._current_agent_turn is not None and self._current_text:
-            self._current_agent_turn.finalize_text(self._current_text)
-            self._current_text = ""
+        """Finalize streaming text in current agent turn — applies full markdown.
+
+        The bubble already received every token via set_streaming_text, so we
+        just call finalize_text to apply full markdown (code blocks, tables,
+        headings) and drop the cursor.  We do *not* clear ``_current_text``
+        so that text streaming can resume into the same bubble after the
+        tool returns (otherwise the pre-tool text gets lost).
+        """
+        if self._current_text:
+            turn = self._get_or_create_agent_turn()
+            turn.finalize_text(self._current_text)
+        elif self._current_agent_turn is None:
+            # No text and no turn yet — create an empty turn so the tool row
+            # has somewhere to live.
+            self._get_or_create_agent_turn()
 
     def _on_finished(self, history):
         self._history = history if history is not None else self._history
@@ -532,6 +548,7 @@ class ChatDock(QgsDockWidget):
         self.send_btn.setVisible(True)
         self.stop_btn.setEnabled(False)
         self.stop_btn.setVisible(False)
+        self._scroll_locked = False
         self.status.setText(
             f"<span style='color:{_SUCCESS};'>&#9679;</span> "
             f"<span style='color:{_TEXT_3}; font-size:11px;'>Ready</span>"
