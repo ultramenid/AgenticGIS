@@ -26,7 +26,7 @@ from .chart_widget import ChartWidget
 from .code_block import CodeBlockWidget
 from .message_bubble import MessageContainer
 from .stats_widget import StatsWidget
-from .tool_result_widget import ToolResultWidget
+from .tool_call_bubble import ToolCallBubble
 from .typing_indicator import TypingIndicator
 
 # ── Design Tokens (dark-minimal palette) ─────────────────────────────
@@ -82,6 +82,7 @@ class ChatDock(QgsDockWidget):
         self._pending_tool = None
         self._typing_widget = None
         self._current_bubble_container = None
+        self._current_tool_bubble = None
         self._current_text = ""
         self._scroll_locked = False
         self._programmatic_scroll = False
@@ -329,7 +330,8 @@ class ChatDock(QgsDockWidget):
     def _add_widget(self, widget):
         """Insert widget above the trailing stretch."""
         self.transcript_layout.insertWidget(self.transcript_layout.count() - 1, widget)
-        self._scroll_to_bottom()
+        from qgis.PyQt.QtCore import QTimer
+        QTimer.singleShot(0, self._scroll_to_bottom)
 
     # -- High-level adders ---------------------------------------------- #
     def _add_user_message(self, text: str):
@@ -340,14 +342,21 @@ class ChatDock(QgsDockWidget):
         self._add_widget(wc)
         return wc
 
-    def _add_tool_use(self, name: str):
-        self._add_widget(
-            MessageContainer(f"Using {html.escape(name)}", is_user=False, is_tool=True)
-        )
+    def _add_tool_use(self, name: str, tool_input: dict):
+        bubble = ToolCallBubble(name, tool_input)
+        self._add_widget(bubble)
+        self._current_tool_bubble = bubble
+        return bubble
 
-    def _add_tool_result(self, name: str, tool_input: dict, result, is_error: bool = False):
-        card = ToolResultWidget(name, tool_input, result, is_error)
-        self._add_widget(card)
+    def _add_tool_result(self, name: str, result_str: str, is_error: bool = False):
+        if self._current_tool_bubble is not None:
+            self._current_tool_bubble.set_result(result_str, is_error)
+            self._current_tool_bubble = None
+        else:
+            from .tool_call_bubble import ToolCallBubble
+            bubble = ToolCallBubble(name, {})
+            self._add_widget(bubble)
+            bubble.set_result(result_str, is_error)
 
     def _add_chart(self, chart_data):
         self._add_widget(ChartWidget(chart_data))
@@ -381,6 +390,7 @@ class ChatDock(QgsDockWidget):
         )
         self._typing_widget = None
         self._current_bubble_container = None
+        self._current_tool_bubble = None
         self._current_text = ""
         self._scroll_locked = False
 
@@ -453,19 +463,15 @@ class ChatDock(QgsDockWidget):
             tool_name = ev.data.get("name", "tool")
             tool_input = ev.data.get("input", {})
             self._pending_tool = (tool_name, tool_input)
-            self._add_tool_use(tool_name)
+            self._add_tool_use(tool_name, tool_input)
 
         elif ev.type == EventType.TOOL_RESULT:
             self._hide_typing()
-            if self._pending_tool:
-                tool_name, tool_input = self._pending_tool
-            else:
-                tool_name, tool_input = "", {}
             result = ev.data.get("result", "")
             is_err = str(result).startswith("Error") or str(result).startswith("error")
-            self._add_tool_result(tool_name, tool_input, result, is_err)
+            tool_name = self._pending_tool[0] if self._pending_tool else ""
+            self._add_tool_result(tool_name, str(result), is_err)
             self._pending_tool = None
-            # Agent is still working after receiving a tool result
             self._show_typing()
 
         elif ev.type == EventType.VISUALIZATION:

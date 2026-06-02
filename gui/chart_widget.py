@@ -35,16 +35,16 @@ class ChartWidget(QFrame):
             ChartWidget {{
                 background-color: {_INPUT_BG};
                 border: 1px solid {_BORDER};
-                border-radius: 8px;
+                border-radius: 10px;
             }}
         """)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
 
     def minimumSizeHint(self):
-        return QSize(300, 220)
+        return QSize(320, 220)
 
     def sizeHint(self):
-        return QSize(300, 220)
+        return QSize(400, 260)
 
     def paintEvent(self, event):
         painter = QPainter(self)
@@ -96,7 +96,7 @@ class ChartWidget(QFrame):
         chart_h = bottom - rect.top() - 16
         n = len(bars)
         slot_w = rect.width() / n
-        bar_w = max(4, int(slot_w * 0.55))
+        bar_w = max(4, int(slot_w * 0.62))
 
         # Grid lines at 50% and 100%
         grid_pen = QPen(QColor(_BORDER), 1, Qt.DashLine)
@@ -121,11 +121,11 @@ class ChartWidget(QFrame):
 
             val_str = str(item["value"])
             painter.setPen(QColor(_TEXT_2))
-            painter.drawText(x, y - 14, bar_w, 12, Qt.AlignCenter, val_str)
+            painter.drawText(x, y - 2, bar_w, 12, Qt.AlignCenter, val_str)
 
             lbl = str(item.get("label", ""))
-            if len(lbl) > 7:
-                lbl = lbl[:6] + ".."
+            if len(lbl) > 10:
+                lbl = lbl[:9] + ".."
             painter.setPen(QColor(_TEXT_3))
             painter.drawText(x, bottom + 4, bar_w, 16, Qt.AlignCenter, lbl)
 
@@ -176,6 +176,15 @@ class ChartWidget(QFrame):
         for x, y in coords:
             painter.drawEllipse(x - 3, y - 3, 6, 6)
 
+        # Last value label at rightmost point
+        if coords:
+            last_x, last_y = coords[-1]
+            last_val = str(pts[-1]["value"])
+            font = QFont("Inter", 8)
+            painter.setFont(font)
+            painter.setPen(QColor(_TEXT_2))
+            painter.drawText(last_x - 20, last_y - 14, 40, 12, Qt.AlignCenter, last_val)
+
     def _draw_pie(self, painter, rect):
         items = self.data[:7]
         total = sum(item["value"] for item in items) or 1
@@ -201,6 +210,20 @@ class ChartWidget(QFrame):
         painter.setBrush(QBrush(QColor(_INPUT_BG)))
         painter.setPen(Qt.NoPen)
         painter.drawEllipse(cx - hole_r, cy - hole_r, hole_r * 2, hole_r * 2)
+
+        # Center label: total count or single label
+        if len(items) > 1:
+            center_text = str(len(items)) + " cat"
+        else:
+            center_text = str(items[0].get("label", "")) if items else ""
+        if center_text:
+            font = QFont("Inter", 8)
+            painter.setFont(font)
+            painter.setPen(QColor(_TEXT_2))
+            painter.drawText(
+                cx - hole_r, cy - hole_r, hole_r * 2, hole_r * 2,
+                Qt.AlignCenter, center_text
+            )
 
         font = QFont("Inter", 8)
         painter.setFont(font)

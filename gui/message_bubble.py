@@ -297,6 +297,15 @@ class MessageBubble(QFrame):
         self._entrance_anim.setEasingCurve(QEasingCurve.OutCubic)
         self._entrance_anim.start(QPropertyAnimation.DeleteWhenStopped)
 
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if hasattr(self, "text_label") and self.layout() is not None:
+            margins = self.layout().contentsMargins()
+            available_w = event.size().width() - margins.left() - margins.right()
+            if available_w > 0:
+                self.text_label.setFixedWidth(available_w)
+        self.updateGeometry()
+
     def set_text(self, text: str):
         self.text = text
         self.text_label.setText(html.escape(text))
@@ -420,7 +429,7 @@ class MessageContainer(QWidget):
             row.addStretch(1)
             row.addWidget(self.bubble)
         else:
-            self.bubble.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
+            self.bubble.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
             row.addWidget(self.bubble)
 
         outer.addLayout(row)
