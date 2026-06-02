@@ -221,7 +221,7 @@ class MessageBubble(QFrame):
 
     def _build_ui(self):
         self.setFrameShape(QFrame.NoFrame)
-        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
 
         if self.is_error:
             bg_color      = "#2a0f10"
@@ -261,6 +261,8 @@ class MessageBubble(QFrame):
 
         self.text_label = QLabel(initial_html)
         self.text_label.setWordWrap(True)
+        self.text_label.setMinimumWidth(0)  # allow label to shrink to viewport width
+        self.text_label.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Preferred)
         self.text_label.setTextFormat(Qt.RichText)
         self.text_label.setTextInteractionFlags(
             Qt.TextBrowserInteraction | Qt.TextSelectableByMouse
@@ -380,9 +382,6 @@ class MessageBubble(QFrame):
         processed = _inline_transforms(html_delta)
         self._last_html += processed
         self.text_label.setText(self._last_html + cursor)
-        self.text_label.updateGeometry()
-        self.adjustSize()
-        self.updateGeometry()
 
     def finalize_text(self, text: str):
         """Stream end — full markdown render, cursor removed, geometry updated."""
@@ -394,9 +393,6 @@ class MessageBubble(QFrame):
             self.text_label.setText(_md_to_html(text))
         else:
             self.text_label.setText(html.escape(text))
-        self.text_label.updateGeometry()
-        self.adjustSize()
-        self.updateGeometry()
 
 
 class MessageContainer(QWidget):
@@ -416,7 +412,7 @@ class MessageContainer(QWidget):
         parent=None,
     ):
         super().__init__(parent)
-        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(16, 0, 16, 0)
