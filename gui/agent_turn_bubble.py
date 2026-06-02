@@ -359,13 +359,15 @@ class AgentTurnBubble(QFrame):
         self.text_lbl.setText(self._stream_html + cursor)
 
     def finalize_text(self, text: str) -> None:
-        """Apply full markdown at stream end, remove cursor."""
-        self._stream_text = ""
-        self._stream_html = ""
-        if text:
-            self.text_lbl.setText(_md_to_html(text))
-        else:
-            self.text_lbl.clear()
+        """Apply full markdown at stream end, remove cursor.
+
+        We keep ``_stream_text`` / ``_stream_html`` so that if the LLM
+        resumes text streaming after a tool call we can compute the correct
+        delta and append to the existing HTML instead of replacing it."""
+        self.text = text
+        self._stream_text = text
+        self._stream_html = _md_to_html(text) if text else ""
+        self.text_lbl.setText(self._stream_html)
 
     def has_content(self) -> bool:
         return bool(self._rows) or bool(self._stream_text)

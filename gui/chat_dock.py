@@ -542,7 +542,11 @@ class ChatDock(QgsDockWidget):
 
     def _on_finished(self, history):
         self._history = history if history is not None else self._history
-        self._finish_streaming()
+        # NOTE: do NOT call _finish_streaming here — the DONE event handler
+        # already finalized the turn and reset _current_agent_turn to None.
+        # Calling it again would re-create an empty turn and call
+        # finalize_text(self._current_text) on it, producing a second bubble
+        # with the same text (the "double response" bug).
         self._hide_typing()
         self.send_btn.setEnabled(True)
         self.send_btn.setVisible(True)
