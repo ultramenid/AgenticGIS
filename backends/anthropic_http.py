@@ -1,0 +1,178 @@
+"""Minimal Anthropic Messages API client built on the Python standard library.
+
+No third-party packages — uses ``urllib`` + ``json`` so the plugin runs on a
+stock QGIS Python with nothing to install. Supports streaming (SSE) so the
+chat dock can render tokens as they arrive, and reconstructs the final content
+blocks (text + tool_use) needed to continue a tool-use loop.
+"""
+
+import http.client
+import json
+import urllib.error
+import urllib.parse
+import urllib.request
+
+DEFAULT_BASE_URL = "https://api.anthropic.com"
+ANTHROPIC_VERSION = "2023-06-01"
+
+
+class AnthropicHttpError(Exception):
+    pass
+
+
+class AnthropicHttpClient:
+    def __init__(self, api_key=None, auth_token=None, base_url=None,
+                 version=ANTHROPIC_VERSION):
+        self.api_key = api_key
+        self.auth_token = auth_token
+        self.base_url = (base_url or DEFAULT_BASE_URL).rstrip("/")
+        self.version = version
+        self._conn = None          # http.client.HTTPSConnection
+        self._conn_host = None
+
+    def _headers(self):
+        headers = {
+            "content-type": "application/json",
+            "anthropic-version": self.version,
+        }
+        # Prefer a raw API key; fall back to a bearer token (subscription/OAuth).
+        if self.api_key:
+            headers["x-api-key"] = self.api_key
+        elif self.auth_token:
+            headers["authorization"] = f"Bearer {self.auth_token}"
+        return headers
+
+    def _ensure_conn(self):
+        """Return a live HTTPSConnection, recreating if host changed or stale."""
+        if self._conn is not None:
+            if self._conn_host != self.base_url:
+                self._conn.close()
+                self._conn = None
+            else:
+                try:
+                    self._conn.sock.getpeername()
+                except Exception:
+                    self._conn.close()
+                    self._conn = None
+
+        if self._conn is None:
+            parsed = urllib.parse.urlparse(self.base_url)
+            host = parsed.hostname or ""
+            port = parsed.port
+            if parsed.scheme == "https":
+                self._conn = http.client.HTTPSConnection(host, port=port)
+            else:
+                self._conn = http.client.HTTPConnection(host, port=port)
+            self._conn_host = self.base_url
+        return self._conn
+
+    def stream_message(self, model, max_tokens, system, tools, messages,
+                       on_text, should_stop, timeout=600):
+        payload = json.dumps({
+            "model": model,
+            "max_tokens": max_tokens,
+            "system": system,
+            "tools": tools,
+            "messages": messages,
+            "stream": True,
+        }).encode("utf-8")
+
+        headers = self._headers()
+        headers["Content-Length"] = str(len(payload))
+
+        conn = self._ensure_conn()
+        try:
+            conn.request("POST", "/v1/messages", body=payload, headers=headers)
+            response = conn.getresponse()
+        except (OSError, http.client.HTTPException):
+            # Stale connection; retry once with a fresh one
+            self._conn = None
+            conn = self._ensure_conn()
+            conn.request("POST", "/v1/messages", body=payload, headers=headers)
+            response = conn.getresponse()
+
+        if response.status >= 400:
+            body = response.read(600).decode("utf-8", "replace")
+            raise AnthropicHttpError(f"HTTP {response.status}: {body}")
+
+        blocks = {}
+        json_buffers = {}
+        stop_reason = None
+        premature_exit = False
+
+        try:
+            while True:
+                if should_stop():
+                    premature_exit = True
+                    break
+                raw = response.readline()
+                if not raw:
+                    break
+                line = raw.decode("utf-8", "replace").strip()
+                if not line or not line.startswith("data:"):
+                    continue
+                data = line[len("data:"):].strip()
+                if not data:
+                    continue
+                event = json.loads(data)
+                etype = event.get("type")
+
+                if etype == "content_block_start":
+                    idx = event["index"]
+                    block = dict(event["content_block"])
+                    blocks[idx] = block
+                    if block.get("type") == "tool_use":
+                        json_buffers[idx] = ""
+                        block.setdefault("input", {})
+                elif etype == "content_block_delta":
+                    idx = event["index"]
+                    delta = event.get("delta", {})
+                    if delta.get("type") == "text_delta":
+                        blocks[idx]["text"] = blocks[idx].get("text", "") + delta["text"]
+                        on_text(delta["text"])
+                    elif delta.get("type") == "input_json_delta":
+                        json_buffers[idx] = json_buffers.get(idx, "") + delta.get("partial_json", "")
+                elif etype == "content_block_stop":
+                    idx = event["index"]
+                    if idx in json_buffers:
+                        buf = json_buffers[idx]
+                        try:
+                            blocks[idx]["input"] = json.loads(buf) if buf else {}
+                        except json.JSONDecodeError:
+                            blocks[idx]["input"] = {}
+                elif etype == "message_delta":
+                    stop_reason = event.get("delta", {}).get("stop_reason", stop_reason)
+                elif etype == "error":
+                    raise AnthropicHttpError(str(event.get("error")))
+        finally:
+            if premature_exit:
+                try:
+                    if self._conn is not None:
+                        self._conn.close()
+                except Exception:
+                    pass
+                self._conn = None
+            else:
+                try:
+                    while response.readline():
+                        pass
+                except Exception:
+                    self._conn = None
+
+        return self._clean_blocks(blocks), stop_reason
+
+    @staticmethod
+    def _clean_blocks(blocks):
+        cleaned = []
+        for idx in sorted(blocks):
+            block = blocks[idx]
+            if block.get("type") == "text":
+                cleaned.append({"type": "text", "text": block.get("text", "")})
+            elif block.get("type") == "tool_use":
+                cleaned.append({
+                    "type": "tool_use",
+                    "id": block.get("id"),
+                    "name": block.get("name"),
+                    "input": block.get("input", {}),
+                })
+        return cleaned

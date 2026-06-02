@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Tests
+.pytest_cache/
+.coverage
+htmlcov/
+
+# IDE / tooling
+.opencode/
+.claude/
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# QGIS
+*.qgs~
+*.qgz~

@@ -1,0 +1,8 @@
+# AgenticGIS has NO third-party runtime dependencies.
+#
+# Everything runs on QGIS's bundled Python standard library:
+#   - API mode talks to the Anthropic Messages API via urllib (backends/anthropic_http.py)
+#   - CLI mode runs a stdlib http.server MCP bridge (server/mcp_server.py)
+#
+# Just drop the plugin into the QGIS plugins folder and enable it — no pip,
+# no conda, no Python upgrade required.
