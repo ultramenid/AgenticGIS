@@ -299,6 +299,10 @@ class ChatDock(QgsDockWidget):
         # Install event filter on the input widget so Enter-to-send works
         self.input.installEventFilter(self)
 
+    def showEvent(self, event):
+        super().showEvent(event)
+        self.input.setFocus(Qt.OtherFocusReason)
+
     # ------------------------------------------------------------------ #
     def eventFilter(self, obj, event):
         if obj is self.scroll.viewport() and event.type() == QEvent.Resize:
