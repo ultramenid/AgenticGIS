@@ -297,14 +297,28 @@ class MessageBubble(QFrame):
         self._entrance_anim.setEasingCurve(QEasingCurve.OutCubic)
         self._entrance_anim.start(QPropertyAnimation.DeleteWhenStopped)
 
+    def hasHeightForWidth(self):
+        return True
+
+    def heightForWidth(self, width):
+        if hasattr(self, "text_label") and self.layout():
+            m = self.layout().contentsMargins()
+            inner_w = width - m.left() - m.right()
+            if inner_w > 0:
+                lh = self.text_label.heightForWidth(inner_w)
+                if lh > 0:
+                    return lh + m.top() + m.bottom()
+        return -1
+
     def resizeEvent(self, event):
         super().resizeEvent(event)
-        if hasattr(self, "text_label") and self.layout() is not None:
-            margins = self.layout().contentsMargins()
-            available_w = event.size().width() - margins.left() - margins.right()
-            if available_w > 0:
-                self.text_label.setFixedWidth(available_w)
-        self.updateGeometry()
+        # Fix label render width so word-wrap displays correctly.
+        # No updateGeometry() here — hasHeightForWidth handles layout sizing.
+        if hasattr(self, "text_label") and self.layout():
+            m = self.layout().contentsMargins()
+            w = event.size().width() - m.left() - m.right()
+            if w > 0:
+                self.text_label.setFixedWidth(w)
 
     def set_text(self, text: str):
         self.text = text

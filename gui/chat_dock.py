@@ -307,10 +307,13 @@ class ChatDock(QgsDockWidget):
         return super().eventFilter(obj, event)
 
     def _scroll_to_bottom(self):
-        self._programmatic_scroll = True
-        vs = self.scroll.verticalScrollBar()
-        vs.setValue(vs.maximum())
-        self._programmatic_scroll = False
+        try:
+            self._programmatic_scroll = True
+            vs = self.scroll.verticalScrollBar()
+            vs.setValue(vs.maximum())
+            self._programmatic_scroll = False
+        except RuntimeError:
+            self._programmatic_scroll = False
 
     def _on_scroll_changed(self, value):
         """Detect user-initiated scroll during streaming and lock auto-scroll."""

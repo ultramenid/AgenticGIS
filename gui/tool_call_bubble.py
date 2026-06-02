@@ -106,6 +106,7 @@ class ToolCallBubble(QFrame):
         self._timer.setInterval(400)
         self._timer.timeout.connect(self._animate_dots)
         self._timer.start()
+        self.destroyed.connect(self._on_destroyed)
 
     # ── Public API ────────────────────────────────────────────────────────────
 
@@ -179,6 +180,12 @@ class ToolCallBubble(QFrame):
 
     # ── Private helpers ───────────────────────────────────────────────────────
 
+    def _on_destroyed(self) -> None:
+        try:
+            self._timer.stop()
+        except RuntimeError:
+            pass
+
     def _toggle(self) -> None:
         self._content_visible = not self._content_visible
         self.content_widget.setVisible(self._content_visible)
@@ -186,5 +193,8 @@ class ToolCallBubble(QFrame):
         self.updateGeometry()
 
     def _animate_dots(self) -> None:
-        self._dots_index = (self._dots_index + 1) % len(_DOTS_FRAMES)
-        self.dots_label.setText(_DOTS_FRAMES[self._dots_index])
+        try:
+            self._dots_index = (self._dots_index + 1) % len(_DOTS_FRAMES)
+            self.dots_label.setText(_DOTS_FRAMES[self._dots_index])
+        except RuntimeError:
+            self._timer.stop()
