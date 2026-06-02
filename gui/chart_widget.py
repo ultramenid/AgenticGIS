@@ -41,7 +41,7 @@ class ChartWidget(QFrame):
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
 
     def minimumSizeHint(self):
-        return QSize(320, 220)
+        return QSize(100, 180)
 
     def sizeHint(self):
         return QSize(400, 260)

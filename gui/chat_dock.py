@@ -197,6 +197,9 @@ class ChatDock(QgsDockWidget):
         self.scroll.setWidget(self.transcript_widget)
         layout.addWidget(self.scroll, 1)
         self.scroll.verticalScrollBar().valueChanged.connect(self._on_scroll_changed)
+        # Clamp transcript width to viewport — prevents any child widget from
+        # forcing horizontal overflow and unwanted sideways scrolling.
+        self.scroll.viewport().installEventFilter(self)
 
         # -- Hairline divider above input -------------------------------- #
         divider2 = QFrame()
@@ -298,6 +301,11 @@ class ChatDock(QgsDockWidget):
 
     # ------------------------------------------------------------------ #
     def eventFilter(self, obj, event):
+        if obj is self.scroll.viewport() and event.type() == QEvent.Resize:
+            # Keep transcript widget exactly as wide as the viewport so no
+            # child widget can cause horizontal overflow or sideways scrolling.
+            self.transcript_widget.setFixedWidth(event.size().width())
+            return False
         if obj is self.input and event.type() == QEvent.KeyPress:
             if event.key() in (Qt.Key_Return, Qt.Key_Enter):
                 if event.modifiers() & Qt.ShiftModifier:
