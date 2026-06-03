@@ -991,7 +991,7 @@ class QgisToolkit:
     # ------------------------------------------------------------------ #
     # Introspection helpers                                              #
     # ------------------------------------------------------------------ #
-    def get_project_state(self):
+    def get_project_state(self, **_):
         project = QgsProject.instance()
         canvas = self.iface.mapCanvas()
         active = self.iface.activeLayer()
