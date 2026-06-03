@@ -21,7 +21,7 @@ class AgenticGisPlugin:
         self.iface = iface
         self.config = config_mod.Config()
         self.executor = MainThreadExecutor(config=self.config)       # created on the main thread
-        self.toolkit = QgisToolkit(iface)
+        self.toolkit = QgisToolkit(iface, config=self.config)
         self._action = None
         self._dock = None
         self._server = None
@@ -59,6 +59,7 @@ class AgenticGisPlugin:
             from .gui.chat_dock import ChatDock
 
             self._dock = ChatDock(self._get_backend, self._open_settings,
+                                  self.request_cancel,
                                   self.iface.mainWindow())
             self.iface.addDockWidget(Qt.RightDockWidgetArea, self._dock)
             self._dock.visibilityChanged.connect(
@@ -77,6 +78,16 @@ class AgenticGisPlugin:
         return build_backend(
             self.config, self.toolkit, self.executor, self._server_provider
         )
+
+    def request_cancel(self):
+        """Called by the dock's Stop button — flips the toolkit's cancel token
+        so a long-running main-thread operation (run_pyqgis, processing.run,
+        create_chart, get_layer_statistics) can stop cooperatively.
+        """
+        try:
+            self.toolkit.request_cancel()
+        except Exception:
+            pass
 
     def _server_provider(self):
         """Ensure the stdlib MCP bridge is running (CLI mode needs it) and

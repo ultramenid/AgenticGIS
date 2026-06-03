@@ -70,11 +70,12 @@ class ChatWorker(QThread):
 
 
 class ChatDock(QgsDockWidget):
-    def __init__(self, get_backend, open_settings, parent=None):
+    def __init__(self, get_backend, open_settings, request_cancel, parent=None):
         super().__init__("AgenticGIS", parent)
         self.setObjectName("AgenticGisDock")
         self._get_backend = get_backend
         self._open_settings = open_settings
+        self._request_cancel = request_cancel
         self._history = []
         self._worker = None
         self._streaming = False
@@ -451,6 +452,15 @@ class ChatDock(QgsDockWidget):
     def _on_stop(self):
         if self._worker is not None:
             self._worker.stop()
+            # Cooperatively cancel any main-thread operation (run_pyqgis,
+            # processing.run, create_chart, get_layer_statistics). The worker
+            # also stops the agent loop, but main-thread work needs a separate
+            # signal because it can be stuck inside exec/processing.run.
+            if self._request_cancel is not None:
+                try:
+                    self._request_cancel()
+                except Exception:
+                    pass
             self.status.setText(
                 f"<span style='color:{_DANGER};'>&#9679;</span> "
                 f"<span style='color:{_TEXT_3}; font-size:11px;'>Stopping</span>"
@@ -484,11 +494,25 @@ class ChatDock(QgsDockWidget):
 
         elif ev.type == EventType.TOOL_RESULT:
             result = ev.data.get("result", "")
-            is_err = str(result).startswith("Error") or str(result).startswith("error")
+            # F11: prefer the structured is_error / cancelled flags that
+            # the backends compute. Fall back to the old string-prefix
+            # heuristic for forward-compat with any third-party backend.
+            is_err = ev.data.get("is_error")
+            if is_err is None:
+                is_err = (str(result).startswith("Error")
+                          or str(result).startswith("error"))
+            is_cancelled = bool(ev.data.get("cancelled"))
             if self._current_tool_row is not None:
                 self._current_tool_row.set_result(str(result), is_err)
                 self._current_tool_row = None
             self._pending_tool = None
+            # Surface cancellation as a clear status update so the user
+            # knows the tool didn't return a real error.
+            if is_cancelled:
+                self.status.setText(
+                    f"<span style='color:{_DANGER};'>&#9679;</span> "
+                    f"<span style='color:{_TEXT_3}; font-size:11px;'>Cancelled</span>"
+                )
             self._maybe_scroll_to_bottom()
 
         elif ev.type == EventType.VISUALIZATION:

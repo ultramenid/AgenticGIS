@@ -161,15 +161,25 @@ class OpenAIBackend(AgentBackend):
                 args = json.loads(tc["function"]["arguments"])
                 emit(AgentEvent(EventType.TOOL_USE, {"name": name, "input": args}))
                 result = None
+                is_error = False
+                is_cancelled = False
                 try:
                     result = tools_mod.dispatch(
                         self.toolkit, self.executor, name, args
                     )
+                    if isinstance(result, dict):
+                        is_error = result.get("ok") is False
+                        is_cancelled = bool(result.get("cancelled"))
                     payload = json.dumps(result, default=str)
                 except Exception as exc:  # noqa: BLE001
                     payload = f"Tool error: {type(exc).__name__}: {exc}"
-                emit(AgentEvent(EventType.TOOL_RESULT,
-                                {"name": name, "result": payload}))
+                    is_error = True
+                emit(AgentEvent(EventType.TOOL_RESULT, {
+                    "name": name,
+                    "result": payload,
+                    "is_error": is_error,
+                    "cancelled": is_cancelled,
+                }))
                 if name == "create_chart" and isinstance(result, dict) and result.get("ok"):
                     emit(AgentEvent(EventType.VISUALIZATION, {"type": "chart", "data": result}))
                 elif name == "get_layer_statistics" and isinstance(result, dict) and result.get("ok"):

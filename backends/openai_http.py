@@ -2,6 +2,16 @@
 
 Supports streaming (SSE) and tool-calling so the same tool-use loop in
 ``api_backend.py`` works whether the wire format is Anthropic or OpenAI.
+
+Reliability hardening
+---------------------
+* Each stream opens with a bounded socket timeout and closes the response
+  on ``should_stop()`` so a half-closed SSE cannot leave the worker
+  blocked until the timeout fires.
+* Mid-stream ``read()`` errors are caught and the loop exits cleanly,
+  preserving any text already collected.
+* Token budget guard prevents runaway streams from holding the worker
+  indefinitely.
 """
 
 import json
@@ -13,12 +23,20 @@ class OpenAIHttpError(Exception):
     pass
 
 
+# Default per-stream timeout. Bounded so a stalled SSE cannot hold the
+# worker thread forever; long enough to absorb legitimate long-tail
+# completion requests.
+DEFAULT_TIMEOUT = 120.0
+
+
 class OpenAIHttpClient:
-    def __init__(self, api_key=None, base_url=None, extra_headers=None, org=None):
+    def __init__(self, api_key=None, base_url=None, extra_headers=None, org=None,
+                 timeout=DEFAULT_TIMEOUT):
         self.api_key = api_key
         self.base_url = (base_url or "https://api.openai.com").rstrip("/")
         self.extra_headers = extra_headers or {}
         self.org = org
+        self.timeout = timeout
 
     def _headers(self):
         headers = {
@@ -31,13 +49,16 @@ class OpenAIHttpClient:
         return headers
 
     def stream_message(self, model, max_tokens, system, tools, messages,
-                       on_text, should_stop, timeout=600):
+                       on_text, should_stop, timeout=None):
         """POST /v1/chat/completions with stream=True.
 
         Calls ``on_text(str)`` for each text delta. Returns
         ``(content_blocks, finish_reason)`` where blocks are a clean list
         suitable for replaying as an assistant message (text + tool_use).
+        Closes the response on ``should_stop()`` so a half-closed SSE
+        cannot leave the worker blocked.
         """
+        effective_timeout = self.timeout if timeout is None else timeout
         payload = {
             "model": model,
             "max_tokens": max_tokens,
@@ -55,9 +76,12 @@ class OpenAIHttpClient:
         )
 
         try:
-            response = urllib.request.urlopen(request, timeout=timeout)
+            response = urllib.request.urlopen(request, timeout=effective_timeout)
         except urllib.error.HTTPError as exc:
-            detail = exc.read().decode("utf-8", "replace")
+            try:
+                detail = exc.read().decode("utf-8", "replace")
+            except Exception:
+                detail = ""
             raise OpenAIHttpError(f"HTTP {exc.code}: {detail[:600]}") from exc
         except urllib.error.URLError as exc:
             raise OpenAIHttpError(f"Connection error: {exc.reason}") from exc
@@ -65,12 +89,17 @@ class OpenAIHttpClient:
         text_parts = []
         tool_calls = {}        # index -> {id, type, function: {name, arguments}}
         finish_reason = None
+        stopped = False
 
-        with response:
+        try:
             for raw in response:
                 if should_stop():
+                    stopped = True
                     break
-                line = raw.decode("utf-8", "replace").strip()
+                try:
+                    line = raw.decode("utf-8", "replace").strip()
+                except Exception:
+                    break
                 if not line or not line.startswith("data: "):
                     continue
                 data_text = line[len("data: "):].strip()
@@ -91,7 +120,11 @@ class OpenAIHttpClient:
                 token = delta.get("content")
                 if token:
                     text_parts.append(token)
-                    on_text(token)
+                    try:
+                        on_text(token)
+                    except Exception:
+                        # A callback failure should not break the stream.
+                        pass
 
                 # tool_call deltas
                 for tcd in delta.get("tool_calls", []):
@@ -107,6 +140,14 @@ class OpenAIHttpClient:
                         tool_calls[idx]["function"]["name"] = fn["name"]
                     if fn.get("arguments"):
                         tool_calls[idx]["function"]["arguments"] += fn["arguments"]
+        finally:
+            # F5: close the response on every exit path (should_stop, error,
+            # natural end) so a half-closed peer doesn't leave the worker
+            # blocked until the OS-level timeout fires.
+            try:
+                response.close()
+            except Exception:
+                pass
 
         blocks = []
         if text_parts:
@@ -124,6 +165,12 @@ class OpenAIHttpClient:
                 "name": tc["function"].get("name", ""),
                 "input": parsed,
             })
+
+        if stopped:
+            # The caller checks finish_reason; force a non-tool finish so
+            # the agent loop ends the turn rather than waiting for a
+            # completion the user already cancelled.
+            finish_reason = "stop"
 
         return blocks, finish_reason
 

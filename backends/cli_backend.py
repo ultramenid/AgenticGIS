@@ -7,12 +7,26 @@ key is needed. We stream the CLI's stdout back into the chat dock.
 
 Conversation continuity is handled per-tool: Claude Code returns a
 ``session_id`` we ``--resume`` on later turns.
+
+Reliability hardening
+---------------------
+* Robust JSONL parsing — read raw bytes and split on ``\\n`` ourselves, so
+  multi-line JSON records (or two records in one ``write()``) survive.
+* Single select()-driven reader so a verbose CLI cannot deadlock us by
+  filling the 64 kB pipe buffer. We never spawn two blocking reader
+  threads.
+* ``start_new_session=True`` so Ctrl-C in the spawned CLI doesn't kill
+  QGIS, and so child file descriptors don't leak.
+* A bounded ``kill_timeout`` (5 s) before we escalate to ``SIGKILL`` if
+  the process refuses to terminate cleanly.
 """
 
 import json
 import os
+import select
 import shutil
 import subprocess
+import threading
 
 from .base import AgentBackend, AgentEvent, EventType
 
@@ -57,6 +71,9 @@ class CliToolBackend(AgentBackend):
         self.binary = _resolve_binary(self.tool, config.get("cli_path"))
         # Zero-arg callable returning the running MCP server's base URL.
         self._server_provider = server_provider
+        # F15: synchronise mutations of _proc and _session_id across the
+        # dock and the worker thread.
+        self._lock = threading.Lock()
         self._proc = None
         self._session_id = None
 
@@ -78,13 +95,7 @@ class CliToolBackend(AgentBackend):
 
     def _check_login_cmd(self):
         """Return the command to check authentication status."""
-        if self.tool == "claude":
-            return [self.binary, "status"]
-        if self.tool == "opencode":
-            return [self.binary, "status"]
-        if self.tool == "codex":
-            return [self.binary, "status"]
-        if self.tool == "gemini":
+        if self.tool in ("claude", "opencode", "codex", "gemini"):
             return [self.binary, "status"]
         return [self.binary, "status"]
 
@@ -103,13 +114,7 @@ class CliToolBackend(AgentBackend):
 
     def _login_cmd(self):
         """Return the command to open a browser login flow."""
-        if self.tool == "claude":
-            return [self.binary, "login"]
-        if self.tool == "opencode":
-            return [self.binary, "login"]
-        if self.tool == "codex":
-            return [self.binary, "login"]
-        if self.tool == "gemini":
+        if self.tool in ("claude", "opencode", "codex", "gemini"):
             return [self.binary, "login"]
         return [self.binary, "login"]
 
@@ -173,96 +178,201 @@ class CliToolBackend(AgentBackend):
 
         base_url = self._server_provider()
         cmd = self._build_command(message, base_url)
+        # F15: start_new_session detaches the child from QGIS's process
+        # group, so Ctrl-C in the spawned CLI doesn't kill QGIS, and
+        # close_fds prevents file-descriptor leaks.
         try:
-            self._proc = subprocess.Popen(
-                cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                text=True, bufsize=1,
-            )
+            with self._lock:
+                self._proc = subprocess.Popen(
+                    cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                    text=True, bufsize=1,
+                    start_new_session=True, close_fds=True,
+                )
         except Exception as exc:
             emit(AgentEvent(EventType.ERROR, {"error": f"Failed to launch {self.tool}: {exc}"}))
             return history
 
-        import threading
-        import queue
-
-        def _enqueue(pipe, q, kind):
-            for line in pipe:
-                q.put((kind, line))
-            q.put((kind, None))   # sentinel
-
-        q = queue.Queue()
-        stderr_acc = []
-
-        t_out = threading.Thread(target=_enqueue, args=(self._proc.stdout, q, "out"))
-        t_err = threading.Thread(target=_enqueue, args=(self._proc.stderr, q, "err"))
-        t_out.start()
-        t_err.start()
-
-        open_readers = 2
+        proc = self._proc
         try:
-            while open_readers > 0:
-                if should_stop():
-                    self._proc.terminate()
-                    break
-                try:
-                    kind, line = q.get(timeout=0.2)
-                except queue.Empty:
-                    continue
-                if line is None:          # sentinel: that pipe closed
-                    open_readers -= 1
-                    continue
-                line = line.strip()
-                if not line:
-                    continue
-                if kind == "out":
-                    if self.tool == "claude":
-                        self._handle_claude_event(line, emit)
-                    else:
-                        emit(AgentEvent(EventType.TEXT, {"text": line + "\n"}))
-                else:
-                    stderr_acc.append(line)
-
-            self._proc.wait(timeout=5)
-        except Exception as exc:
-            emit(AgentEvent(EventType.ERROR, {"error": str(exc)}))
+            self._drain_process(proc, emit, should_stop)
         finally:
-            t_out.join(timeout=5)
-            t_err.join(timeout=5)
-            if self._proc:
-                try:
-                    self._proc.wait(timeout=2)
-                except Exception:
-                    pass
-                if self._proc.returncode not in (0, None) and stderr_acc:
-                    emit(AgentEvent(EventType.ERROR,
-                                    {"error": "\n".join(stderr_acc)[:2000]}))
-                self._proc = None
+            self._finalize_process(proc)
 
         emit(AgentEvent(EventType.DONE))
         return history
 
-    def _handle_claude_event(self, line, emit):
+    # ------------------------------------------------------------------ #
+    # Streaming I/O — single-threaded select() loop, robust JSONL parser #
+    # ------------------------------------------------------------------ #
+
+    def _drain_process(self, proc, emit, should_stop):
+        """Read both pipes via ``select`` and emit parsed events.
+
+        Replacing the two reader threads eliminates a deadlock class where
+        one pipe's kernel buffer (64 kB on macOS) fills before the other is
+        drained — the writer blocks, the reader thread blocks on
+        ``readline``, and nothing moves. ``select`` notifies us whenever
+        *any* pipe is readable.
+        """
+        stdout = proc.stdout
+        stderr = proc.stderr
+        out_buf = b""
+        err_acc = []
+        poller_stopped = False
+        # Mutable cell for the CLI's session id (captured by _emit_line).
+        sid_holder = [self._session_id]
+
+        while True:
+            if should_stop():
+                poller_stopped = True
+                break
+            if proc.poll() is not None:
+                out_buf = self._read_into(out_buf, stdout, emit, sid_holder) if stdout else out_buf
+                if stderr:
+                    err_acc.append(self._read_all(stderr, None))
+                break
+            try:
+                rlist, _, _ = select.select([stdout, stderr], [], [], 0.2)
+            except (OSError, ValueError):
+                break
+            for stream in rlist:
+                if stream is stdout:
+                    out_buf = self._read_into(out_buf, stdout, emit, sid_holder)
+                elif stream is stderr:
+                    err_acc.append(self._read_all(stderr, None))
+
+        if poller_stopped:
+            try:
+                proc.terminate()
+            except Exception:
+                pass
+
+        # Persist the session id for the next turn's --resume.
+        if sid_holder[0]:
+            self._session_id = sid_holder[0]
+
+        # If stdout was closed before we drained, pick up any leftover
+        # partial line — Claude has been observed to omit a trailing
+        # newline on the final record.
+        if out_buf.strip():
+            _emit_line(out_buf.decode("utf-8", "replace").rstrip("\r"),
+                       emit, sid_holder)
+            if sid_holder[0]:
+                self._session_id = sid_holder[0]
+
+        if err_acc and not poller_stopped:
+            try:
+                rc = proc.returncode
+            except Exception:
+                rc = None
+            if rc not in (0, None):
+                joined = "\n".join(s for s in err_acc if s).strip()
+                if joined:
+                    emit(AgentEvent(EventType.ERROR, {"error": joined[:2000]}))
+
+    @staticmethod
+    def _read_into(buf, stream, emit, sid_holder=None):
+        """Read whatever bytes are immediately available and parse whole
+        newline-terminated JSONL lines. Returns the (possibly partial)
+        trailing buffer.
+        """
         try:
-            event = json.loads(line)
-        except json.JSONDecodeError:
-            return
-        etype = event.get("type")
-        if etype == "system" and event.get("session_id"):
-            self._session_id = event["session_id"]
-        elif etype == "assistant":
-            for block in event.get("message", {}).get("content", []):
-                if block.get("type") == "text":
-                    emit(AgentEvent(EventType.TEXT, {"text": block["text"]}))
-                elif block.get("type") == "tool_use":
-                    emit(AgentEvent(EventType.TOOL_USE,
-                                    {"name": block.get("name"), "input": block.get("input")}))
-        elif etype == "user":
-            for block in event.get("message", {}).get("content", []):
-                if block.get("type") == "tool_result":
-                    content = block.get("content")
-                    text = content if isinstance(content, str) else json.dumps(content, default=str)
-                    emit(AgentEvent(EventType.TOOL_RESULT,
-                                    {"name": "tool", "result": text[:4000]}))
-        elif etype == "result":
-            if event.get("session_id"):
-                self._session_id = event["session_id"]
+            chunk = stream.read(4096)
+        except (OSError, ValueError):
+            return buf
+        if not chunk:
+            return buf
+        if isinstance(chunk, str):
+            chunk = chunk.encode("utf-8")
+        buf += chunk
+        while b"\n" in buf:
+            line, buf = buf.split(b"\n", 1)
+            text = line.decode("utf-8", "replace").rstrip("\r")
+            if text:
+                _emit_line(text, emit, sid_holder)
+        return buf
+
+    @staticmethod
+    def _read_all(stream, _unused):
+        try:
+            return stream.read().decode("utf-8", "replace")
+        except Exception:
+            return ""
+
+    def _finalize_process(self, proc):
+        """Reap the child, escalating to SIGKILL if it refuses to die."""
+        # F15: bounded kill. Try terminate (SIGTERM), wait 5s, then kill.
+        try:
+            proc.terminate()
+        except Exception:
+            pass
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+            try:
+                proc.wait(timeout=2)
+            except Exception:
+                pass
+        with self._lock:
+            if self._proc is proc:
+                self._proc = None
+
+    # ------------------------------------------------------------------ #
+    # JSONL event handling                                                #
+    # ------------------------------------------------------------------ #
+
+
+def _emit_line(line, emit, session_id_holder=None):
+    """Route a single JSONL line to the appropriate AgentEvent.
+
+    Claude emits ``assistant``/``user``/``system``/``result`` records; we
+    forward assistant text and tool_use as ``TEXT`` / ``TOOL_USE``, and
+    tool results as ``TOOL_RESULT``. Non-JSONL output (e.g. opencode's
+    plain text fallback) is emitted as raw ``TEXT``.
+
+    ``session_id_holder`` is a two-element list ``[value]`` used as a
+    mutable cell to capture the CLI's session id for ``--resume`` on the
+    next turn. Passing a list avoids a closure over the backend instance
+    (this function is module-level so the backends can use it without
+    owning the state).
+    """
+    if not line:
+        return
+    try:
+        event = json.loads(line)
+    except json.JSONDecodeError:
+        emit(AgentEvent(EventType.TEXT, {"text": line + "\n"}))
+        return
+    etype = event.get("type")
+    sid = event.get("session_id")
+    if sid and session_id_holder is not None:
+        session_id_holder[0] = sid
+    if etype == "assistant":
+        for block in event.get("message", {}).get("content", []):
+            if block.get("type") == "text":
+                emit(AgentEvent(EventType.TEXT, {"text": block["text"]}))
+            elif block.get("type") == "tool_use":
+                emit(AgentEvent(EventType.TOOL_USE,
+                                {"name": block.get("name"), "input": block.get("input")}))
+    elif etype == "user":
+        for block in event.get("message", {}).get("content", []):
+            if block.get("type") == "tool_result":
+                content = block.get("content")
+                text = content if isinstance(content, str) else json.dumps(content, default=str)
+                emit(AgentEvent(EventType.TOOL_RESULT, {
+                    "name": "tool",
+                    "result": text[:4000],
+                    "is_error": bool(block.get("is_error", False)),
+                }))
+    elif etype in ("system", "result"):
+        # Session metadata; nothing to surface to the chat.
+        return
+    else:
+        # Unknown structured record — surface as raw text so the user
+        # sees something rather than nothing.
+        if event:
+            emit(AgentEvent(EventType.TEXT, {"text": line + "\n"}))

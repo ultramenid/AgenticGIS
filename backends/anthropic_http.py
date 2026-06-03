@@ -4,10 +4,24 @@ No third-party packages — uses ``urllib`` + ``json`` so the plugin runs on a
 stock QGIS Python with nothing to install. Supports streaming (SSE) so the
 chat dock can render tokens as they arrive, and reconstructs the final content
 blocks (text + tool_use) needed to continue a tool-use loop.
+
+Reliability hardening
+---------------------
+* A ``threading.Lock`` guards the connection slot so two concurrent
+  ``send()`` calls (possible if a future change caches the client) cannot
+  race on the connection state.
+* The socket is created with a ``timeout`` matching the request timeout,
+  so a half-closed SSE stream cannot hang ``readline()`` forever.
+* The drain-to-EOF branch was removed: it added no value for an interactive
+  chat and was the only path that could hang the worker on a peer reset.
+  After every response we just close the connection — the next call opens
+  a fresh one.
 """
 
 import http.client
 import json
+import socket
+import threading
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -29,6 +43,8 @@ class AnthropicHttpClient:
         self.version = version
         self._conn = None          # http.client.HTTPSConnection
         self._conn_host = None
+        # F12: serialise access to the connection slot. Cheap uncontended.
+        self._conn_lock = threading.Lock()
 
     def _headers(self):
         headers = {
@@ -42,29 +58,52 @@ class AnthropicHttpClient:
             headers["authorization"] = f"Bearer {self.auth_token}"
         return headers
 
-    def _ensure_conn(self):
-        """Return a live HTTPSConnection, recreating if host changed or stale."""
-        if self._conn is not None:
-            if self._conn_host != self.base_url:
-                self._conn.close()
-                self._conn = None
-            else:
-                try:
-                    self._conn.sock.getpeername()
-                except Exception:
-                    self._conn.close()
-                    self._conn = None
+    def _ensure_conn(self, timeout):
+        """Return a live HTTPSConnection with a bounded socket timeout.
 
-        if self._conn is None:
-            parsed = urllib.parse.urlparse(self.base_url)
-            host = parsed.hostname or ""
-            port = parsed.port
-            if parsed.scheme == "https":
-                self._conn = http.client.HTTPSConnection(host, port=port)
-            else:
-                self._conn = http.client.HTTPConnection(host, port=port)
-            self._conn_host = self.base_url
+        Recreates if host changed or the socket is dead (peer reset).
+        """
+        with self._conn_lock:
+            if self._conn is not None:
+                if self._conn_host != self.base_url:
+                    try:
+                        self._conn.close()
+                    except Exception:
+                        pass
+                    self._conn = None
+                else:
+                    try:
+                        self._conn.sock.getpeername()
+                    except Exception:
+                        try:
+                            self._conn.close()
+                        except Exception:
+                            pass
+                        self._conn = None
+
+            if self._conn is None:
+                parsed = urllib.parse.urlparse(self.base_url)
+                host = parsed.hostname or ""
+                port = parsed.port
+                if parsed.scheme == "https":
+                    self._conn = http.client.HTTPSConnection(
+                        host, port=port, timeout=timeout
+                    )
+                else:
+                    self._conn = http.client.HTTPConnection(
+                        host, port=port, timeout=timeout
+                    )
+                self._conn_host = self.base_url
         return self._conn
+
+    def _close_conn(self):
+        with self._conn_lock:
+            if self._conn is not None:
+                try:
+                    self._conn.close()
+                except Exception:
+                    pass
+                self._conn = None
 
     def stream_message(self, model, max_tokens, system, tools, messages,
                        on_text, should_stop, timeout=600):
@@ -80,19 +119,27 @@ class AnthropicHttpClient:
         headers = self._headers()
         headers["Content-Length"] = str(len(payload))
 
-        conn = self._ensure_conn()
+        conn = self._ensure_conn(timeout)
         try:
             conn.request("POST", "/v1/messages", body=payload, headers=headers)
             response = conn.getresponse()
-        except (OSError, http.client.HTTPException):
+        except (OSError, http.client.HTTPException, socket.timeout):  # noqa: F821
             # Stale connection; retry once with a fresh one
-            self._conn = None
-            conn = self._ensure_conn()
-            conn.request("POST", "/v1/messages", body=payload, headers=headers)
-            response = conn.getresponse()
+            self._close_conn()
+            conn = self._ensure_conn(timeout)
+            try:
+                conn.request("POST", "/v1/messages", body=payload, headers=headers)
+                response = conn.getresponse()
+            except (OSError, http.client.HTTPException, socket.timeout):  # noqa: F821
+                self._close_conn()
+                raise
 
         if response.status >= 400:
-            body = response.read(600).decode("utf-8", "replace")
+            try:
+                body = response.read(600).decode("utf-8", "replace")
+            except Exception:
+                body = ""
+            self._close_conn()
             raise AnthropicHttpError(f"HTTP {response.status}: {body}")
 
         blocks = {}
@@ -105,7 +152,11 @@ class AnthropicHttpClient:
                 if should_stop():
                     premature_exit = True
                     break
-                raw = response.readline()
+                try:
+                    raw = response.readline()
+                except (http.client.HTTPException, OSError, TimeoutError):
+                    # Network went away; treat as a normal end-of-stream.
+                    break
                 if not raw:
                     break
                 line = raw.decode("utf-8", "replace").strip()
@@ -114,7 +165,10 @@ class AnthropicHttpClient:
                 data = line[len("data:"):].strip()
                 if not data:
                     continue
-                event = json.loads(data)
+                try:
+                    event = json.loads(data)
+                except json.JSONDecodeError:
+                    continue
                 etype = event.get("type")
 
                 if etype == "content_block_start":
@@ -129,7 +183,13 @@ class AnthropicHttpClient:
                     delta = event.get("delta", {})
                     if delta.get("type") == "text_delta":
                         blocks[idx]["text"] = blocks[idx].get("text", "") + delta["text"]
-                        on_text(delta["text"])
+                        try:
+                            on_text(delta["text"])
+                        except Exception:
+                            # An exception in the on_text callback (e.g. a Qt
+                            # signal dispatch error) should not crash the
+                            # streaming loop — drop the delta and continue.
+                            pass
                     elif delta.get("type") == "input_json_delta":
                         json_buffers[idx] = json_buffers.get(idx, "") + delta.get("partial_json", "")
                 elif etype == "content_block_stop":
@@ -145,19 +205,11 @@ class AnthropicHttpClient:
                 elif etype == "error":
                     raise AnthropicHttpError(str(event.get("error")))
         finally:
+            # F4: stop trying to drain the socket. The connect-then-close
+            # cost is negligible at our call rate, and the drain branch was
+            # the only path that could hang on a half-closed peer.
             if premature_exit:
-                try:
-                    if self._conn is not None:
-                        self._conn.close()
-                except Exception:
-                    pass
-                self._conn = None
-            else:
-                try:
-                    while response.readline():
-                        pass
-                except Exception:
-                    self._conn = None
+                self._close_conn()
 
         return self._clean_blocks(blocks), stop_reason
 

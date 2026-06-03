@@ -379,6 +379,15 @@ class SettingsDialog(QDialog):
         self.autorun_cb.setStyleSheet(_CHECKBOX_SS)
         beh_form.addRow("", self.autorun_cb)
 
+        # F16: when on, run_pyqgis refuses code that calls os.system,
+        # subprocess, shutil.rmtree, ctypes, etc., unless the code sets
+        # ALLOW_DANGEROUS = True at the top.
+        self.confirm_dangerous_cb = QCheckBox(
+            "Block destructive builtins in agent code (os.system, subprocess, shutil.rmtree, ctypes)"
+        )
+        self.confirm_dangerous_cb.setStyleSheet(_CHECKBOX_SS)
+        beh_form.addRow("", self.confirm_dangerous_cb)
+
         layout.addLayout(beh_form)
 
         layout.addSpacing(4)
@@ -667,6 +676,7 @@ class SettingsDialog(QDialog):
         self.model_edit.setText(self.config.get("model") or "")
         self.system_edit.setPlainText(self.config.get("system_prompt") or "")
         self.autorun_cb.setChecked(bool(self.config.get("auto_run")))
+        self.confirm_dangerous_cb.setChecked(bool(self.config.get("confirm_dangerous_calls")))
 
         to_val = self.config.get("main_thread_timeout")
         self.timeout_edit.setText("" if to_val is None else str(to_val))
@@ -723,6 +733,7 @@ class SettingsDialog(QDialog):
 
         self.config.set("system_prompt", self.system_edit.toPlainText().strip())
         self.config.set("auto_run", self.autorun_cb.isChecked())
+        self.config.set("confirm_dangerous_calls", self.confirm_dangerous_cb.isChecked())
 
         try:
             self.config.set(

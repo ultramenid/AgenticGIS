@@ -9,6 +9,15 @@ queued Qt signal, and the worker blocks until the result (or exception) is
 available.
 
 The executor object MUST be constructed on the main thread.
+
+Cancellation & lifecycle safety
+------------------------------
+Every submitted job gets a unique id. The executor tracks a single
+"current job id" so a slow main-thread operation that survives a
+``TimeoutError`` cannot silently write into a successor's result slot.
+The slot is also guarded by an ``in_flight`` flag to prevent the queued
+signal from queuing additional work while the previous one is still
+running (the worker still waits on its own ``threading.Event``).
 """
 
 import threading
@@ -17,13 +26,15 @@ from qgis.PyQt.QtCore import QObject, QThread, Qt, pyqtSignal
 
 
 class _Job:
-    __slots__ = ("fn", "event", "result", "error")
+    __slots__ = ("id", "fn", "event", "result", "error", "cancelled")
 
-    def __init__(self, fn):
+    def __init__(self, jid, fn):
+        self.id = jid
         self.fn = fn
         self.event = threading.Event()
         self.result = None
         self.error = None
+        self.cancelled = False
 
 
 class MainThreadExecutor(QObject):
@@ -34,7 +45,16 @@ class MainThreadExecutor(QObject):
     def __init__(self, parent=None, config=None):
         super().__init__(parent)
         self.config = config
+        # Serialise access to the job id and in-flight state.
+        self._lock = threading.Lock()
+        self._job_seq = 0
+        self._current_job_id = None
         self._submitted.connect(self._execute, Qt.QueuedConnection)
+
+    def _next_id(self):
+        with self._lock:
+            self._job_seq += 1
+            return self._job_seq
 
     def run_sync(self, fn, timeout=None):
         """Execute ``fn`` on the main thread and return its result.
@@ -51,18 +71,46 @@ class MainThreadExecutor(QObject):
         if QThread.currentThread() is self.thread():
             return fn()
 
-        job = _Job(fn)
-        self._submitted.emit(job)
-        if not job.event.wait(timeout):
-            raise TimeoutError(
-                "AgenticGIS: main-thread operation timed out "
-                f"after {timeout}s (the QGIS UI may be busy)."
-            )
-        if job.error is not None:
-            raise job.error
-        return job.result
+        jid = self._next_id()
+        job = _Job(jid, fn)
+        with self._lock:
+            # If a prior job is still in-flight, refuse rather than queue — the
+            # caller is either retrying (let them time out cleanly) or
+            # contending (let the OS scheduler sort it). This prevents an
+            # unbounded queue of zombie jobs on the main thread.
+            if self._current_job_id is not None:
+                raise RuntimeError(
+                    "AgenticGIS: main thread is busy with another operation; "
+                    "do not stack MainThreadExecutor.run_sync calls."
+                )
+            self._current_job_id = jid
+        try:
+            self._submitted.emit(job)
+            if not job.event.wait(timeout):
+                # Mark the job cancelled so a late write from the main thread
+                # becomes a no-op (see _execute).
+                with self._lock:
+                    if self._current_job_id == jid:
+                        self._current_job_id = None
+                job.cancelled = True
+                raise TimeoutError(
+                    "AgenticGIS: main-thread operation timed out "
+                    f"after {timeout}s (the QGIS UI may be busy)."
+                )
+            if job.error is not None:
+                raise job.error
+            return job.result
+        finally:
+            with self._lock:
+                if self._current_job_id == jid:
+                    self._current_job_id = None
 
     def _execute(self, job):
+        # Guard against a late-firing slot for a job that already timed out
+        # (the worker's TimeoutError has been raised, the worker has moved on,
+        # the main thread is just slow). Skip the work entirely.
+        if job.cancelled:
+            return
         try:
             job.result = job.fn()
         except BaseException as exc:  # noqa: BLE001 — propagate to caller

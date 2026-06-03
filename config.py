@@ -32,6 +32,11 @@ DEFAULTS = {
     "system_prompt": "",           # empty => built-in default
     "auto_run": True,              # execute generated PyQGIS without confirmation
     "max_iterations": 25,          # safety cap on the agent tool-use loop
+    # F16: when True, run_pyqgis refuses (returns an error) if agent code
+    # calls a "dangerous" builtin — os.system, subprocess, shutil.rmtree,
+    # ctypes, etc. Users can keep this on and opt out per-call by setting
+    # the variable ``ALLOW_DANGEROUS = True`` at the top of their code.
+    "confirm_dangerous_calls": False,
     # Local MCP bridge (used by CLI-tool mode)
     "mcp_host": "127.0.0.1",
     "mcp_port": 0,                 # 0 => pick a free port at runtime

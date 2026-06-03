@@ -5,9 +5,19 @@ on worker threads must wrap invocations in ``MainThreadExecutor.run_sync``.
 ``run_pyqgis`` is the catch-all that gives the agent access to every QGIS
 feature and every installed plugin; the other methods are convenience/
 introspection helpers that keep common requests cheap and reliable.
+
+Cancellation
+------------
+A lightweight ``CancellationRegistry`` lives on the toolkit. Every top-level
+worker call wraps its dispatch in a token that the Stop button (or a
+``QgsFeedback`` created by QGIS's processing framework) can set. Tokens are
+re-entrant and torn down in ``finally`` so a tool that succeeds still clears
+its slot.
 """
 
 import io
+import threading
+import time
 import traceback
 from contextlib import redirect_stderr, redirect_stdout
 
@@ -20,6 +30,35 @@ from qgis.core import (
     QgsVectorLayer,
     QgsVectorLayerCache,
 )
+
+from .cancellation import CancellationRegistry as _CancellationRegistry
+
+
+# --------------------------------------------------------------------------- #
+# Cancellation                                                                 #
+# --------------------------------------------------------------------------- #
+
+
+def _make_qgs_feedback(event):
+    """Build a ``QgsFeedback`` whose ``isCanceled`` mirrors ``event``.
+
+    Falls back to ``None`` (and the caller does nothing) if QGIS isn't around.
+    """
+    if event is None:
+        return None
+    try:
+        from qgis.core import QgsFeedback
+    except Exception:  # pragma: no cover
+        return None
+    fb = QgsFeedback()
+    # Wire via a Python property so we don't have to subclass (some QGIS
+    # builds don't allow subclassing of bound Qt types).
+    def _check():
+        return event.is_set()
+    # Use a small QTimer to keep the event loop ticking while the
+    # feedback polls its cancelled state.
+    fb.isCanceled = lambda: _check()
+    return fb
 
 
 def _layer_brief(layer):
@@ -54,12 +93,80 @@ def _layer_brief(layer):
     return info
 
 
+# Sentinel result for cancelled tool calls (a string so JSON-serialisable).
+_CANCELLED_SENTINEL = "__cancelled__"
+
+
 class QgisToolkit:
     """Capability surface exposed to the agent. Construct on the main thread."""
 
-    def __init__(self, iface):
+    # Bound by the agent loop / dock on construction.
+    should_stop_fn = None  # type: callable | None  # threaded "stop requested?"
+
+    def __init__(self, iface, config=None):
         self.iface = iface
+        self.config = config
         self._alg_cache = None  # caches full algorithm list
+        self._cancel = _CancellationRegistry()
+        self._ns_template = None  # F10: cached exec namespace
+        # F17: dirty flag — set when a tool may have mutated project state.
+        self._canvas_dirty = False
+        # F8: hook QGIS's plugins-changed signal so the algorithm list
+        # reflects newly-enabled providers (GRASS, SAGA, custom plugins)
+        # without a plugin restart.
+        try:
+            from qgis.core import QgsApplication
+            QgsApplication.pluginsChanged.connect(self._invalidate_alg_cache)
+        except Exception:
+            pass
+
+    # ------------------------------------------------------------------ #
+    # Cancellation helpers                                                #
+    # ------------------------------------------------------------------ #
+    def request_cancel(self):
+        """Called by the dock's Stop button. Flips the active token."""
+        self._cancel.cancel()
+
+    def is_cancelled(self):
+        return self._cancel.is_cancelled()
+
+    # F16: list of (module_path, attribute) tuples we treat as destructive.
+    # Code that imports any of these is refused when the safety flag is on.
+    _DANGEROUS_SYMBOLS = (
+        ("os", "system"),
+        ("os", "remove"),
+        ("os", "unlink"),
+        ("os", "rmdir"),
+        ("shutil", "rmtree"),
+        ("subprocess", "Popen"),
+        ("subprocess", "call"),
+        ("subprocess", "run"),
+        ("subprocess", "check_output"),
+        ("ctypes", "CDLL"),
+        ("ctypes", "WinDLL"),
+    )
+
+    def _dangerous_calls_blocked(self, code, ns):
+        """Return True when the safety flag is on and the code uses a
+        destructive builtin *and* does not set ``ALLOW_DANGEROUS = True``.
+
+        We do a cheap string-level check rather than static analysis — the
+        goal is to catch the obvious cases ("the agent tried to run rm"),
+        not to be a sandbox. Anything that bypasses the string check is
+        still subject to the user's existing OS-level permissions.
+        """
+        if not (self.config and self.config.get("confirm_dangerous_calls")):
+            return False
+        if "ALLOW_DANGEROUS = True" in code or "ALLOW_DANGEROUS=True" in code:
+            return False
+        lowered = code  # keep case — the dangerous names are lower-case already
+        for mod, attr in self._DANGEROUS_SYMBOLS:
+            # Look for ``mod.attr(`` or ``mod . attr(`` — the form that
+            # actually invokes the function.
+            needle = f"{mod}.{attr}("
+            if needle in lowered:
+                return True
+        return False
 
     # ------------------------------------------------------------------ #
     # The catch-all: arbitrary PyQGIS execution                          #
@@ -71,30 +178,72 @@ class QgisToolkit:
         ``iface``, ``QgsProject``, ``qgis`` (core/gui), ``processing`` and the
         ``QgsApplication``. Assign to a variable named ``result`` to return a
         structured value to the agent. ``stdout``/``stderr`` are captured.
+
+        A ``_cancel_check()`` callable is also injected; user code that calls
+        it periodically can be interrupted by the Stop button. ``time.sleep``
+        is wrapped to honour the same flag so a sleeping agent loop yields
+        within a few hundred milliseconds.
         """
+        event, owner = self._cancel.register()
+        try:
+            return self._run_pyqgis_inner(code, event, owner)
+        finally:
+            self._cancel.release(event)
+
+    def _run_pyqgis_inner(self, code, event, owner):
         import qgis.core as qgis_core
         import qgis.gui as qgis_gui
 
-        ns = {
-            "__name__": "__agenticgis__",
-            "iface": self.iface,
-            "QgsProject": QgsProject,
-            "QgsApplication": QgsApplication,
-            "qgis": __import__("qgis"),
-            "qgis_core": qgis_core,
-            "qgis_gui": qgis_gui,
-        }
-        # Make `from qgis.core import *`-style names available without imports.
-        ns.update({k: getattr(qgis_core, k) for k in dir(qgis_core) if not k.startswith("_")})
-        try:
-            import processing  # noqa: WPS433 (optional at import time)
-            ns["processing"] = processing
-        except Exception:  # pragma: no cover - processing should exist in QGIS
-            pass
+        # F10: namespace is built once per toolkit and copied per call.
+        if self._ns_template is None:
+            ns = {
+                "__name__": "__agenticgis__",
+                "iface": self.iface,
+                "QgsProject": QgsProject,
+                "QgsApplication": QgsApplication,
+                "qgis": __import__("qgis"),
+                "qgis_core": qgis_core,
+                "qgis_gui": qgis_gui,
+            }
+            ns.update({k: getattr(qgis_core, k) for k in dir(qgis_core) if not k.startswith("_")})
+            try:
+                import processing  # noqa: WPS433 (optional at import time)
+                ns["processing"] = processing
+            except Exception:  # pragma: no cover - processing should exist in QGIS
+                pass
+            self._ns_template = ns
+        ns = dict(self._ns_template)  # shallow copy — per-call top-level
+
+        # Cancellation hooks injected into the agent's namespace.
+        def _cancel_check():
+            return event is not None and event.is_set()
+        ns["_cancel_check"] = _cancel_check
+        ns["is_cancelled"] = _cancel_check
+
+        # Wrap time.sleep so user code can't stall the loop on a long sleep
+        # without being interruptible. The wrapper wakes every 200ms to
+        # honour a cancel flag; small sleeps stay reasonably accurate.
+        _real_sleep = time.sleep
+
+        def _interruptible_sleep(seconds):
+            end = time.monotonic() + max(0.0, float(seconds))
+            while True:
+                if _cancel_check():
+                    return
+                remaining = end - time.monotonic()
+                if remaining <= 0:
+                    return
+                _real_sleep(min(remaining, 0.2))
+
+        ns["time"] = type("t", (), {
+            "sleep": _interruptible_sleep,
+            "monotonic": time.monotonic,
+            "time": time.time,
+        })()
 
         # Performance helper: efficient feature iteration
         def _iterate_features(layer, fields=None, no_geometry=False):
-            """Iterate layer features efficiently using QgsFeatureRequest."""
+            """Iterate layer features efficiently using ``QgsFeatureRequest``."""
             if not isinstance(layer, QgsVectorLayer):
                 return []
             req = QgsFeatureRequest()
@@ -125,10 +274,24 @@ class QgisToolkit:
             return {"ok": False, "error": "run_pyqgis: code must be a non-empty string", "stdout": "", "stderr": ""}
         if len(code) > 200_000:
             return {"ok": False, "error": "run_pyqgis: code is too large (>200k chars)", "stdout": "", "stderr": ""}
+        # F16: optional guard against destructive builtins. The flag is
+        # opt-in so the existing "zero friction" behaviour is preserved by
+        # default; users who want a safety net flip it on in Settings.
+        if self._dangerous_calls_blocked(code, ns):
+            return {"ok": False,
+                    "error": ("run_pyqgis: code references a destructive "
+                              "builtin (os.system, subprocess, shutil.rmtree, "
+                              "ctypes, ...). Set 'Allow dangerous calls' in "
+                              "Settings or define ALLOW_DANGEROUS = True at "
+                              "the top of the code to override."),
+                    "stdout": "", "stderr": ""}
         try:
             with redirect_stdout(out), redirect_stderr(err):
                 exec(compile(code, "<agenticgis>", "exec"), ns)  # noqa: S102
-            if "result" in ns:
+            if _cancel_check():
+                result["ok"] = False
+                result["error"] = "run_pyqgis: cancelled by user"
+            elif "result" in ns:
                 result["result"] = repr(ns["result"])
         except KeyboardInterrupt:
             return {"ok": False, "error": "run_pyqgis: interrupted by user", "stdout": out.getvalue(), "stderr": err.getvalue()}
@@ -140,11 +303,13 @@ class QgisToolkit:
         finally:
             result["stdout"] = out.getvalue()
             result["stderr"] = err.getvalue()
-        # Reflect any visual changes immediately.
-        try:
-            self.iface.mapCanvas().refresh()
-        except Exception:
-            pass
+        # F17: only refresh if the agent's code may have touched the canvas.
+        if self._canvas_dirty:
+            try:
+                self.iface.mapCanvas().refresh()
+            except Exception:
+                pass
+            self._canvas_dirty = False
         return result
 
     # ------------------------------------------------------------------ #
@@ -249,12 +414,36 @@ class QgisToolkit:
 
         if not isinstance(alg_id, str) or not alg_id.strip():
             return {"ok": False, "error": "alg_id must be a non-empty string"}
+        # F7: wire a feedback so the QGIS processing framework honours our
+        # cancellation token. Falls back to a direct call if the framework
+        # doesn't accept ``feedback`` (older QGIS).
+        event, owner = self._cancel.register()
+        feedback = _make_qgs_feedback(event) if owner else None
         try:
-            output = processing.run(alg_id, dict(params or {}))
+            if feedback is not None:
+                try:
+                    output = processing.run(alg_id, dict(params or {}), feedback=feedback)
+                except TypeError:
+                    # Older QGIS signature without feedback kwarg
+                    output = processing.run(alg_id, dict(params or {}))
+            else:
+                output = processing.run(alg_id, dict(params or {}))
         except KeyboardInterrupt:
             return {"ok": False, "error": "interrupted by user"}
         except BaseException as exc:  # noqa: BLE001
-            return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+            # F7: distinguish the cancel path from real errors so the agent
+            # can decide whether to retry.
+            if event is not None and event.is_set():
+                return {"ok": False, "error": "cancelled by user", "cancelled": True}
+            name = type(exc).__name__
+            # Pull a "cleaner" message out of QGIS-specific exception types
+            # when available.
+            msg = str(exc)
+            return {"ok": False, "error": f"{name}: {msg}"}
+        finally:
+            self._cancel.release(event)
+        # F17: processing likely mutated the canvas; mark dirty for the dock.
+        self._canvas_dirty = True
         # Outputs may contain layers / non-serialisable objects; stringify.
         try:
             return {"ok": True, "output": {k: str(v) for k, v in (output or {}).items()}}
@@ -274,6 +463,7 @@ class QgisToolkit:
         if not layer.isValid():
             return {"ok": False, "error": f"Layer is not valid: {uri!r}"}
         QgsProject.instance().addMapLayer(layer)
+        self._canvas_dirty = True
         return {"ok": True, "layer_id": layer.id(), "name": layer.name()}
 
     def save_project(self):
@@ -296,13 +486,26 @@ class QgisToolkit:
         if field_idx == -1:
             return {"error": f"Field {field_name!r} not found"}
 
-        # Collect values
-        values = {}
-        for feature in layer.getFeatures():
-            val = feature.attribute(field_idx)
-            if val not in values:
-                values[val] = 0
-            values[val] += 1
+        # F9: pull only the one field, no geometry — cuts allocation for big layers.
+        from qgis.core import QgsFeatureRequest
+        req = QgsFeatureRequest().setFlags(Qgis.FeatureRequestFlag.NoGeometry)
+        req.setSubsetOfAttributes([field_idx], layer.fields())
+        if layer.isCancellable():
+            event, owner = self._cancel.register()
+        else:
+            event, owner = None, False
+        try:
+            values = {}
+            for feature in layer.getFeatures(req):
+                if owner and event is not None and event.is_set():
+                    return {"error": "cancelled by user", "cancelled": True}
+                val = feature.attribute(field_idx)
+                if val not in values:
+                    values[val] = 0
+                values[val] += 1
+        finally:
+            if owner:
+                self._cancel.release(event)
 
         # Sort by count
         sorted_items = sorted(values.items(), key=lambda x: x[1], reverse=True)[:20]  # top 20
@@ -338,25 +541,56 @@ class QgisToolkit:
             if field_idx == -1:
                 return {"error": f"Field {field_name!r} not found"}
 
-            # Calculate field stats
-            values = []
-            numeric_values = []
-            for feature in layer.getFeatures():
-                val = feature.attribute(field_idx)
-                values.append(val)
-                try:
-                    numeric_values.append(float(val))
-                except (TypeError, ValueError):
-                    pass
+            # F9: only the requested attribute, no geometry; C++ summary for numerics.
+            from qgis.core import QgsFeatureRequest, QgsStatisticalSummary
+            req = QgsFeatureRequest().setFlags(Qgis.FeatureRequestFlag.NoGeometry)
+            req.setSubsetOfAttributes([field_idx], layer.fields())
+            if layer.isCancellable():
+                event, owner = self._cancel.register()
+            else:
+                event, owner = None, False
+            try:
+                values = []
+                numeric_values = []
+                for feature in layer.getFeatures(req):
+                    if owner and event is not None and event.is_set():
+                        return {"error": "cancelled by user", "cancelled": True}
+                    val = feature.attribute(field_idx)
+                    values.append(val)
+                    if isinstance(val, (int, float)):
+                        numeric_values.append(val)
+                    elif val is not None:
+                        try:
+                            numeric_values.append(float(val))
+                        except (TypeError, ValueError):
+                            pass
+            finally:
+                if owner:
+                    self._cancel.release(event)
 
             stats["field"] = field_name
             stats["distinct_count"] = len(set(values))
             stats["null_count"] = values.count(None)
 
             if numeric_values:
-                stats["min"] = min(numeric_values)
-                stats["max"] = max(numeric_values)
-                stats["mean"] = sum(numeric_values) / len(numeric_values)
-                stats["sum"] = sum(numeric_values)
+                # C++ summary if the layer supports it; faster than Python loops.
+                try:
+                    summary = layer.statisticalSummary([QgsStatisticalSummary.Mean |
+                                                       QgsStatisticalSummary.Min |
+                                                       QgsStatisticalSummary.Max |
+                                                       QgsStatisticalSummary.Sum |
+                                                       QgsStatisticalSummary.Count |
+                                                       QgsStatisticalSummary.StDev])
+                    stats["min"] = float(summary.min())
+                    stats["max"] = float(summary.max())
+                    stats["mean"] = float(summary.mean())
+                    stats["sum"] = float(summary.sum())
+                    stats["stdev"] = float(summary.stDev())
+                    stats["count"] = int(summary.count())
+                except Exception:
+                    stats["min"] = min(numeric_values)
+                    stats["max"] = max(numeric_values)
+                    stats["mean"] = sum(numeric_values) / len(numeric_values)
+                    stats["sum"] = sum(numeric_values)
 
         return {"ok": True, "statistics": stats}

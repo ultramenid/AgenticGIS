@@ -164,19 +164,30 @@ class ApiBackend(AgentBackend):
                 emit(AgentEvent(EventType.TOOL_USE,
                                 {"name": tu["name"], "input": tu["input"]}))
                 result = None
+                is_error = False
+                is_cancelled = False
                 try:
                     result = tools_mod.dispatch(
                         self.toolkit, self.executor, tu["name"], tu["input"]
                     )
+                    if isinstance(result, dict):
+                        is_error = result.get("ok") is False
+                        is_cancelled = bool(result.get("cancelled"))
                     payload = json.dumps(result, default=str)
                     if len(payload) > 200_000:
                         payload = payload[:200_000] + "\n... [output truncated]"
-                    is_error = isinstance(result, dict) and result.get("ok") is False
                 except Exception as exc:  # noqa: BLE001
                     payload = f"Tool error: {type(exc).__name__}: {exc}"
                     is_error = True
-                emit(AgentEvent(EventType.TOOL_RESULT,
-                                {"name": tu["name"], "result": payload}))
+                # F11: pass structured is_error / cancelled flags through
+                # the event so the UI can style without a string-prefix
+                # heuristic.
+                emit(AgentEvent(EventType.TOOL_RESULT, {
+                    "name": tu["name"],
+                    "result": payload,
+                    "is_error": is_error,
+                    "cancelled": is_cancelled,
+                }))
                 if tu["name"] == "create_chart" and isinstance(result, dict) and result.get("ok"):
                     emit(AgentEvent(EventType.VISUALIZATION, {"type": "chart", "data": result}))
                 elif tu["name"] == "get_layer_statistics" and isinstance(result, dict) and result.get("ok"):
