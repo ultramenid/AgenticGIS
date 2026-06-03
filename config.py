@@ -14,8 +14,13 @@ MODE_API_KEY = "api_key"            # talk to the provider API directly with a k
 MODE_CUSTOM = "custom"              # any OpenAI-compatible or Anthropic-compatible endpoint
 MODE_SUBSCRIPTION = "subscription"  # use an installed CLI agent (Claude Code / OpenCode / etc.)
 
+# Connection method chosen in the redesigned Settings dialog.
+# Replaces the legacy `connection_mode` key; values are: api_key | custom | cli | browser.
+MODE_BROWSER = "browser"
+
 DEFAULTS = {
-    "connection_mode": MODE_API_KEY,
+    "connect_with": MODE_API_KEY,   # replaces connection_mode
+    "connection_mode": MODE_API_KEY,  # legacy; migrated on first read
     # CLI-tool mode
     "cli_tool": "claude",          # "claude" | "opencode"
     "cli_path": "",                # explicit binary path; empty => auto-detect on PATH
@@ -52,6 +57,27 @@ class Config:
 
     def __init__(self):
         self._s = QSettings()
+        self._migrate_legacy_connection_mode()
+
+    def _migrate_legacy_connection_mode(self):
+        """One-time migration: connection_mode -> connect_with.
+
+        Runs on every Config() construction, but is a no-op after the first
+        successful migration because we check whether connect_with is set.
+        """
+        if self._s.value("AgenticGIS/connect_with") is not None:
+            return
+        legacy = self._s.value("AgenticGIS/connection_mode", None)
+        if legacy is None:
+            return
+        mapping = {
+            MODE_API_KEY: MODE_API_KEY,
+            MODE_CUSTOM: MODE_CUSTOM,
+            MODE_SUBSCRIPTION: "cli",  # renamed
+            MODE_BROWSER: MODE_BROWSER,
+        }
+        new = mapping.get(legacy, MODE_API_KEY)
+        self._s.setValue("AgenticGIS/connect_with", new)
 
     def _key(self, name):
         return f"{_GROUP}/{name}"
