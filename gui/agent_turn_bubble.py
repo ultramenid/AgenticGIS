@@ -236,6 +236,7 @@ class ToolGroupRow(QWidget):
         self._spin_idx = 0
         self._running_count = 0
         self._had_error = False
+        self._finalized = False
 
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         self.setStyleSheet("background:transparent;")
@@ -264,10 +265,10 @@ class ToolGroupRow(QWidget):
         name_lbl.setStyleSheet(
             f"color:{_TEXT}; background:transparent; font-size:10px;"
         )
-        name_lbl.setTextFormat(Qt.RichText)
+        name_lbl.setTextFormat(Qt.PlainText)
         hbox.addWidget(name_lbl)
 
-        self._count_lbl = QLabel("(0)")
+        self._count_lbl = QLabel("")
         self._count_lbl.setFont(mono)
         self._count_lbl.setStyleSheet(
             f"color:{_TEXT_3}; background:transparent; font-size:10px;"
@@ -285,11 +286,12 @@ class ToolGroupRow(QWidget):
         self._timer = QTimer(self)
         self._timer.setInterval(80)
         self._timer.timeout.connect(self._tick)
-        self._timer.start()
         self.destroyed.connect(self._on_destroyed)
 
     def add_item(self, tool_input: dict) -> ToolSubItem:
         """Append a sub-item; recalculate connectors so only the last shows └─."""
+        if not self._items:
+            self._timer.start()
         if self._items:
             self._items[-1].set_last(False)
         item = ToolSubItem(tool_input, group=self, is_last=True, parent=self)
@@ -309,15 +311,20 @@ class ToolGroupRow(QWidget):
 
     def force_finalize(self) -> None:
         """Mark all still-running items as timed out. Called by AgentTurnBubble.finalize()."""
+        any_forced = False
         for item in self._items:
             if not item._done:
                 item.mark_done(is_error=True)
-        if self._running_count > 0:
+                any_forced = True
+        if any_forced or self._running_count > 0:
             self._running_count = 0
             self._had_error = True
             self._finalize_header()
 
     def _finalize_header(self) -> None:
+        if self._finalized:
+            return
+        self._finalized = True
         try:
             self._timer.stop()
             if self._had_error:
