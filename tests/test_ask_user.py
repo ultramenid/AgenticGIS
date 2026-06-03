@@ -106,7 +106,7 @@ def test_ask_user_returns_choice():
     assert captured["question"] == "Proceed?"
     assert len(captured["options"]) == 2
     assert captured["allow_free_text"] is True
-    assert result == {"ok": True, "choice": "yes", "free_text": None, "cancelled": False}
+    assert result == {"choice": "yes", "free_text": None, "cancelled": False}
 
 
 def test_ask_user_returns_free_text():
