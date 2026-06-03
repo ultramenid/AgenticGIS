@@ -20,19 +20,22 @@ from qgis.PyQt.QtWidgets import (
     QWidget,
 )
 
-# ── Monochrome Minimal Palette ─────────────────────────────
-_SURFACE     = "#161616"
-_CANVAS      = "#0a0a0a"
-_INPUT_BG    = "#1e1e1e"
-_BORDER      = "#2e2e2e"
-_BORDER_SOFT = "#242424"
-_TEXT        = "#ececec"
-_TEXT_2      = "#a0a0a0"
-_TEXT_3      = "#707070"
-_ACCENT      = "#e0e0e0"
-_ACCENT_HOV  = "#c8c8c8"
-_DANGER      = "#ef4444"
-_SUCCESS     = "#22c55e"
+# ── Neural Terminal Palette ────────────────────────────────
+_CANVAS      = "#060810"   # deep navy-black
+_SURFACE     = "#0a0d14"   # card surface
+_SURFACE_2   = "#0d1018"   # slightly elevated
+_BORDER      = "#1a1f2e"   # cool dark border
+_BORDER_SOFT = "#131722"   # very subtle
+_TEXT        = "#cdd6e0"   # cool light
+_TEXT_2      = "#7a8899"   # mid cool gray
+_TEXT_3      = "#3d4a5c"   # dim
+_ACCENT      = "#00d4b8"   # electric teal — PRIMARY
+_ACCENT_DIM  = "#00a896"   # teal dimmed
+_ACCENT_HOV  = "#00b8a0"   # teal hover
+_PURPLE      = "#9d4edd"   # thinking purple
+_WARN        = "#f59e0b"   # amber — tools running
+_SUCCESS     = "#10b981"   # emerald — tools done
+_DANGER      = "#ef4444"   # red — error
 
 # Inline-code token color (kept for backtick spans)
 _CODE_GREEN  = "#7ee787"
@@ -196,8 +199,8 @@ def _render_md_table(match) -> str:
     )
     table_style = (
         f"border-collapse:collapse; width:100%; margin:2px 0; "
-        f"font-size:12px; font-family:'SF Mono','JetBrains Mono',monospace; "
-        f"background:{_INPUT_BG}; border:1px solid {_BORDER}; border-radius:6px;"
+        f"font-size:12px; font-family:'JetBrains Mono','Fira Code',monospace; "
+        f"background:{_SURFACE_2}; border:1px solid {_BORDER}; border-radius:6px;"
     )
 
     rows_html = []
@@ -245,7 +248,7 @@ def _md_to_html(text: str) -> str:
             '<span style="color:#27c93f;font-size:10px;margin-left:5px;">&#9679;</span>'
         )
         lang_badge = (
-            f'<span style="color:{_SYN_CMT};font-family:\'SF Mono\',monospace;'
+            f'<span style="color:{_SYN_CMT};font-family:\'JetBrains Mono\',monospace;'
             f'font-size:9px;letter-spacing:0.08em;">{lang.upper()}</span>'
             if lang else ""
         )
@@ -265,7 +268,7 @@ def _md_to_html(text: str) -> str:
             f'{chrome}'
             f'<div style="padding:16px 18px;border-radius:0 0 14px 14px;">'
             f'<pre style="margin:0;padding:0;background:transparent;border:none;'
-            f'font-family:\'JetBrains Mono\',\'Fira Code\',\'SF Mono\',monospace;'
+            f'font-family:\'JetBrains Mono\',\'Fira Code\',monospace;'
             f'font-size:12.5px;line-height:1.6;color:{_SYN_TEXT};'
             f'white-space:pre-wrap;">{highlighted}</pre>'
             f'</div>'
@@ -299,7 +302,7 @@ def _md_to_html(text: str) -> str:
         r"(?m)^- (.+)$",
         lambda m: (
             f'<div style="padding-left:10px; color:{_TEXT}; line-height:1.6; margin:0;">'
-            f'<span style="color:{_TEXT_3}; margin-right:5px;">·</span>{m.group(1)}</div>'
+            f'<span style="color:#7a8899; margin-right:5px;">·</span>{m.group(1)}</div>'
         ),
         safe,
     )
@@ -309,7 +312,7 @@ def _md_to_html(text: str) -> str:
         r"(?m)^(\d+)\. (.+)$",
         lambda m: (
             f'<div style="padding-left:10px; color:{_TEXT}; line-height:1.6; margin:0;">'
-            f'<span style="color:{_TEXT_3}; margin-right:5px;">{m.group(1)}.</span>{m.group(2)}</div>'
+            f'<span style="color:#7a8899; margin-right:5px;">{m.group(1)}.</span>{m.group(2)}</div>'
         ),
         safe,
     )
@@ -317,7 +320,8 @@ def _md_to_html(text: str) -> str:
     safe = re.sub(
         r"`([^`]+)`",
         lambda m: (
-            f'<code style="background:{_SURFACE}; color:{_CODE_GREEN}; '
+            f'<code style="background:#0d1018; color:#00d4b8; '
+            f'border:1px solid #1a1f2e; '
             f'border-radius:3px; padding:1px 4px; font-family:monospace; '
             f'font-size:12px;">{m.group(1)}</code>'
         ),
@@ -337,7 +341,8 @@ def _md_to_html(text: str) -> str:
 
     # Wrap in prose container for consistent line-height and font
     return (
-        f'<div style="line-height:1.6; font-size:13px; color:{_TEXT};">'
+        f'<div style="line-height:1.65; font-size:13px; color:#cdd6e0;'
+        f" font-family:'JetBrains Mono','Fira Code',monospace;\">"
         f'{safe}</div>'
     )
 
@@ -365,7 +370,8 @@ def _md_inline(text: str) -> str:
     safe = re.sub(
         r"`([^`]+)`",
         lambda m: (
-            f'<code style="background:{_SURFACE}; color:{_CODE_GREEN}; '
+            f'<code style="background:#0d1018; color:#00d4b8; '
+            f'border:1px solid #1a1f2e; '
             f'border-radius:3px; padding:1px 4px; font-family:monospace; '
             f'font-size:12px;">{m.group(1)}</code>'
         ),
@@ -419,12 +425,12 @@ class MessageBubble(QFrame):
             border_color  = _BORDER_SOFT
             border_radius = "4px"
         elif self.is_user:
-            bg_color      = _ACCENT
-            text_color    = _CANVAS
-            border_color  = _ACCENT
+            bg_color      = "#0d1523"
+            text_color    = "#cdd6e0"
+            border_color  = "#1e3a5f"
             border_radius = "12px"
         else:
-            bg_color      = _INPUT_BG
+            bg_color      = _SURFACE
             text_color    = _TEXT
             border_color  = _BORDER
             border_radius = "4px"
@@ -454,14 +460,14 @@ class MessageBubble(QFrame):
         )
         self.text_label.setOpenExternalLinks(True)
 
-        font = QFont("Inter", 13)
-        font.setStyleHint(QFont.SansSerif)
+        font = QFont("JetBrains Mono", 13)
+        font.setStyleHint(QFont.Monospace)
         self.text_label.setFont(font)
         self.text_label.setStyleSheet(f"""
             color: {text_color};
             background: transparent;
             border: none;
-            font-family: 'Inter', 'Segoe UI', -apple-system, sans-serif;
+            font-family: 'JetBrains Mono', 'Fira Code', monospace;
         """)
 
         layout.addWidget(self.text_label)
@@ -546,7 +552,8 @@ class MessageBubble(QFrame):
             chunk = re.sub(
                 r"`([^`]+)`",
                 lambda m: (
-                    f'<code style="background:{_SURFACE}; color:{_CODE_GREEN}; '
+                    f'<code style="background:#0d1018; color:#00d4b8; '
+                    f'border:1px solid #1a1f2e; '
                     f'border-radius:4px; padding:1px 5px; font-family:monospace; '
                     f'font-size:12px;letter-spacing:-0.01em;">{m.group(1)}</code>'
                 ),

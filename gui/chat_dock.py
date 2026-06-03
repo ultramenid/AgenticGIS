@@ -30,20 +30,22 @@ from .stats_widget import StatsWidget
 from .typing_indicator import TypingIndicator
 from .ask_user_card import AskUserCard
 
-# ── Design Tokens (monochrome minimal palette) ─────────────────────────────
-_SURFACE     = "#161616"
-_CANVAS      = "#0a0a0a"
-_INPUT_BG    = "#1e1e1e"
-_BORDER      = "#2e2e2e"
-_BORDER_SOFT = "#242424"
-_TEXT        = "#ececec"
-_TEXT_2      = "#a0a0a0"
-_TEXT_3      = "#707070"
-_ACCENT      = "#e0e0e0"
-_ACCENT_HOV  = "#c8c8c8"
-_DANGER      = "#ef4444"
-_SUCCESS     = "#22c55e"
-_WARN        = "#f0a500"
+# ── Design Tokens (Neural Terminal palette) ────────────────────────────────
+_CANVAS      = "#060810"   # deep navy-black
+_SURFACE     = "#0a0d14"   # card surface
+_SURFACE_2   = "#0d1018"   # slightly elevated
+_BORDER      = "#1a1f2e"   # cool dark border
+_BORDER_SOFT = "#131722"   # very subtle
+_TEXT        = "#cdd6e0"   # cool light
+_TEXT_2      = "#7a8899"   # mid cool gray
+_TEXT_3      = "#3d4a5c"   # dim
+_ACCENT      = "#00d4b8"   # electric teal — PRIMARY
+_ACCENT_DIM  = "#00a896"   # teal dimmed
+_ACCENT_HOV  = "#00b8a0"   # teal hover
+_PURPLE      = "#9d4edd"   # thinking purple
+_WARN        = "#f59e0b"   # amber — tools running
+_SUCCESS     = "#10b981"   # emerald — tools done
+_DANGER      = "#ef4444"   # red — error
 
 
 class ChatWorker(QThread):
@@ -117,13 +119,13 @@ class ChatDock(QgsDockWidget):
     def _build_ui(self):
         self.setStyleSheet(f"""
             QgsDockWidget {{
-                background-color: {_SURFACE};
+                background-color: {_CANVAS};
                 border: none;
             }}
         """)
 
         container = QWidget()
-        container.setStyleSheet(f"background-color: {_SURFACE};")
+        container.setStyleSheet(f"background-color: {_CANVAS};")
         layout = QVBoxLayout(container)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
@@ -135,8 +137,8 @@ class ChatDock(QgsDockWidget):
 
         brand = QLabel("AgenticGIS")
         brand.setStyleSheet(f"""
-            color: {_TEXT};
-            font-family: 'Inter', 'Segoe UI', -apple-system, sans-serif;
+            color: {_TEXT_2};
+            font-family: 'JetBrains Mono', 'Fira Code', monospace;
             font-size: 13px;
             font-weight: 600;
             letter-spacing: -0.01em;
@@ -168,7 +170,7 @@ class ChatDock(QgsDockWidget):
                     color: {_TEXT_3};
                 }}
                 QPushButton:hover {{
-                    background-color: {_INPUT_BG};
+                    background-color: {_SURFACE_2};
                     color: {_TEXT};
                 }}
             """)
@@ -194,7 +196,7 @@ class ChatDock(QgsDockWidget):
         self.scroll.setStyleSheet(f"""
             QScrollArea {{
                 border: none;
-                background-color: {_SURFACE};
+                background-color: {_CANVAS};
             }}
             QScrollBar:vertical {{
                 background: transparent;
@@ -215,7 +217,7 @@ class ChatDock(QgsDockWidget):
         """)
 
         self.transcript_widget = QWidget()
-        self.transcript_widget.setStyleSheet(f"background-color: {_SURFACE};")
+        self.transcript_widget.setStyleSheet(f"background-color: {_CANVAS};")
         self.transcript_layout = QVBoxLayout(self.transcript_widget)
         self.transcript_layout.setContentsMargins(0, 16, 0, 16)
         self.transcript_layout.setSpacing(18)
@@ -237,7 +239,7 @@ class ChatDock(QgsDockWidget):
 
         # -- Input bar --------------------------------------------------- #
         input_wrap = QWidget()
-        input_wrap.setStyleSheet(f"background-color: {_SURFACE};")
+        input_wrap.setStyleSheet(f"background-color: {_CANVAS};")
         input_bar = QVBoxLayout(input_wrap)
         input_bar.setContentsMargins(16, 10, 16, 14)
         input_bar.setSpacing(6)
@@ -249,8 +251,8 @@ class ChatDock(QgsDockWidget):
         self._model_chip = QLabel(self._get_model_name())
         self._model_chip.setStyleSheet(f"""
             color: {_TEXT_3};
-            font-family: 'SF Mono', 'Consolas', 'Courier New', monospace;
-            font-size: 9px;
+            font-family: 'JetBrains Mono', 'Fira Code', monospace;
+            font-size: 10px;
             background: transparent;
             padding: 0;
         """)
@@ -263,7 +265,7 @@ class ChatDock(QgsDockWidget):
         input_frame.setFixedHeight(38)
         input_frame.setStyleSheet(f"""
             QFrame {{
-                background-color: {_INPUT_BG};
+                background-color: {_SURFACE};
                 border: 1px solid {_BORDER};
                 border-radius: 6px;
             }}
@@ -276,17 +278,19 @@ class ChatDock(QgsDockWidget):
         self.input.setPlaceholderText("Message AgenticGIS…")
         self.input.setFixedHeight(36)
         self.input.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        mono_font = QFont("Consolas")
+        mono_font = QFont("JetBrains Mono")
         mono_font.setStyleHint(QFont.Monospace)
-        mono_font.setPointSize(11)
+        mono_font.setPointSize(10)
         self.input.setFont(mono_font)
         self.input.setStyleSheet(f"""
             QPlainTextEdit {{
+                font-family: 'JetBrains Mono', 'Fira Code', monospace;
+                font-size: 13px;
                 border: none;
                 background: transparent;
                 color: {_TEXT};
                 padding: 0px;
-                selection-background-color: #3a3a3a;
+                selection-background-color: {_BORDER};
             }}
         """)
         field_row.addWidget(self.input, 1)
@@ -299,10 +303,10 @@ class ChatDock(QgsDockWidget):
             QPushButton {{
                 font-size: 14px; font-weight: 600;
                 border: none; border-radius: 4px;
-                background: transparent; color: {_TEXT_2};
+                background: transparent; color: {_ACCENT};
             }}
-            QPushButton:hover {{ background-color: {_BORDER}; color: {_TEXT}; }}
-            QPushButton:pressed {{ color: {_TEXT_3}; }}
+            QPushButton:hover {{ background-color: {_BORDER}; color: {_ACCENT_HOV}; }}
+            QPushButton:pressed {{ color: {_ACCENT_DIM}; }}
             QPushButton:disabled {{ color: {_TEXT_3}; }}
         """)
         self.send_btn.clicked.connect(self._on_send)
@@ -461,7 +465,7 @@ class ChatDock(QgsDockWidget):
         if not hasattr(self, "_ask_user_container") or self._ask_user_container is None:
             from qgis.PyQt.QtWidgets import QWidget as _QW
             self._ask_user_container = _QW()
-            self._ask_user_container.setStyleSheet(f"background-color: {_SURFACE};")
+            self._ask_user_container.setStyleSheet(f"background-color: {_CANVAS};")
             self.widget().layout().addWidget(self._ask_user_container)
         from qgis.PyQt.QtWidgets import QVBoxLayout as _QV
         if self._ask_user_container.layout() is None:

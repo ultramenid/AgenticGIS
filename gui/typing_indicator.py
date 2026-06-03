@@ -8,13 +8,14 @@ from qgis.PyQt.QtGui import QFont
 from qgis.PyQt.QtWidgets import QHBoxLayout, QLabel, QSizePolicy, QWidget
 
 # Design tokens (must match chat_dock.py)
-_INPUT_BG = "#1e1e1e"
-_BORDER   = "#2e2e2e"
-_TEXT     = "#ececec"
-_TEXT_3   = "#707070"
+_INPUT_BG = "#0a0d14"
+_BORDER   = "#1a1f2e"
+_TEXT     = "#cdd6e0"
+_TEXT_3   = "#3d4a5c"
+_ACCENT   = "#00d4b8"
 
 # Blink states: visible cursor vs blank
-_CURSOR_ON  = "_"
+_CURSOR_ON  = "▋"
 _CURSOR_OFF = " "
 
 
@@ -43,7 +44,7 @@ class TypingIndicator(QWidget):
             QWidget#typingBubble {{
                 background-color: {_INPUT_BG};
                 border: 1px solid {_BORDER};
-                border-radius: 12px;
+                border-radius: 4px;
             }}
         """)
         bubble.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
@@ -55,7 +56,7 @@ class TypingIndicator(QWidget):
         # Prefix label — primary text color
         self.prefix_label = QLabel(self.base_text)
         font = QFont()
-        font.setFamily("Inter")
+        font.setFamily("JetBrains Mono")
         font.setPointSize(13)
         font.setStyleHint(QFont.SansSerif)
         self.prefix_label.setFont(font)
@@ -63,23 +64,23 @@ class TypingIndicator(QWidget):
             color: {_TEXT};
             background: transparent;
             border: none;
-            font-family: 'Inter', 'Segoe UI', -apple-system, sans-serif;
+            font-family: 'JetBrains Mono', 'Fira Code', monospace;
         """)
         layout.addWidget(self.prefix_label)
 
         # Blinking terminal cursor label — dim monospace
         self.cursor_label = QLabel(_CURSOR_ON)
         cursor_font = QFont()
-        cursor_font.setFamily("SF Mono")
+        cursor_font.setFamily("JetBrains Mono")
         cursor_font.setStyleHint(QFont.Monospace)
         cursor_font.setPointSize(13)
         self.cursor_label.setFont(cursor_font)
         self.cursor_label.setMinimumWidth(12)
         self.cursor_label.setStyleSheet(f"""
-            color: {_TEXT_3};
+            color: {_ACCENT};
             background: transparent;
             border: none;
-            font-family: 'SF Mono', 'Consolas', 'Menlo', monospace;
+            font-family: 'JetBrains Mono', 'Fira Code', monospace;
         """)
         layout.addWidget(self.cursor_label)
         layout.addStretch(1)

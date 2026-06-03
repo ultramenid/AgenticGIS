@@ -21,17 +21,22 @@ from qgis.PyQt.QtWidgets import (
 
 from .message_bubble import _md_to_html
 
-# Design tokens — darker, softer
-_SURFACE     = "#161616"
-_INPUT_BG    = "#1e1e1e"
-_BORDER      = "#2e2e2e"
-_BORDER_SOFT = "#242424"
-_TEXT        = "#ececec"
-_TEXT_2      = "#a0a0a0"
-_TEXT_3      = "#707070"
-_DANGER      = "#ef4444"
-_SUCCESS     = "#22c55e"
-_WARN        = "#f0a500"
+# Design tokens — Neural Terminal palette
+_CANVAS      = "#060810"   # deep navy-black
+_SURFACE     = "#0a0d14"   # card surface
+_SURFACE_2   = "#0d1018"   # slightly elevated
+_BORDER      = "#1a1f2e"   # cool dark border
+_BORDER_SOFT = "#131722"   # very subtle
+_TEXT        = "#cdd6e0"   # cool light
+_TEXT_2      = "#7a8899"   # mid cool gray
+_TEXT_3      = "#3d4a5c"   # dim
+_ACCENT      = "#00d4b8"   # electric teal — PRIMARY
+_ACCENT_DIM  = "#00a896"   # teal dimmed
+_ACCENT_HOV  = "#00b8a0"   # teal hover
+_PURPLE      = "#9d4edd"   # thinking purple
+_WARN        = "#f59e0b"   # amber — tools running
+_SUCCESS     = "#10b981"   # emerald — tools done
+_DANGER      = "#ef4444"   # red — error
 _CODE_GREEN  = "#7ee787"
 
 _DOTS = [".", "..", "..."]
@@ -49,7 +54,12 @@ class ThinkingBlock(QWidget):
         self._start_time = time.monotonic()
 
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
-        self.setStyleSheet("background: transparent;")
+        self.setStyleSheet(
+            f"background: #0d0818;"
+            f" border: 1px solid #2d1a4e;"
+            f" border-left: 2px solid #9d4edd;"
+            f" border-radius: 4px;"
+        )
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
@@ -63,21 +73,21 @@ class ThinkingBlock(QWidget):
         hbox.setContentsMargins(12, 4, 12, 4)
         hbox.setSpacing(6)
 
-        mono = QFont("SF Mono", 10)
+        mono = QFont("JetBrains Mono", 10)
         mono.setStyleHint(QFont.Monospace)
         mono.setItalic(True)
 
         self._summary_lbl = QLabel("▸ thinking")
         self._summary_lbl.setFont(mono)
         self._summary_lbl.setStyleSheet(
-            f"color:{_TEXT_3}; font-size:11px; font-style:italic;"
+            "color:#6d3d9e; font-size:11px; font-style:italic;"
         )
         hbox.addWidget(self._summary_lbl)
 
         self._dots_lbl = QLabel(".")
         self._dots_lbl.setFont(mono)
         self._dots_lbl.setStyleSheet(
-            f"color:{_TEXT_3}; font-size:11px; font-style:italic; min-width:18px;"
+            "color:#9d4edd; font-size:11px; font-style:italic; min-width:18px;"
         )
         hbox.addWidget(self._dots_lbl)
         hbox.addStretch()
@@ -91,14 +101,14 @@ class ThinkingBlock(QWidget):
         cl.setContentsMargins(12, 2, 12, 6)
         cl.setSpacing(0)
 
-        mono_content = QFont("SF Mono", 10)
+        mono_content = QFont("JetBrains Mono", 10)
         mono_content.setStyleHint(QFont.Monospace)
         mono_content.setItalic(True)
 
         self._text_lbl = QLabel("")
         self._text_lbl.setFont(mono_content)
         self._text_lbl.setStyleSheet(
-            f"color:{_TEXT_3}; font-size:11px; font-style:italic; background:transparent;"
+            "color:#9d4edd; font-size:11px; font-style:italic; font-family:'JetBrains Mono',monospace; background:transparent;"
         )
         self._text_lbl.setWordWrap(True)
         self._text_lbl.setMinimumWidth(0)
@@ -135,6 +145,9 @@ class ThinkingBlock(QWidget):
         else:
             summary = "▸ Thought"
         self._summary_lbl.setText(summary)
+        self._summary_lbl.setStyleSheet(
+            "color:#6d3d9e; font-size:11px; font-style:italic;"
+        )
         self.updateGeometry()
 
     def set_thinking_text(self, text: str) -> None:
@@ -204,18 +217,20 @@ class ToolRowWidget(QWidget):
         hbox.setContentsMargins(12, 4, 12, 4)
         hbox.setSpacing(8)
 
-        mono = QFont("SF Mono", 9)
+        mono = QFont("JetBrains Mono", 9)
         mono.setStyleHint(QFont.Monospace)
 
         name_lbl = QLabel(_html.escape(tool_name) + "()")
         name_lbl.setFont(mono)
-        name_lbl.setStyleSheet(f"color:{_TEXT_2};")
+        name_lbl.setStyleSheet(
+            "color:#00d4b8; font-size:11px; font-family:'JetBrains Mono',monospace;"
+        )
         hbox.addWidget(name_lbl)
         hbox.addStretch()
 
         self.state_lbl = QLabel("running...")
         self.state_lbl.setStyleSheet(
-            f"color:{_WARN}; font-size:10px; letter-spacing:0.03em;"
+            f"color:{_WARN}; font-size:11px; font-family:'JetBrains Mono',monospace; letter-spacing:0.03em;"
         )
         hbox.addWidget(self.state_lbl)
 
@@ -241,7 +256,7 @@ class ToolRowWidget(QWidget):
 
         mono_ss = (
             f"background:{_SURFACE}; color:{_TEXT_2}; border-radius:4px;"
-            f" padding:8px; font-family:'SF Mono',monospace; font-size:9.5px;"
+            f" padding:8px; font-family:'JetBrains Mono',monospace; font-size:9.5px;"
             f" line-height:1.4;"
         )
 
@@ -302,13 +317,13 @@ class ToolRowWidget(QWidget):
                 self._set_card_style(_DANGER)
                 self.state_lbl.setText("error")
                 self.state_lbl.setStyleSheet(
-                    f"color:{_DANGER}; font-size:10px; letter-spacing:0.03em;"
+                    f"color:{_DANGER}; font-size:11px; font-family:'JetBrains Mono',monospace; letter-spacing:0.03em;"
                 )
             else:
                 self._set_card_style(_SUCCESS)
                 self.state_lbl.setText(f"done ({elapsed_ms}ms)")
                 self.state_lbl.setStyleSheet(
-                    f"color:{_SUCCESS}; font-size:10px; letter-spacing:0.03em;"
+                    f"color:{_SUCCESS}; font-size:11px; font-family:'JetBrains Mono',monospace; letter-spacing:0.03em;"
                 )
             truncated = result_str[:600] + ("…" if len(result_str) > 600 else "")
             self.result_lbl.setText(_html.escape(truncated))
@@ -326,7 +341,7 @@ class ToolRowWidget(QWidget):
     def _set_card_style(self, accent_color: str) -> None:
         self._card.setStyleSheet(f"""
             QFrame {{
-                background: {_INPUT_BG};
+                background: {_SURFACE};
                 border: none;
                 border-left: 2px solid {accent_color};
                 border-radius: 4px;
@@ -377,9 +392,10 @@ class AgentTurnBubble(QFrame):
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         self.setStyleSheet(f"""
             AgentTurnBubble {{
-                background: {_INPUT_BG};
+                background: {_SURFACE};
                 border: 1px solid {_BORDER};
-                border-radius: 4px;
+                border-left: 2px solid {_ACCENT};
+                border-radius: 0px;
             }}
         """)
 
@@ -393,7 +409,7 @@ class AgentTurnBubble(QFrame):
         self.tools_frame.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         self.tools_frame.setStyleSheet(f"""
             QFrame {{
-                background: {_SURFACE};
+                background: {_SURFACE_2};
                 border:none;
                 border-bottom: 1px solid {_BORDER_SOFT};
             }}
@@ -426,11 +442,12 @@ class AgentTurnBubble(QFrame):
 
         # ── Tool summary label (shown above text after tools complete) ────
         self._tool_summary_lbl = QLabel("")
-        mono_font = QFont("SF Mono", 9)
+        mono_font = QFont("JetBrains Mono", 9)
         mono_font.setStyleHint(QFont.Monospace)
         self._tool_summary_lbl.setFont(mono_font)
         self._tool_summary_lbl.setStyleSheet(
-            f"color:{_TEXT_3}; font-size:10px; background:transparent; border:none;"
+            f"color:{_TEXT_3}; font-size:10px; font-family:'JetBrains Mono',monospace;"
+            f" background:{_SURFACE_2}; border: 1px solid {_BORDER}; border-radius:3px;"
         )
         self._tool_summary_lbl.setContentsMargins(12, 4, 12, 0)
         self._tool_summary_lbl.setVisible(False)
@@ -446,12 +463,12 @@ class AgentTurnBubble(QFrame):
             Qt.TextBrowserInteraction | Qt.TextSelectableByMouse
         )
         self.text_lbl.setOpenExternalLinks(True)
-        font = QFont("Inter", 13)
-        font.setStyleHint(QFont.SansSerif)
+        font = QFont("JetBrains Mono", 12)
+        font.setStyleHint(QFont.Monospace)
         self.text_lbl.setFont(font)
         self.text_lbl.setStyleSheet(f"""
             color:{_TEXT}; background:transparent; border:none;
-            font-family:'Inter','Segoe UI',sans-serif;
+            font-family:'JetBrains Mono',monospace;
         """)
         self.text_lbl.setContentsMargins(12, 6, 12, 0)
         self._outer.addWidget(self.text_lbl)
@@ -592,7 +609,7 @@ class AgentTurnBubble(QFrame):
             r"(?m)^- (.+)$",
             lambda m: (
                 f'<div style="padding-left:10px; color:{_TEXT}; line-height:1.6; margin:0;">'
-                f'<span style="color:{_TEXT_3};margin-right:5px;">·</span>'
+                f'<span style="color:{_ACCENT_DIM};margin-right:5px;">·</span>'
                 f'{m.group(1)}</div>'
             ),
             delta,
@@ -600,8 +617,8 @@ class AgentTurnBubble(QFrame):
         delta = re.sub(
             r"`([^`]+)`",
             lambda m: (
-                f'<code style="background:{_SURFACE};color:{_CODE_GREEN};'
-                f'border-radius:3px;padding:1px 4px;font-family:monospace;'
+                f'<code style="background:{_SURFACE_2};color:{_CODE_GREEN};'
+                f'border-radius:3px;padding:1px 4px;font-family:\'JetBrains Mono\',monospace;'
                 f'font-size:12px;">{m.group(1)}</code>'
             ),
             delta,
@@ -611,7 +628,7 @@ class AgentTurnBubble(QFrame):
         delta = delta.replace("\n", "<br>")
         self._stream_html += delta
         # Minimal cursor — thin bar
-        cursor = f'<span style="color:{_TEXT_3};font-weight:300;">|</span>'
+        cursor = f'<span style="color:{_ACCENT_DIM};font-weight:300;">|</span>'
         self.text_lbl.setText(self._stream_html + cursor)
 
     def finalize_text(self, text: str) -> None:
@@ -637,6 +654,15 @@ class AgentTurnBubble(QFrame):
         self._stream_text = text
         self._stream_html = _md_to_html(text) if text else ""
         self.text_lbl.setText(self._stream_html)
+        # Dim the left-border accent now that the turn is complete
+        self.setStyleSheet(f"""
+            AgentTurnBubble {{
+                background: {_SURFACE};
+                border: 1px solid {_BORDER};
+                border-left: 2px solid {_BORDER};
+                border-radius: 0px;
+            }}
+        """)
 
     def has_content(self) -> bool:
         return (

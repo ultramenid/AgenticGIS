@@ -16,15 +16,16 @@ from qgis.PyQt.QtWidgets import (
 )
 
 # Design tokens (must match agent_turn_bubble.py)
-_SURFACE     = "#161616"
-_INPUT_BG    = "#1e1e1e"
-_BORDER      = "#2e2e2e"
-_TEXT        = "#ececec"
-_TEXT_2      = "#a0a0a0"
-_TEXT_3      = "#707070"
+_SURFACE     = "#0a0d14"
+_INPUT_BG    = "#0d1018"
+_BORDER      = "#1a1f2e"
+_TEXT        = "#cdd6e0"
+_TEXT_2      = "#7a8899"
+_TEXT_3      = "#3d4a5c"
 _DANGER      = "#ef4444"
-_SUCCESS     = "#22c55e"
-_WARN        = "#f0a500"
+_SUCCESS     = "#10b981"
+_WARN        = "#f59e0b"
+_ACCENT      = "#00d4b8"
 
 
 class ToolResultWidget(QFrame):
@@ -74,14 +75,14 @@ class ToolResultWidget(QFrame):
         # Tool name — shown as "tool_name()" in monospace
         display_name = html.escape(self.tool_name) + "()"
         name_label = QLabel(display_name)
-        mono_font = QFont("SF Mono")
+        mono_font = QFont("JetBrains Mono")
         mono_font.setStyleHint(QFont.Monospace)
         mono_font.setPointSize(10)
         name_label.setFont(mono_font)
         name_label.setStyleSheet(f"""
-            color: {_TEXT_2};
+            color: {_ACCENT};
             background: transparent;
-            font-family: 'SF Mono', 'Consolas', 'Courier New', monospace;
+            font-family: 'JetBrains Mono', 'Fira Code', monospace;
             font-size: 11px;
         """)
         header.addWidget(name_label)
@@ -126,7 +127,7 @@ class ToolResultWidget(QFrame):
                 color: {_TEXT_2};
                 border-radius: 4px;
                 padding: 8px;
-                font-family: 'SF Mono', 'Consolas', 'Courier New', monospace;
+                font-family: 'JetBrains Mono', 'Fira Code', monospace;
                 font-size: 10px;
             """)
             input_display.setTextFormat(Qt.RichText)
@@ -184,7 +185,7 @@ class ToolResultWidget(QFrame):
             color: {_TEXT_2};
             border-radius: 4px;
             padding: 8px;
-            font-family: 'SF Mono', 'Consolas', 'Courier New', monospace;
+            font-family: 'JetBrains Mono', 'Fira Code', monospace;
             font-size: 10px;
         """)
         result_display.setTextFormat(Qt.RichText)
