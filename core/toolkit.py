@@ -75,7 +75,8 @@ def _layer_brief(layer):
             "valid": layer.isValid(),
         }
     except RuntimeError:
-        return {"id": "?", "name": "?", "valid": False, "error": "layer no longer available"}
+        return {"ok": False, "id": "?", "name": "?", "valid": False,
+                "error": "layer no longer available"}
 
     if isinstance(layer, QgsVectorLayer):
         try:
@@ -108,6 +109,9 @@ class QgisToolkit:
         self.config = config
         self._alg_cache = None  # caches full algorithm list
         self._cancel = _CancellationRegistry()
+        self._ask_emitter = None
+        self._ask_user_lock = threading.Lock()
+        self._ask_user_pending = None
         self._ns_template = None  # F10: cached exec namespace
         # F17: dirty flag — set when a tool may have mutated project state.
         self._canvas_dirty = False
@@ -119,6 +123,76 @@ class QgisToolkit:
             QgsApplication.pluginsChanged.connect(self._invalidate_alg_cache)
         except Exception:
             pass
+
+    # ------------------------------------------------------------------ #
+    # Clarifying-question flow (ask_user tool)                            #
+    # ------------------------------------------------------------------ #
+    def set_ask_user_emitter(self, emitter):
+        """Register a callback that asks the user a clarifying question.
+
+        The emitter signature is ``emitter(question, options, allow_free_text)``.
+        It is expected to be non-blocking; it fires ``self._resolve_ask_user(payload)``
+        from the main thread when the user replies (or the dock is cleared).
+        """
+        self._ask_emitter = emitter
+
+    def ask_user(self, question, options, allow_free_text=True):
+        """Toolkit implementation of the ``ask_user`` tool.
+
+        Returns a dict ``{"choice": str|None, "free_text": str|None, "cancelled": bool}``.
+        Returns a plain string error for bad inputs so the agent loop can surface it.
+        """
+        # Validate options
+        if not isinstance(options, (list, tuple)):
+            return "ask_user: options must be a list of objects with a 'label' field"
+        if len(options) < 2 or len(options) > 4:
+            return f"ask_user: options must have 2-4 items, got {len(options)}"
+        for i, opt in enumerate(options):
+            if not isinstance(opt, dict) or not opt.get("label"):
+                return f"ask_user: options[{i}] must be an object with a non-empty 'label'"
+
+        if not isinstance(question, str) or not question.strip():
+            return "ask_user: question must be a non-empty string"
+
+        # Recursive guard: only one ask_user at a time
+        with self._ask_user_lock:
+            if self._ask_user_pending is not None:
+                return "ask_user: already waiting for user input"
+
+            wait = threading.Event()
+            self._ask_user_pending = (wait, {"choice": None, "free_text": None, "cancelled": False})
+
+        try:
+            if self._ask_emitter is not None:
+                self._ask_emitter(question, list(options), bool(allow_free_text))
+
+            # Wait for the dock (or a test) to fire _resolve_ask_user.
+            wait_evt, _ = self._ask_user_pending
+            wait_evt.wait()
+        finally:
+            with self._ask_user_lock:
+                payload = (
+                    self._ask_user_pending[1]
+                    if self._ask_user_pending is not None
+                    else {"choice": None, "free_text": None, "cancelled": True}
+                )
+                self._ask_user_pending = None
+        return payload
+
+    def _resolve_ask_user(self, payload):
+        """Called by the dock (or a test) to unblock ask_user.
+
+        ``payload`` is a dict with keys ``choice``, ``free_text``, ``cancelled``.
+        Missing keys default to None / False.
+        """
+        with self._ask_user_lock:
+            if self._ask_user_pending is None:
+                return  # nothing to resolve (stale fire, e.g. after Clear)
+            wait_evt, slot = self._ask_user_pending
+            slot["choice"] = payload.get("choice")
+            slot["free_text"] = payload.get("free_text")
+            slot["cancelled"] = bool(payload.get("cancelled", False))
+            wait_evt.set()
 
     # ------------------------------------------------------------------ #
     # Cancellation helpers                                                #
@@ -291,6 +365,7 @@ class QgisToolkit:
             if _cancel_check():
                 result["ok"] = False
                 result["error"] = "run_pyqgis: cancelled by user"
+                result["cancelled"] = True
             elif "result" in ns:
                 result["result"] = repr(ns["result"])
         except KeyboardInterrupt:
@@ -321,6 +396,7 @@ class QgisToolkit:
         active = self.iface.activeLayer()
         extent = canvas.extent()
         return {
+            "ok": True,
             "project_path": project.fileName() or None,
             "title": project.title() or None,
             "crs": project.crs().authid() if project.crs().isValid() else None,
@@ -344,6 +420,7 @@ class QgisToolkit:
         if limit is None and not offset:
             return result
         return {
+            "ok": True,
             "total": total,
             "limit": limit,
             "offset": start,
@@ -353,10 +430,11 @@ class QgisToolkit:
     def get_layer_fields(self, layer_id):
         layer = QgsProject.instance().mapLayer(layer_id)
         if layer is None:
-            return {"error": f"No layer with id {layer_id!r}"}
+            return {"ok": False, "error": f"No layer with id {layer_id!r}"}
         if not isinstance(layer, QgsVectorLayer):
-            return {"error": f"Layer {layer.name()!r} is not a vector layer"}
+            return {"ok": False, "error": f"Layer {layer.name()!r} is not a vector layer"}
         return {
+            "ok": True,
             "layer": layer.name(),
             "fields": [
                 {"name": f.name(), "type": f.typeName(), "length": f.length()}
@@ -367,7 +445,7 @@ class QgisToolkit:
     def get_layer_summary(self, layer_id):
         layer = QgsProject.instance().mapLayer(layer_id)
         if layer is None:
-            return {"error": f"No layer with id {layer_id!r}"}
+            return {"ok": False, "error": f"No layer with id {layer_id!r}"}
         summary = _layer_brief(layer)
         summary["source"] = layer.publicSource()
         if isinstance(layer, QgsVectorLayer):
@@ -383,8 +461,9 @@ class QgisToolkit:
         try:
             from qgis.utils import active_plugins, available_plugins, plugins
         except Exception:
-            return {"error": "qgis.utils not available"}
+            return {"ok": False, "error": "qgis.utils not available"}
         return {
+            "ok": True,
             "active": sorted(active_plugins),
             "available": sorted(available_plugins),
             "loaded": sorted(plugins.keys()),
@@ -403,7 +482,7 @@ class QgisToolkit:
         needle = (filter_text or "").lower()
         if needle:
             algs = [a for a in algs if needle in a["id"].lower() or needle in a["name"].lower()]
-        return {"count": len(algs), "algorithms": algs}
+        return {"ok": True, "count": len(algs), "algorithms": algs}
 
     def _invalidate_alg_cache(self):
         """Invalidate the processing algorithm cache (call after plugin changes)."""
@@ -429,6 +508,11 @@ class QgisToolkit:
             else:
                 output = processing.run(alg_id, dict(params or {}))
         except KeyboardInterrupt:
+            # If the user cancelled, surface the cancel flag; otherwise
+            # treat the interrupt as a generic error so the agent knows
+            # it isn't something it can retry.
+            if event is not None and event.is_set():
+                return {"ok": False, "error": "cancelled by user", "cancelled": True}
             return {"ok": False, "error": "interrupted by user"}
         except BaseException as exc:  # noqa: BLE001
             # F7: distinguish the cancel path from real errors so the agent
@@ -477,14 +561,14 @@ class QgisToolkit:
         """
         layer = QgsProject.instance().mapLayer(layer_id)
         if layer is None:
-            return {"error": f"No layer with id {layer_id!r}"}
+            return {"ok": False, "error": f"No layer with id {layer_id!r}"}
         if not isinstance(layer, QgsVectorLayer):
-            return {"error": f"Layer is not a vector layer"}
+            return {"ok": False, "error": f"Layer is not a vector layer"}
 
         data = []
         field_idx = layer.fields().indexFromName(field_name)
         if field_idx == -1:
-            return {"error": f"Field {field_name!r} not found"}
+            return {"ok": False, "error": f"Field {field_name!r} not found"}
 
         # F9: pull only the one field, no geometry — cuts allocation for big layers.
         from qgis.core import QgsFeatureRequest
@@ -498,7 +582,7 @@ class QgisToolkit:
             values = {}
             for feature in layer.getFeatures(req):
                 if owner and event is not None and event.is_set():
-                    return {"error": "cancelled by user", "cancelled": True}
+                    return {"ok": False, "error": "cancelled by user", "cancelled": True}
                 val = feature.attribute(field_idx)
                 if val not in values:
                     values[val] = 0
@@ -524,9 +608,9 @@ class QgisToolkit:
         """Calculate statistics for a vector layer or specific field."""
         layer = QgsProject.instance().mapLayer(layer_id)
         if layer is None:
-            return {"error": f"No layer with id {layer_id!r}"}
+            return {"ok": False, "error": f"No layer with id {layer_id!r}"}
         if not isinstance(layer, QgsVectorLayer):
-            return {"error": f"Layer is not a vector layer"}
+            return {"ok": False, "error": f"Layer is not a vector layer"}
 
         stats = {
             "layer_name": layer.name(),
@@ -539,7 +623,7 @@ class QgisToolkit:
         if field_name:
             field_idx = layer.fields().indexFromName(field_name)
             if field_idx == -1:
-                return {"error": f"Field {field_name!r} not found"}
+                return {"ok": False, "error": f"Field {field_name!r} not found"}
 
             # F9: only the requested attribute, no geometry; C++ summary for numerics.
             from qgis.core import QgsFeatureRequest, QgsStatisticalSummary
@@ -554,7 +638,7 @@ class QgisToolkit:
                 numeric_values = []
                 for feature in layer.getFeatures(req):
                     if owner and event is not None and event.is_set():
-                        return {"error": "cancelled by user", "cancelled": True}
+                        return {"ok": False, "error": "cancelled by user", "cancelled": True}
                     val = feature.attribute(field_idx)
                     values.append(val)
                     if isinstance(val, (int, float)):
