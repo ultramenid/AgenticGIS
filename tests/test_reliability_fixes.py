@@ -232,6 +232,42 @@ def test_openai_client_timeout_override():
     assert c.timeout == 10.0
 
 
+def test_openai_build_messages_preserves_tool_call_id():
+    """Regression: a tool result message round-tripped through _build_messages
+    must keep its tool_call_id. Strict providers (DeepSeek) reject the request
+    with 'Messages with role tool must be a response to a preceding message
+    with tool_calls' when the id is empty.
+    """
+    from backends.openai_http import OpenAIHttpClient
+
+    # Internal message shape — exactly what openai_backend.py appends
+    # after a tool dispatch.
+    internal = [
+        {"role": "user", "content": "do the thing"},
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": "call_abc123",
+                    "type": "function",
+                    "function": {"name": "run_pyqgis", "arguments": "{}"},
+                }
+            ],
+        },
+        OpenAIHttpClient.build_tool_result_message("call_abc123", "ok"),
+    ]
+    wire = OpenAIHttpClient._build_messages(system="sys", messages=internal)
+    tool_msgs = [m for m in wire if m.get("role") == "tool"]
+    assert len(tool_msgs) == 1
+    assert tool_msgs[0]["tool_call_id"] == "call_abc123"
+    # Sanity: the assistant message that precedes it still carries the
+    # matching tool_calls entry.
+    assistant_msgs = [m for m in wire if m.get("role") == "assistant"]
+    assert len(assistant_msgs) == 1
+    assert assistant_msgs[0]["tool_calls"][0]["id"] == "call_abc123"
+
+
 # =========================================================================
 # MCP server: socket timeout + session id plumbing
 # =========================================================================

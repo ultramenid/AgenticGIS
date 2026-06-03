@@ -200,10 +200,17 @@ class OpenAIHttpClient:
                     assistant_msg["tool_calls"] = tool_calls
                 out.append(assistant_msg)
             elif role == "tool":
-                tool_use_id = m.get("tool_use_id", "")
+                # Internal message format uses ``tool_use_id`` (matching
+                # Anthropic's shape — see build_tool_result_message). Read
+                # that key here, not ``tool_call_id``, otherwise the
+                # outgoing request carries ``tool_call_id=""`` and strict
+                # providers (DeepSeek, etc.) reject it with
+                # "Messages with role 'tool' must be a response to a
+                # preceding message with 'tool_calls'".
+                tool_call_id = m.get("tool_use_id", "")
                 out.append({
                     "role": "tool",
-                    "tool_call_id": tool_use_id,
+                    "tool_call_id": tool_call_id,
                     "content": content,
                 })
         return out
@@ -228,9 +235,19 @@ class OpenAIHttpClient:
 
     @staticmethod
     def build_tool_result_message(tool_use_id, content):
-        """Return a message dict for sending a tool result back to the model."""
+        """Return a message dict for sending a tool result back to the model.
+
+        The internal message format uses ``tool_use_id`` (matching
+        Anthropic's shape — see ``_build_messages``). Keeping one key
+        name across writers and readers means a tool result round-trips
+        intact; if the writer used ``tool_call_id`` and the reader used
+        ``tool_use_id`` the outgoing request would carry an empty id and
+        strict providers (DeepSeek, etc.) would reject it with
+        "Messages with role 'tool' must be a response to a preceding
+        message with 'tool_calls'".
+        """
         return {
             "role": "tool",
-            "tool_call_id": tool_use_id,
+            "tool_use_id": tool_use_id,
             "content": content if isinstance(content, str) else json.dumps(content, default=str),
         }
