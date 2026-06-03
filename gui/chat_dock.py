@@ -27,6 +27,7 @@ from .chart_widget import ChartWidget
 from .message_bubble import MessageContainer
 from .stats_widget import StatsWidget
 from .typing_indicator import TypingIndicator
+from .ask_user_card import AskUserCard
 
 # ── Design Tokens (dark-minimal palette) ─────────────────────────────
 _SURFACE     = "#131316"
@@ -70,12 +71,13 @@ class ChatWorker(QThread):
 
 
 class ChatDock(QgsDockWidget):
-    def __init__(self, get_backend, open_settings, request_cancel, parent=None):
+    def __init__(self, get_backend, open_settings, request_cancel, toolkit=None, parent=None):
         super().__init__("AgenticGIS", parent)
         self.setObjectName("AgenticGisDock")
         self._get_backend = get_backend
         self._open_settings = open_settings
         self._request_cancel = request_cancel
+        self._toolkit = toolkit
         self._history = []
         self._worker = None
         self._streaming = False
@@ -84,9 +86,15 @@ class ChatDock(QgsDockWidget):
         self._current_agent_turn = None   # AgentTurnBubble for the active turn
         self._current_tool_row = None      # ToolRowWidget awaiting its result
         self._current_text = ""            # accumulated streaming text
+        self._ask_user_card = None
+        self._ask_user_payload = None
         self._scroll_locked = False
         self._programmatic_scroll = False
         self._build_ui()
+        if self._toolkit is not None:
+            self._toolkit.set_ask_user_emitter(
+                self._ask_user_emitter
+            )
 
     # ------------------------------------------------------------------ #
     def _build_ui(self):
@@ -391,7 +399,67 @@ class ChatDock(QgsDockWidget):
             self._typing_widget = None
 
     # ------------------------------------------------------------------ #
+    def _ask_user_emitter(self, question, options, allow_free_text):
+        """Called by the toolkit on the main thread to surface a question."""
+        self._show_ask_user(question, options, allow_free_text)
+
+    def _show_ask_user(self, question, options, allow_free_text):
+        """Build and show the AskUserCard popover; record the pending slot."""
+        if self._ask_user_card is not None:
+            return
+        self._hide_typing()
+        self._ask_user_payload = None
+        card = AskUserCard(question, options, allow_free_text=allow_free_text, parent=self)
+        card.submitted.connect(self._resolve_ask_user)
+        if not hasattr(self, "_ask_user_container") or self._ask_user_container is None:
+            from qgis.PyQt.QtWidgets import QWidget as _QW
+            self._ask_user_container = _QW()
+            self._ask_user_container.setStyleSheet(f"background-color: {_SURFACE};")
+            self.widget().layout().addWidget(self._ask_user_container)
+        from qgis.PyQt.QtWidgets import QVBoxLayout as _QV
+        if self._ask_user_container.layout() is None:
+            self._ask_user_container.setLayout(_QV())
+            self._ask_user_container.layout().setContentsMargins(16, 0, 16, 8)
+        self._ask_user_container.layout().addWidget(card)
+        self._ask_user_card = card
+        self.status.setText(
+            f"<span style='color:{_TEXT_2};'>&#9679;</span> "
+            f"<span style='color:{_TEXT_3}; font-size:11px;'>Awaiting input</span>"
+        )
+
+    def _resolve_ask_user(self, payload):
+        """User picked an option or typed a reply; close the card and unblock."""
+        self._ask_user_payload = payload
+        if self._ask_user_card is not None:
+            self._ask_user_card.deleteLater()
+            self._ask_user_card = None
+        label = payload.get("choice")
+        text = payload.get("free_text")
+        if label:
+            self._add_user_message(f"\u2192 {label}")
+        elif text:
+            self._add_user_message(f"\u2192 {text}")
+        self.status.setText(
+            f"<span style='color:{_SUCCESS};'>&#9679;</span> "
+            f"<span style='color:{_TEXT_3}; font-size:11px;'>Ready</span>"
+        )
+        if self._toolkit is not None:
+            cancelled = bool(payload.get("cancelled", False))
+            self._toolkit._resolve_ask_user({
+                "choice": payload.get("choice"),
+                "free_text": payload.get("free_text"),
+                "cancelled": cancelled,
+            })
+
+    # ------------------------------------------------------------------ #
     def _clear(self):
+        if self._ask_user_card is not None:
+            if self._toolkit is not None:
+                self._toolkit._resolve_ask_user({
+                    "choice": None, "free_text": None, "cancelled": True,
+                })
+            self._ask_user_card.deleteLater()
+            self._ask_user_card = None
         self._history = []
         while self.transcript_layout.count() > 1:
             item = self.transcript_layout.takeAt(0)
@@ -461,6 +529,10 @@ class ChatDock(QgsDockWidget):
                     self._request_cancel()
                 except Exception:
                     pass
+            if self._ask_user_card is not None and self._toolkit is not None:
+                self._toolkit._resolve_ask_user({
+                    "choice": None, "free_text": None, "cancelled": True,
+                })
             self.status.setText(
                 f"<span style='color:{_DANGER};'>&#9679;</span> "
                 f"<span style='color:{_TEXT_3}; font-size:11px;'>Stopping</span>"
@@ -514,6 +586,13 @@ class ChatDock(QgsDockWidget):
                     f"<span style='color:{_TEXT_3}; font-size:11px;'>Cancelled</span>"
                 )
             self._maybe_scroll_to_bottom()
+
+        elif ev.type == EventType.ASK_USER:
+            self._show_ask_user(
+                ev.data.get("question", ""),
+                ev.data.get("options", []),
+                ev.data.get("allow_free_text", True),
+            )
 
         elif ev.type == EventType.VISUALIZATION:
             viz = ev.data.get("type")
