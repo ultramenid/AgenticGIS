@@ -13,6 +13,7 @@ from qgis.PyQt.QtGui import QFont
 from qgis.PyQt.QtWidgets import (
     QFrame,
     QHBoxLayout,
+    QApplication,
     QLabel,
     QLineEdit,
     QPushButton,
@@ -23,7 +24,7 @@ from qgis.PyQt.QtWidgets import (
 )
 
 from ..backends.base import AgentEvent, EventType
-from .agent_turn_bubble import AgentTurnBubble
+from .agent_turn_bubble import AgentTurnBubble, _SPINNER_FRAMES
 from .chart_widget import ChartWidget
 from .message_bubble import MessageContainer
 from .stats_widget import StatsWidget
@@ -110,13 +111,24 @@ class ChatDock(QgsDockWidget):
         self._current_agent_turn = None   # AgentTurnBubble for the active turn
         self._current_tool_row = None      # ToolRowWidget awaiting its result
         self._current_text = ""            # accumulated final-answer text
+        self._tool_progress_text = ""      # temporary visible text while a tool runs
+        self._showing_tool_progress = False
         self._thinking_text = ""           # accumulated thinking/progress text
         self._thinking_started = False     # whether add_thinking_block was called this turn
         self._ask_user_card = None
         self._ask_user_payload = None
         self._scroll_locked = False
         self._programmatic_scroll = False
+        self._status_phase = 0
+        self._status_text = "Ready"
+        self._status_color = _TEXT_3
+        self._status_icon = "✓"
+        self._status_spinning = False
         self._build_ui()
+        self._status_timer = QTimer(self)
+        self._status_timer.setInterval(120)
+        self._status_timer.timeout.connect(self._tick_status)
+        self._set_status("Ready", _SUCCESS, icon="✓")
         self._ask_user_signal.connect(self._show_ask_user, Qt.QueuedConnection)
         if self._toolkit is not None:
             self._toolkit.set_ask_user_emitter(
@@ -144,7 +156,7 @@ class ChatDock(QgsDockWidget):
         top.setSpacing(8)
 
         self.status = QLabel(
-            f"<span style='color:{_SUCCESS};font-size:8px;'>&#9632;</span> "
+            f"<span style='color:{_SUCCESS};font-size:11px;'>✓</span> "
             f"<span style='color:{_TEXT_3}; font-size:11px;'>Ready</span>"
         )
         self.status.setTextFormat(Qt.RichText)
@@ -448,6 +460,15 @@ class ChatDock(QgsDockWidget):
     def _add_stats(self, stats_data):
         self._add_widget(StatsWidget(stats_data))
 
+    def _add_compaction_notice(self):
+        w = QLabel("── history compacted ──")
+        w.setAlignment(Qt.AlignCenter)
+        w.setStyleSheet(
+            f"color:{_TEXT_4}; font-size:10px; font-family:'JetBrains Mono',monospace;"
+            f" padding:4px 0; background:transparent;"
+        )
+        self._add_widget(w)
+
     # -- Typing indicator ----------------------------------------------- #
     def _show_typing(self):
         if self._typing_widget is None:
@@ -459,6 +480,33 @@ class ChatDock(QgsDockWidget):
             self._typing_widget.stop()
             self._typing_widget.deleteLater()
             self._typing_widget = None
+
+    def _set_status(self, text: str, color: str = _TEXT_3, *, spinning: bool = False, icon: str = ""):
+        """Render top-left status with the same CLI spinner language as the turn."""
+        self._status_text = text or ""
+        self._status_color = color
+        self._status_icon = icon
+        self._status_spinning = spinning
+        if spinning:
+            if not self._status_timer.isActive():
+                self._status_timer.start()
+        else:
+            self._status_timer.stop()
+        self._render_status()
+
+    def _tick_status(self):
+        self._status_phase = (self._status_phase + 1) % len(_SPINNER_FRAMES)
+        self._render_status()
+
+    def _render_status(self):
+        if self._status_spinning:
+            mark = _SPINNER_FRAMES[self._status_phase]
+        else:
+            mark = self._status_icon or "·"
+        self.status.setText(
+            f"<span style='color:{self._status_color};font-size:11px;'>{html.escape(mark)}</span> "
+            f"<span style='color:{_TEXT_3}; font-size:11px;'>{html.escape(self._status_text)}</span>"
+        )
 
     # ------------------------------------------------------------------ #
     def _emit_ask_user_threadsafe(self, question, options, allow_free_text):
@@ -534,10 +582,7 @@ class ChatDock(QgsDockWidget):
         except Exception:
             pass
         self._ask_user_card = card
-        self.status.setText(
-            f"<span style='color:{_WARN};font-size:8px;'>&#9632;</span> "
-            f"<span style='color:{_TEXT_2}; font-size:11px;'>Awaiting input</span>"
-        )
+        self._set_status("Awaiting input", _WARN, spinning=True)
 
     def _resolve_ask_user(self, payload):
         """User picked an option or typed a reply; close the card and unblock."""
@@ -564,10 +609,7 @@ class ChatDock(QgsDockWidget):
                 self._get_or_create_agent_turn().set_user_decision(chosen_text)
             except Exception:
                 pass
-        self.status.setText(
-            f"<span style='color:{_SUCCESS};font-size:8px;'>&#9632;</span> "
-            f"<span style='color:{_TEXT_3}; font-size:11px;'>Ready</span>"
-        )
+        self._set_status("Ready", _SUCCESS, icon="✓")
         if self._toolkit is not None:
             cancelled = bool(payload.get("cancelled", False))
             self._toolkit._resolve_ask_user({
@@ -625,14 +667,13 @@ class ChatDock(QgsDockWidget):
             w = item.widget()
             if w is not None:
                 w.deleteLater()
-        self.status.setText(
-            f"<span style='color:{_SUCCESS};font-size:8px;'>&#9632;</span> "
-            f"<span style='color:{_TEXT_3}; font-size:11px;'>Ready</span>"
-        )
+        self._set_status("Ready", _SUCCESS, icon="✓")
         self._typing_widget = None
         self._current_agent_turn = None
         self._current_tool_row = None
         self._current_text = ""
+        self._tool_progress_text = ""
+        self._showing_tool_progress = False
         self._thinking_text = ""
         self._thinking_started = False
         self._scroll_locked = False
@@ -664,6 +705,8 @@ class ChatDock(QgsDockWidget):
         self._streaming = False
         self._pending_tool = None
         self._current_text = ""
+        self._tool_progress_text = ""
+        self._showing_tool_progress = False
         self._thinking_text = ""
         self._current_agent_turn = None
         self._current_tool_row = None
@@ -673,11 +716,8 @@ class ChatDock(QgsDockWidget):
         self.send_btn.setVisible(False)
         self.stop_btn.setEnabled(True)
         self.stop_btn.setVisible(True)
-        self.status.setText(
-            f"<span style='color:{_TEXT_3};font-size:7px;'>&#9632;</span> "
-            f"<span style='color:{_TEXT_3}; font-size:11px;'>Thinking</span>"
-        )
-        self._show_typing()
+        self._set_status("Thinking", _TEXT_3, spinning=True)
+        self._set_tool_progress("Thinking...")
 
         self._worker = ChatWorker(backend, message, self._history)
         self._worker.event.connect(self._on_event)
@@ -700,10 +740,7 @@ class ChatDock(QgsDockWidget):
                 self._toolkit._resolve_ask_user({
                     "choice": None, "free_text": None, "cancelled": True,
                 })
-            self.status.setText(
-                f"<span style='color:{_DANGER};font-size:7px;'>&#9632;</span> "
-                f"<span style='color:{_TEXT_3}; font-size:11px;'>Stopping</span>"
-            )
+            self._set_status("Stopping", _DANGER, spinning=True)
 
     # ------------------------------------------------------------------ #
     def _on_event(self, ev):
@@ -714,12 +751,21 @@ class ChatDock(QgsDockWidget):
                 turn = self._get_or_create_agent_turn()
                 if self._current_tool_row is not None:
                     self._current_tool_row.append_reasoning(delta)
+                    if self._tool_progress_text and not self._tool_progress_text.endswith(("\n", " ")):
+                        self._tool_progress_text += "\n"
+                    self._tool_progress_text += delta
+                    self._showing_tool_progress = True
+                    turn.set_streaming_text(self._tool_progress_text)
                     if not self._scroll_locked:
                         self._scroll_to_bottom()
                     return
 
                 # Final-answer text begins after thinking/progress. Collapse
                 # the thinking block so the turn stays compact.
+                if self._showing_tool_progress:
+                    turn.clear_streaming_text()
+                    self._tool_progress_text = ""
+                    self._showing_tool_progress = False
                 if self._thinking_started and self._current_agent_turn is not None:
                     try:
                         self._current_agent_turn.finalize_thinking()
@@ -751,12 +797,18 @@ class ChatDock(QgsDockWidget):
             self._finish_streaming()
             tool_name = ev.data.get("name", "tool")
             tool_input = ev.data.get("input", {})
+            if self._showing_tool_progress:
+                turn.clear_streaming_text()
+                self._tool_progress_text = ""
+                self._showing_tool_progress = False
             self._pending_tool = (tool_name, tool_input)
             self._current_tool_row = turn.add_tool(tool_name, tool_input)
+            self._set_tool_progress(f"Processing `{tool_name}`...\n")
             self._maybe_scroll_to_bottom()
 
         elif ev.type == EventType.TOOL_RESULT:
             result = ev.data.get("result", "")
+            tool_name = ev.data.get("name", "tool")
             # F11: prefer the structured is_error / cancelled flags that
             # the backends compute. Fall back to the old string-prefix
             # heuristic for forward-compat with any third-party backend.
@@ -772,15 +824,14 @@ class ChatDock(QgsDockWidget):
             # Surface cancellation as a clear status update so the user
             # knows the tool didn't return a real error.
             if is_cancelled:
-                self.status.setText(
-                    f"<span style='color:{_DANGER};font-size:7px;'>&#9632;</span> "
-                    f"<span style='color:{_TEXT_3}; font-size:11px;'>Cancelled</span>"
-                )
+                self._set_tool_progress(f"Cancelled `{tool_name}`.")
+                self._set_status("Cancelled", _DANGER, icon="!")
             else:
-                self.status.setText(
-                    f"<span style='color:{_TEXT_3};font-size:7px;'>&#9632;</span> "
-                    f"<span style='color:{_TEXT_3}; font-size:11px;'>Thinking</span>"
-                )
+                if is_err:
+                    self._set_tool_progress(f"`{tool_name}` returned an error. Preparing next step...")
+                else:
+                    self._set_tool_progress(f"Finished `{tool_name}`. Preparing answer...")
+                self._set_status("Thinking", _TEXT_3, spinning=True)
             self._maybe_scroll_to_bottom()
 
         elif ev.type == EventType.ASK_USER:
@@ -806,10 +857,10 @@ class ChatDock(QgsDockWidget):
                     self._append_thinking_text(thinking_text)
                 except Exception:
                     pass
-            self.status.setText(
-                f"<span style='color:{_TEXT_3};font-size:7px;'>&#9632;</span> "
-                f"<span style='color:{_TEXT_3}; font-size:11px;'>Thinking</span>"
-            )
+            self._set_status("Thinking", _TEXT_3, spinning=True)
+
+        elif ev.type == EventType.COMPACTION:
+            self._add_compaction_notice()
 
         elif ev.type == EventType.ERROR:
             self._hide_typing()
@@ -823,11 +874,10 @@ class ChatDock(QgsDockWidget):
             self._streaming = False
             self._thinking_started = False
             self._thinking_text = ""
+            self._tool_progress_text = ""
+            self._showing_tool_progress = False
             self._current_agent_turn = None
-            self.status.setText(
-                f"<span style='color:{_SUCCESS};font-size:8px;'>&#9632;</span> "
-                f"<span style='color:{_TEXT_3}; font-size:11px;'>Ready</span>"
-            )
+            self._set_status("Ready", _SUCCESS, icon="✓")
             self._scroll_to_bottom()
             self._pending_tool = None
 
@@ -847,6 +897,22 @@ class ChatDock(QgsDockWidget):
             # No text and no turn yet — create an empty turn so the tool row
             # has somewhere to live.
             self._get_or_create_agent_turn()
+
+    def _set_tool_progress(self, text: str):
+        """Show temporary tool progress in the response area.
+
+        This is UI-owned progress, not final answer content. It is cleared as
+        soon as the backend starts streaming the actual answer.
+        """
+        if not text:
+            return
+        turn = self._get_or_create_agent_turn()
+        self._tool_progress_text = text
+        self._showing_tool_progress = True
+        turn.set_progress_text(self._tool_progress_text)
+        app = QApplication.instance()
+        if app is not None:
+            app.processEvents()
 
     def _append_thinking_text(self, text: str):
         """Append progress/reasoning text into the turn's thinking block."""
@@ -880,8 +946,5 @@ class ChatDock(QgsDockWidget):
         self.stop_btn.setVisible(False)
         self._scroll_locked = False
         self._thinking_started = False
-        self.status.setText(
-            f"<span style='color:{_SUCCESS};font-size:8px;'>&#9632;</span> "
-            f"<span style='color:{_TEXT_3}; font-size:11px;'>Ready</span>"
-        )
+        self._set_status("Ready", _SUCCESS, icon="✓")
         self._worker = None

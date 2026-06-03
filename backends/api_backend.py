@@ -17,7 +17,9 @@ from .base import (
     AgentBackend,
     AgentEvent,
     EventType,
+    _COMPACTION_KEEP_TAIL,
     agent_iteration_steps,
+    should_compact,
     unlimited_iterations,
 )
 
@@ -235,6 +237,51 @@ class ApiBackend(AgentBackend):
             self._cached_tool_list = tool_list
         return self._cached_tool_list
 
+    def _compact_history(self, messages, emit):
+        """Summarize old messages and return a trimmed list.
+
+        Keeps the KEEP_TAIL most recent messages verbatim. Everything older is
+        replaced by a summary user/assistant pair so the model retains context
+        without consuming the full window.
+        """
+        if len(messages) <= _COMPACTION_KEEP_TAIL:
+            return messages
+        head = messages[:-_COMPACTION_KEEP_TAIL]
+        tail = messages[-_COMPACTION_KEEP_TAIL:]
+        sum_messages = list(head) + [{
+            "role": "user",
+            "content": (
+                "Summarize the conversation above in bullet points. "
+                "Keep: layer IDs, key findings, tool results, decisions made. "
+                "Be concise — max 300 words."
+            ),
+        }]
+        try:
+            client = self._client()
+            model = self.config.get("model")
+            content, _ = client.stream_message(
+                model=model,
+                max_tokens=1024,
+                system=self._system_blocks(),
+                tools=self._tool_list(),
+                messages=sum_messages,
+                on_text=lambda _t: None,
+                should_stop=lambda: False,
+            )
+            summary = "".join(
+                b.get("text", "") for b in content if b.get("type") == "text"
+            ).strip()
+        except Exception:
+            return messages
+        if not summary:
+            return messages
+        compacted = [
+            {"role": "user", "content": f"[Earlier conversation summary]\n\n{summary}"},
+            {"role": "assistant", "content": "Understood. Continuing with full context."},
+        ] + list(tail)
+        emit(AgentEvent(EventType.COMPACTION, {}))
+        return compacted
+
     # ------------------------------------------------------------------ #
     def send(self, message, history, emit, should_stop):
         err = self.validate()
@@ -254,6 +301,9 @@ class ApiBackend(AgentBackend):
             if should_stop():
                 emit(AgentEvent(EventType.THINKING, {"text": "Stopped."}))
                 break
+
+            if should_compact(messages, model or ""):
+                messages = self._compact_history(messages, emit)
 
             try:
                 content, stop_reason = client.stream_message(
