@@ -17,6 +17,7 @@ class EventType:
     TOOL_RESULT = "tool_result"  # tool returned          (data: {"name", "result"})
     DONE = "done"            # turn finished
     VISUALIZATION = "visualization"  # data visualization (charts, stats) (data: {"type": str, "data": dict})
+    ASK_USER = "ask_user"    # agent asks the user      (data: {"question", "options", "allow_free_text"})
     ERROR = "error"          # something failed          (data: {"error": str})
 
 
