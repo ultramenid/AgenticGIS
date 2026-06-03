@@ -44,3 +44,14 @@ def test_login_url_for_unknown_provider():
     # Unknown provider falls back to a sensible default (empty string OK,
     # controller disables the button in that case).
     assert login_url_for("does_not_exist") == ""
+
+
+def test_provider_dict_has_login_url():
+    for p in providers.all_providers():
+        assert "login_url" in p, f"{p['id']} missing login_url"
+        assert isinstance(p["login_url"], str)
+
+
+def test_provider_login_url_matches_helper():
+    for p in providers.all_providers():
+        assert p["login_url"] == login_url_for(p["id"])

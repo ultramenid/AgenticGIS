@@ -14,6 +14,7 @@ BUILT_INS = [
         "format": "anthropic",
         "default_model": "claude-opus-4-8",
         "key_env": "ANTHROPIC_API_KEY",
+        "login_url": "https://console.anthropic.com/settings/keys",
     },
     {
         "id": "openai",
@@ -22,6 +23,7 @@ BUILT_INS = [
         "format": "openai",
         "default_model": "gpt-4.1",
         "key_env": "OPENAI_API_KEY",
+        "login_url": "https://platform.openai.com/api-keys",
     },
     {
         "id": "groq",
@@ -30,6 +32,7 @@ BUILT_INS = [
         "format": "openai",
         "default_model": "llama-3.3-70b-versatile",
         "key_env": "GROQ_API_KEY",
+        "login_url": "https://console.groq.com/keys",
     },
     {
         "id": "openrouter",
@@ -38,6 +41,7 @@ BUILT_INS = [
         "format": "openai",
         "default_model": "anthropic/claude-sonnet-4",
         "key_env": "OPENROUTER_API_KEY",
+        "login_url": "https://openrouter.ai/settings/keys",
     },
     {
         "id": "gemini",
@@ -46,6 +50,7 @@ BUILT_INS = [
         "format": "openai",
         "default_model": "gemini-2.0-flash",
         "key_env": "GOOGLE_API_KEY",
+        "login_url": "https://aistudio.google.com/apikey",
     },
     {
         "id": "deepseek",
@@ -54,6 +59,7 @@ BUILT_INS = [
         "format": "openai",
         "default_model": "deepseek-chat",
         "key_env": "DEEPSEEK_API_KEY",
+        "login_url": "https://platform.deepseek.com/api_keys",
     },
     {
         "id": "mistral",
@@ -62,6 +68,7 @@ BUILT_INS = [
         "format": "openai",
         "default_model": "mistral-large-latest",
         "key_env": "MISTRAL_API_KEY",
+        "login_url": "https://console.mistral.ai/api-keys",
     },
     {
         "id": "xai",
@@ -70,6 +77,7 @@ BUILT_INS = [
         "format": "openai",
         "default_model": "grok-3-beta",
         "key_env": "XAI_API_KEY",
+        "login_url": "https://console.x.ai/team/api-keys",
     },
     {
         "id": "ollama",
@@ -78,6 +86,7 @@ BUILT_INS = [
         "format": "openai",
         "default_model": "llama3.1",
         "key_env": "",
+        "login_url": "",
     },
 ]
 
