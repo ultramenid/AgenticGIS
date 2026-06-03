@@ -84,6 +84,8 @@ class ReasoningTicker(QWidget):
         self._render()
         if self._buffer and not self.isVisible():
             self.setVisible(True)
+        elif not self._buffer:
+            self.setVisible(False)
 
     def hide_ticker(self) -> None:
         self.setVisible(False)
@@ -92,5 +94,5 @@ class ReasoningTicker(QWidget):
         display = self._buffer
         if len(display) > self._MAX_CHARS:
             display = "…" + display[-self._MAX_CHARS:]
-        display = display.replace("\n", " ").replace("\r", "")
+        display = display.replace("\r\n", " ").replace("\n", " ").replace("\r", " ")
         self._lbl.setText(_html.escape(display))
