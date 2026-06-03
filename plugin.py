@@ -60,7 +60,8 @@ class AgenticGisPlugin:
 
             self._dock = ChatDock(self._get_backend, self._open_settings,
                                   self.request_cancel,
-                                  self.iface.mainWindow())
+                                  toolkit=self.toolkit,
+                                  parent=self.iface.mainWindow())
             self.iface.addDockWidget(Qt.RightDockWidgetArea, self._dock)
             self._dock.visibilityChanged.connect(
                 lambda visible: self._action.setChecked(visible)
