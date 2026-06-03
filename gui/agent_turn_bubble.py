@@ -350,3 +350,174 @@ class ToolGroupRow(QWidget):
             self._timer.stop()
         except RuntimeError:
             pass
+
+
+class AgentTurnBubble(QFrame):
+    """One agent turn: reasoning ticker + grouped tool rows + streaming text."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._groups: dict = {}   # tool_name → ToolGroupRow
+        self._stream_text = ""
+        self._stream_html = ""
+        self._user_decision_lbl = None
+
+        self.setFrameShape(QFrame.NoFrame)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        self.setStyleSheet(f"""
+            AgentTurnBubble {{
+                background: {_SURFACE};
+                border: 1px solid {_BORDER};
+                border-left: 2px solid {_TEXT_2};
+                border-radius: 0px;
+            }}
+        """)
+
+        self._outer = QVBoxLayout(self)
+        self._outer.setContentsMargins(0, 6, 0, 8)
+        self._outer.setSpacing(0)
+
+        self._ticker = ReasoningTicker(self)
+        self._outer.addWidget(self._ticker)
+
+        self._tools_area = QWidget(self)
+        self._tools_area.setVisible(False)
+        self._tools_area.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        self._tools_area.setStyleSheet("background:transparent;")
+        self._tools_layout = QVBoxLayout(self._tools_area)
+        self._tools_layout.setContentsMargins(0, 0, 0, 0)
+        self._tools_layout.setSpacing(0)
+        self._outer.addWidget(self._tools_area)
+
+        self.text_lbl = QLabel("")
+        self.text_lbl.setWordWrap(True)
+        self.text_lbl.setMinimumWidth(0)
+        self.text_lbl.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Preferred)
+        self.text_lbl.setTextFormat(Qt.RichText)
+        self.text_lbl.setTextInteractionFlags(
+            Qt.TextBrowserInteraction | Qt.TextSelectableByMouse
+        )
+        self.text_lbl.setOpenExternalLinks(True)
+        font = QFont("JetBrains Mono", 12)
+        font.setStyleHint(QFont.Monospace)
+        self.text_lbl.setFont(font)
+        self.text_lbl.setStyleSheet(f"""
+            color:{_TEXT}; background:transparent; border:none;
+            font-family:'JetBrains Mono',monospace;
+            font-size:12px; line-height:1.5;
+        """)
+        self.text_lbl.setContentsMargins(12, 6, 12, 0)
+        self._outer.addWidget(self.text_lbl)
+
+    # ── Core public API ───────────────────────────────────────────────────
+
+    def add_tool(self, tool_name: str, tool_input: dict) -> ToolSubItem:
+        """Add a tool call; creates group if tool_name is new. Returns ToolSubItem."""
+        if tool_name not in self._groups:
+            group = ToolGroupRow(tool_name, self._tools_area)
+            self._groups[tool_name] = group
+            self._tools_layout.addWidget(group)
+            self._tools_area.setVisible(True)
+        item = self._groups[tool_name].add_item(tool_input)
+        item._bubble = self
+        return item
+
+    def stream_reasoning(self, text_chunk: str) -> None:
+        self._ticker.append(text_chunk)
+
+    def set_streaming_text(self, text: str) -> None:
+        if text == self._stream_text:
+            return
+        if self._ticker.isVisible():
+            self._ticker.hide_ticker()
+        self._stream_text = text
+        self._stream_html = _md_to_html(text) if text else ""
+        cursor = f'<span style="color:{_TEXT_3};font-weight:300;">|</span>'
+        self.text_lbl.setText(self._stream_html + cursor)
+
+    def finalize_text(self, text: str) -> None:
+        self._ticker.hide_ticker()
+        self._stream_text = text
+        self._stream_html = _md_to_html(text) if text else ""
+        self.text_lbl.setText(self._stream_html)
+        self.setStyleSheet(f"""
+            AgentTurnBubble {{
+                background: {_SURFACE};
+                border: 1px solid {_BORDER};
+                border-left: 2px solid {_BORDER};
+                border-radius: 0px;
+            }}
+        """)
+
+    def finalize(self) -> None:
+        """Stop all spinners; mark any still-running tools as timed out."""
+        self._ticker.hide_ticker()
+        for group in self._groups.values():
+            group.force_finalize()
+
+    # ── Backward-compat shims for chat_dock.py ────────────────────────────
+
+    def add_thinking_block(self) -> None:
+        pass  # reasoning now routes to ReasoningTicker via set_thinking_text
+
+    def set_thinking_text(self, text: str) -> None:
+        self._ticker.set_full(text)
+
+    def finalize_thinking(self) -> None:
+        pass  # ticker hides automatically when set_streaming_text() is called
+
+    def clear_streaming_text(self) -> None:
+        self._stream_text = ""
+        self._stream_html = ""
+        self.text_lbl.setText("")
+        self.updateGeometry()
+
+    def has_content(self) -> bool:
+        return bool(self._groups) or bool(self._stream_text)
+
+    def set_user_decision(self, text: str) -> None:
+        clean = (text or "").strip()
+        if not clean:
+            return
+        if self._user_decision_lbl is None:
+            self._user_decision_lbl = QLabel("")
+            self._user_decision_lbl.setWordWrap(True)
+            self._user_decision_lbl.setMinimumWidth(0)
+            self._user_decision_lbl.setTextFormat(Qt.PlainText)
+            self._user_decision_lbl.setTextInteractionFlags(Qt.TextSelectableByMouse)
+            self._user_decision_lbl.setStyleSheet(
+                f"color:{_TEXT_2}; background:{_SURFACE_2}; border:1px solid {_BORDER_SOFT};"
+                f" border-radius:5px; padding:5px 9px; margin:6px 12px 0 12px;"
+                f" font-size:10.5px; font-family:'JetBrains Mono',monospace;"
+            )
+            self._outer.insertWidget(max(0, self._outer.count() - 1), self._user_decision_lbl)
+        self._user_decision_lbl.setText(f"User chose: {clean}")
+        self.updateGeometry()
+
+    # ── Layout ────────────────────────────────────────────────────────────
+
+    def hasHeightForWidth(self):
+        return True
+
+    def heightForWidth(self, width):
+        if self._outer:
+            m = self._outer.contentsMargins()
+            inner_w = width - m.left() - m.right()
+            if inner_w > 0:
+                lh = self.text_lbl.heightForWidth(inner_w)
+                tools_h = (
+                    self._tools_area.sizeHint().height()
+                    if self._tools_area.isVisible()
+                    else 0
+                )
+                if lh >= 0:
+                    return lh + tools_h + m.top() + m.bottom() + 8
+        return -1
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if self._outer:
+            m = self._outer.contentsMargins()
+            w = event.size().width() - m.left() - m.right()
+            if w > 0:
+                self.text_lbl.setFixedWidth(w)
