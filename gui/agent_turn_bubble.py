@@ -452,6 +452,7 @@ class AgentTurnBubble(QFrame):
     def finalize(self) -> None:
         """Stop all spinners; mark any still-running tools as timed out."""
         self._ticker.hide_ticker()
+        self.text_lbl.setText(self._stream_html)
         for group in self._groups.values():
             group.force_finalize()
 
@@ -464,7 +465,7 @@ class AgentTurnBubble(QFrame):
         self._ticker.set_full(text)
 
     def finalize_thinking(self) -> None:
-        pass  # ticker hides automatically when set_streaming_text() is called
+        pass  # no-op; ticker accumulates via append() and hides on set_streaming_text()
 
     def clear_streaming_text(self) -> None:
         self._stream_text = ""
@@ -473,7 +474,7 @@ class AgentTurnBubble(QFrame):
         self.updateGeometry()
 
     def has_content(self) -> bool:
-        return bool(self._groups) or bool(self._stream_text)
+        return bool(self._groups) or bool(self._stream_text) or self._ticker.isVisible()
 
     def set_user_decision(self, text: str) -> None:
         clean = (text or "").strip()
@@ -490,7 +491,7 @@ class AgentTurnBubble(QFrame):
                 f" border-radius:5px; padding:5px 9px; margin:6px 12px 0 12px;"
                 f" font-size:10.5px; font-family:'JetBrains Mono',monospace;"
             )
-            self._outer.insertWidget(max(0, self._outer.count() - 1), self._user_decision_lbl)
+            self._outer.addWidget(self._user_decision_lbl)
         self._user_decision_lbl.setText(f"User chose: {clean}")
         self.updateGeometry()
 
@@ -510,8 +511,13 @@ class AgentTurnBubble(QFrame):
                     if self._tools_area.isVisible()
                     else 0
                 )
+                ticker_h = (
+                    self._ticker.sizeHint().height()
+                    if self._ticker.isVisible()
+                    else 0
+                )
                 if lh >= 0:
-                    return lh + tools_h + m.top() + m.bottom() + 8
+                    return lh + tools_h + ticker_h + m.top() + m.bottom() + 8
         return -1
 
     def resizeEvent(self, event):
