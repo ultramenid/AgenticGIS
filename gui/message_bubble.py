@@ -301,7 +301,7 @@ def _md_to_html(text: str) -> str:
     safe = re.sub(
         r"(?m)^- (.+)$",
         lambda m: (
-            f'<div style="padding-left:10px; color:{_TEXT}; line-height:1.6; margin:0;">'
+            f'<div style="padding-left:10px; color:{_TEXT}; line-height:1.5; margin:0;">'
             f'<span style="color:#7a8899; margin-right:5px;">·</span>{m.group(1)}</div>'
         ),
         safe,
@@ -311,7 +311,7 @@ def _md_to_html(text: str) -> str:
     safe = re.sub(
         r"(?m)^(\d+)\. (.+)$",
         lambda m: (
-            f'<div style="padding-left:10px; color:{_TEXT}; line-height:1.6; margin:0;">'
+            f'<div style="padding-left:10px; color:{_TEXT}; line-height:1.5; margin:0;">'
             f'<span style="color:#7a8899; margin-right:5px;">{m.group(1)}.</span>{m.group(2)}</div>'
         ),
         safe,
@@ -334,6 +334,12 @@ def _md_to_html(text: str) -> str:
     # Markdown tables
     safe = re.sub(r"(?m)(?:^\|[^\n]*\n){2,}(?:^\|[^\n]*)?", _render_md_table, safe)
 
+    # Strip newlines adjacent to block <div>s before converting \n → <br>
+    # Otherwise </div>\n becomes </div><br> — a blank line after every bullet.
+    safe = re.sub(r'</div>\n', '</div>', safe)
+    safe = re.sub(r'\n<div', '<div', safe)
+    # Collapse 3+ consecutive <br> down to 2 (paragraph break, not page break)
+    safe = re.sub(r'(<br\s*/?>\s*){3,}', '<br><br>', safe)
     safe = safe.replace("\n", "<br>")
 
     for i, block in enumerate(code_blocks):
@@ -341,7 +347,7 @@ def _md_to_html(text: str) -> str:
 
     # Wrap in prose container for consistent line-height and font
     return (
-        f'<div style="line-height:1.65; font-size:13px; color:#cdd6e0;'
+        f'<div style="line-height:1.5; font-size:12px; color:#cdd6e0;'
         f" font-family:'JetBrains Mono','Fira Code',monospace;\">"
         f'{safe}</div>'
     )
@@ -360,7 +366,7 @@ def _md_inline(text: str) -> str:
     safe = re.sub(
         r"(?m)^- (.+)$",
         lambda m: (
-            f'<div style="padding-left:10px; color:{_TEXT}; line-height:1.6; margin:0;">'
+            f'<div style="padding-left:10px; color:{_TEXT}; line-height:1.5; margin:0;">'
             f'<span style="color:{_TEXT_3}; margin-right:5px;">·</span>{m.group(1)}</div>'
         ),
         safe,
@@ -382,6 +388,8 @@ def _md_inline(text: str) -> str:
     safe = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", safe)
     safe = re.sub(r"\*(.+?)\*", r"<i>\1</i>", safe)
 
+    safe = re.sub(r'</div>\n', '</div>', safe)
+    safe = re.sub(r'\n<div', '<div', safe)
     safe = safe.replace("\n", "<br>")
     return safe
 

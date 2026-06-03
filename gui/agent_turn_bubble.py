@@ -608,7 +608,7 @@ class AgentTurnBubble(QFrame):
         delta = re.sub(
             r"(?m)^- (.+)$",
             lambda m: (
-                f'<div style="padding-left:10px; color:{_TEXT}; line-height:1.6; margin:0;">'
+                f'<div style="padding-left:10px; color:{_TEXT}; line-height:1.5; margin:0;">'
                 f'<span style="color:{_ACCENT_DIM};margin-right:5px;">·</span>'
                 f'{m.group(1)}</div>'
             ),
@@ -625,6 +625,8 @@ class AgentTurnBubble(QFrame):
         )
         delta = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", delta)
         delta = re.sub(r"\*(.+?)\*", r"<i>\1</i>", delta)
+        delta = re.sub(r'</div>\n', '</div>', delta)
+        delta = re.sub(r'\n<div', '<div', delta)
         delta = delta.replace("\n", "<br>")
         self._stream_html += delta
         # Minimal cursor — thin bar
