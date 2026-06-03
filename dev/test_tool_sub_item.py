@@ -16,8 +16,8 @@ item2 = ToolSubItem({"layer": "buildings"}, group=None, is_last=True)
 lay.addWidget(item1)
 lay.addWidget(item2)
 
-QTimer.singleShot(1500, lambda: item1.mark_done(is_error=False))
-QTimer.singleShot(2500, lambda: item2.mark_done(is_error=True))
+QTimer.singleShot(1500, lambda: item1.set_result("ok", False))
+QTimer.singleShot(2500, lambda: item2.set_result("error", True))
 
 win.show()
 sys.exit(app.exec_())

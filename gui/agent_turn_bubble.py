@@ -107,6 +107,7 @@ class ToolSubItem(QWidget):
         self._done = False
         self._spin_idx = 0
         self._bubble = None   # set by AgentTurnBubble.add_tool()
+        self._result = ""
 
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.setStyleSheet("background:transparent;")
@@ -155,13 +156,16 @@ class ToolSubItem(QWidget):
 
     def set_last(self, is_last: bool) -> None:
         """Recalculate connector prefix when a new sibling is added."""
-        self._conn_lbl.setText("└─" if is_last else "├─")
+        try:
+            self._conn_lbl.setText("└─" if is_last else "├─")
+        except RuntimeError:
+            pass
 
     def mark_done(self, is_error: bool = False) -> None:
         """Stop spinner and show ✓ or !. Internal — call set_result() from chat_dock."""
+        self._done = True
         try:
             self._timer.stop()
-            self._done = True
             if is_error:
                 self._icon_lbl.setText("!")
                 self._icon_lbl.setStyleSheet(f"color:{_DANGER}; background:transparent;")
@@ -175,12 +179,18 @@ class ToolSubItem(QWidget):
         """Called by chat_dock.py. Marks done and notifies parent group."""
         if self._done:
             return
+        self._result = result_str
         self.mark_done(is_error=is_error)
         if self._group is not None:
             self._group.on_item_done(self, is_error=is_error)
 
     def append_reasoning(self, delta: str) -> None:
-        """Called by chat_dock.py. Delegates to parent bubble's ReasoningTicker."""
+        """Called by chat_dock.py. Delegates to parent bubble's ReasoningTicker.
+
+        _bubble is set by AgentTurnBubble.add_tool() before any deltas arrive.
+        Deltas received before _bubble is set are silently dropped (safe: the
+        ReasoningTicker belongs to the turn, not the individual tool item).
+        """
         if self._bubble is not None:
             self._bubble.stream_reasoning(delta)
 
