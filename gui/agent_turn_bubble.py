@@ -225,3 +225,121 @@ class ToolSubItem(QWidget):
             self._timer.stop()
         except RuntimeError:
             pass
+
+
+class ToolGroupRow(QWidget):
+    """Groups all ToolSubItems for one tool_name under a ● header with spinner."""
+
+    def __init__(self, tool_name: str, parent=None):
+        super().__init__(parent)
+        self._items: list = []
+        self._spin_idx = 0
+        self._running_count = 0
+        self._had_error = False
+
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        self.setStyleSheet("background:transparent;")
+
+        mono = QFont("JetBrains Mono", 10)
+        mono.setStyleHint(QFont.Monospace)
+
+        self._layout = QVBoxLayout(self)
+        self._layout.setContentsMargins(0, 2, 0, 2)
+        self._layout.setSpacing(0)
+
+        # Header row
+        header = QWidget()
+        header.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        hbox = QHBoxLayout(header)
+        hbox.setContentsMargins(12, 2, 12, 2)
+        hbox.setSpacing(6)
+
+        self._dot_lbl = QLabel("●")
+        self._dot_lbl.setFont(mono)
+        self._dot_lbl.setStyleSheet(f"color:{_WARN}; background:transparent;")
+        hbox.addWidget(self._dot_lbl)
+
+        name_lbl = QLabel(_html.escape(tool_name))
+        name_lbl.setFont(mono)
+        name_lbl.setStyleSheet(
+            f"color:{_TEXT}; background:transparent; font-size:10px;"
+        )
+        name_lbl.setTextFormat(Qt.RichText)
+        hbox.addWidget(name_lbl)
+
+        self._count_lbl = QLabel("(0)")
+        self._count_lbl.setFont(mono)
+        self._count_lbl.setStyleSheet(
+            f"color:{_TEXT_3}; background:transparent; font-size:10px;"
+        )
+        hbox.addWidget(self._count_lbl)
+        hbox.addStretch()
+
+        self._state_lbl = QLabel(_BRAILLE[0])
+        self._state_lbl.setFont(mono)
+        self._state_lbl.setStyleSheet(f"color:{_WARN}; background:transparent;")
+        hbox.addWidget(self._state_lbl)
+
+        self._layout.addWidget(header)
+
+        self._timer = QTimer(self)
+        self._timer.setInterval(80)
+        self._timer.timeout.connect(self._tick)
+        self._timer.start()
+        self.destroyed.connect(self._on_destroyed)
+
+    def add_item(self, tool_input: dict) -> ToolSubItem:
+        """Append a sub-item; recalculate connectors so only the last shows └─."""
+        if self._items:
+            self._items[-1].set_last(False)
+        item = ToolSubItem(tool_input, group=self, is_last=True, parent=self)
+        self._items.append(item)
+        self._running_count += 1
+        self._layout.addWidget(item)
+        self._count_lbl.setText(f"({len(self._items)})")
+        return item
+
+    def on_item_done(self, item: ToolSubItem, is_error: bool = False) -> None:
+        """Called by ToolSubItem.set_result(). Finalizes header when all done."""
+        self._running_count = max(0, self._running_count - 1)
+        if is_error:
+            self._had_error = True
+        if self._running_count == 0:
+            self._finalize_header()
+
+    def force_finalize(self) -> None:
+        """Mark all still-running items as timed out. Called by AgentTurnBubble.finalize()."""
+        for item in self._items:
+            if not item._done:
+                item.mark_done(is_error=True)
+        if self._running_count > 0:
+            self._running_count = 0
+            self._had_error = True
+            self._finalize_header()
+
+    def _finalize_header(self) -> None:
+        try:
+            self._timer.stop()
+            if self._had_error:
+                self._dot_lbl.setStyleSheet(f"color:{_DANGER}; background:transparent;")
+                self._state_lbl.setText("!")
+                self._state_lbl.setStyleSheet(f"color:{_DANGER}; background:transparent;")
+            else:
+                self._dot_lbl.setStyleSheet(f"color:{_SUCCESS}; background:transparent;")
+                self._state_lbl.setText("✓")
+                self._state_lbl.setStyleSheet(f"color:{_SUCCESS}; background:transparent;")
+        except RuntimeError:
+            pass
+
+    def _tick(self):
+        try:
+            self._spin_idx = (self._spin_idx + 1) % len(_BRAILLE)
+            self._state_lbl.setText(_BRAILLE[self._spin_idx])
+        except RuntimeError:
+            self._timer.stop()
+
+    def _on_destroyed(self):
+        try:
+            self._timer.stop()
+        except RuntimeError:
+            pass
