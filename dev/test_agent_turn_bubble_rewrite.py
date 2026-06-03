@@ -42,6 +42,9 @@ def step():
         bubble.finalize_text(
             "The analysis found **142 road segments** intersecting the selected area."
         )
+    elif n == 10:
+        bubble.finalize()
+        timer.stop()
 
 timer = QTimer()
 timer.setInterval(700)
