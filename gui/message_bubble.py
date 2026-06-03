@@ -34,12 +34,147 @@ _ACCENT_HOV  = "#c8c8c8"
 _DANGER      = "#ef4444"
 _SUCCESS     = "#22c55e"
 
-# Carbon.sh-like code block palette
-_CODE_BG     = "#111111"
-_CODE_BORDER = "#1f1f1f"
-_CODE_TEXT   = "#cccccc"
+# Inline-code token color (kept for backtick spans)
 _CODE_GREEN  = "#7ee787"
-_CODE_DIM    = "#555555"
+
+# ── One Dark palette (carbon.sh default theme) ─────────────────────────
+_SYN_BG     = "#282c34"
+_SYN_CHROME = "#21252b"
+_SYN_BORDER = "#3e4451"
+_SYN_TEXT   = "#abb2bf"
+_SYN_CMT    = "#5c6370"   # comments — italic gray
+_SYN_STR    = "#98c379"   # strings  — green
+_SYN_KW     = "#c678dd"   # keywords — purple
+_SYN_NUM    = "#d19a66"   # numbers  — orange
+_SYN_FN     = "#61afef"   # functions/builtins — blue
+_SYN_CONST  = "#56b6c2"   # true/false/None — cyan
+
+# Keyword sets for syntax highlighting
+_PY_KW = frozenset({
+    'False', 'None', 'True', 'and', 'as', 'assert', 'async', 'await',
+    'break', 'class', 'continue', 'def', 'del', 'elif', 'else', 'except',
+    'finally', 'for', 'from', 'global', 'if', 'import', 'in', 'is',
+    'lambda', 'nonlocal', 'not', 'or', 'pass', 'raise', 'return', 'self',
+    'try', 'while', 'with', 'yield',
+})
+_PY_BUILTIN = frozenset({
+    'bool', 'bytes', 'dict', 'enumerate', 'filter', 'float', 'frozenset',
+    'getattr', 'hasattr', 'input', 'int', 'isinstance', 'issubclass', 'len',
+    'list', 'map', 'max', 'min', 'next', 'object', 'open', 'print', 'range',
+    'reversed', 'set', 'setattr', 'sorted', 'str', 'sum', 'super', 'tuple',
+    'type', 'vars', 'zip',
+})
+_JS_KW = frozenset({
+    'async', 'await', 'break', 'case', 'catch', 'class', 'const', 'continue',
+    'debugger', 'default', 'delete', 'do', 'else', 'export', 'extends',
+    'false', 'finally', 'for', 'from', 'function', 'if', 'import', 'in',
+    'instanceof', 'let', 'new', 'null', 'of', 'return', 'static', 'super',
+    'switch', 'this', 'throw', 'true', 'try', 'typeof', 'undefined', 'var',
+    'void', 'while', 'yield',
+})
+_GENERIC_KW = frozenset({
+    'if', 'else', 'for', 'while', 'return', 'class', 'function', 'import',
+    'export', 'const', 'let', 'var', 'def', 'async', 'await', 'true',
+    'false', 'null', 'True', 'False', 'None', 'in', 'is', 'not', 'and',
+    'or', 'new', 'this', 'try', 'catch', 'finally', 'throw', 'yield',
+    'from', 'pass', 'break', 'continue', 'static', 'public', 'private',
+    'protected', 'extends', 'void', 'type', 'interface', 'package',
+})
+
+
+def _highlight_code(body: str, lang: str) -> str:
+    """Apply One Dark syntax coloring to an html-escaped code body.
+
+    Unescape → match raw text → re-escape non-slot segments → restore slots.
+    This avoids &quot; / &lt; confusion when matching string literals.
+    """
+    import html as _h
+
+    raw = _h.unescape(body)
+    slots: list = []
+
+    def save(raw_text: str, color: str, italic: bool = False) -> str:
+        i = len(slots)
+        st = f"color:{color};"
+        if italic:
+            st += "font-style:italic;"
+        slots.append(f'<span style="{st}">{_h.escape(raw_text)}</span>')
+        # Wrap digits in letters so \b word-boundary can't match inside the marker
+        return f"\x01S{i:06d}E\x01"
+
+    # 1. Triple-quoted strings (Python)
+    raw = re.sub(
+        r'(""".*?"""|\'\'\'.*?\'\'\')',
+        lambda m: save(m.group(0), _SYN_STR),
+        raw, flags=re.DOTALL,
+    )
+
+    # 2. Comments — language-aware
+    _HASH_LANGS  = {'python', 'py', 'bash', 'sh', 'shell', 'r', 'yaml', 'toml', 'ruby'}
+    _SLASH_LANGS = {'javascript', 'js', 'typescript', 'ts', 'java', 'c', 'cpp',
+                    'go', 'rust', 'kotlin', 'swift', 'css', 'scss', 'sql'}
+    if lang in _HASH_LANGS:
+        raw = re.sub(r'(#[^\n]*)', lambda m: save(m.group(0), _SYN_CMT, italic=True), raw)
+    elif lang in _SLASH_LANGS:
+        raw = re.sub(r'(//[^\n]*)', lambda m: save(m.group(0), _SYN_CMT, italic=True), raw)
+        raw = re.sub(r'(/\*.*?\*/)', lambda m: save(m.group(0), _SYN_CMT, italic=True), raw, flags=re.DOTALL)
+    else:
+        raw = re.sub(r'(#[^\n]*|//[^\n]*)', lambda m: save(m.group(0), _SYN_CMT, italic=True), raw)
+
+    # 3. Double-quoted strings
+    raw = re.sub(r'("(?:[^"\\\\]|\\\\.)*")', lambda m: save(m.group(0), _SYN_STR), raw)
+
+    # 4. Single-quoted strings (min 2 chars, avoids contractions)
+    raw = re.sub(r"('(?:[^'\\\\\n]|\\\\.){1,300}')", lambda m: save(m.group(0), _SYN_STR), raw)
+
+    # 5. Numbers (hex, float, int, scientific)
+    raw = re.sub(
+        r'\b(0x[0-9a-fA-F]+|\d+\.?\d*(?:[eE][+-]?\d+)?)\b',
+        lambda m: save(m.group(0), _SYN_NUM),
+        raw,
+    )
+
+    # 6. Keyword / builtin sets
+    if lang in ('python', 'py'):
+        kw, bi = _PY_KW, _PY_BUILTIN
+    elif lang in ('javascript', 'js', 'typescript', 'ts'):
+        kw, bi = _JS_KW, frozenset()
+    else:
+        kw, bi = _GENERIC_KW, frozenset()
+
+    # 6a. Function calls — color name blue unless it's a keyword
+    def _fn_call(m):
+        w = m.group(1)
+        if w in kw:
+            return m.group(0)
+        return save(w, _SYN_FN) + '('
+
+    raw = re.sub(r'\b([A-Za-z_]\w*)\s*\(', _fn_call, raw)
+
+    # 6b. Keywords and builtins (remaining words)
+    def _kw_sub(m):
+        w = m.group(0)
+        if w in kw:
+            return save(w, _SYN_KW)
+        if w in bi:
+            return save(w, _SYN_FN)
+        return w
+
+    raw = re.sub(r'\b[A-Za-z_]\w*\b', _kw_sub, raw)
+
+    # 7. Re-escape plain text, preserve slot markers intact
+    _SLOT_RE = re.compile(r'(\x01S\d{6}E\x01)')
+    parts = _SLOT_RE.split(raw)
+    out = "".join(
+        p if _SLOT_RE.fullmatch(p) else _h.escape(p, quote=False)
+        for p in parts
+    )
+
+    # 8. Restore slots
+    for i, s in enumerate(slots):
+        out = out.replace(f"\x01S{i:06d}E\x01", s)
+
+    return out
 
 
 def _render_md_table(match) -> str:
@@ -100,18 +235,41 @@ def _md_to_html(text: str) -> str:
     def _save_code_block(m):
         body = m.group(2)
         lang = (m.group(1) or "").strip().lower()
-        lang_tag = f'<div style="color:{_CODE_DIM};font-size:10px;font-family:SF Mono,monospace;letter-spacing:0.03em;margin-bottom:6px;text-transform:uppercase;">{lang}</div>' if lang else ""
-        # Carbon.sh-inspired: pure dark, generous padding, subtle inner border feel
+
+        highlighted = _highlight_code(body, lang)
+
+        # Window chrome — traffic lights left, language badge right
+        dots = (
+            '<span style="color:#ff5f56;font-size:10px;">&#9679;</span>'
+            '<span style="color:#ffbd2e;font-size:10px;margin-left:5px;">&#9679;</span>'
+            '<span style="color:#27c93f;font-size:10px;margin-left:5px;">&#9679;</span>'
+        )
+        lang_badge = (
+            f'<span style="color:{_SYN_CMT};font-family:\'SF Mono\',monospace;'
+            f'font-size:9px;letter-spacing:0.08em;">{lang.upper()}</span>'
+            if lang else ""
+        )
+        chrome = (
+            f'<div style="background:{_SYN_CHROME};padding:9px 14px 8px 14px;'
+            f'border-bottom:1px solid {_SYN_BORDER};border-radius:14px 14px 0 0;">'
+            f'<table width="100%" cellspacing="0" cellpadding="0" border="0"><tr>'
+            f'<td style="vertical-align:middle;">{dots}</td>'
+            f'<td align="right" style="vertical-align:middle;">{lang_badge}</td>'
+            f'</tr></table>'
+            f'</div>'
+        )
+
         rendered = (
-            f'<div style="background:{_CODE_BG};border:1px solid {_CODE_BORDER};'
-            f'border-radius:10px;padding:14px 16px;margin:6px 0;'
-            f'font-family:\'SF Mono\',\'JetBrains Mono\',\'Fira Code\',monospace;'
-            f'font-size:12.5px;line-height:1.55;color:{_CODE_TEXT};'
-            f'white-space:pre-wrap;overflow-x:auto;">'
-            f'{lang_tag}'
+            f'<div style="background:{_SYN_BG};border:1px solid {_SYN_BORDER};'
+            f'border-radius:14px;margin:8px 0;">'
+            f'{chrome}'
+            f'<div style="padding:16px 18px;border-radius:0 0 14px 14px;">'
             f'<pre style="margin:0;padding:0;background:transparent;border:none;'
-            f'font-family:inherit;font-size:inherit;line-height:inherit;color:inherit;'
-            f'white-space:pre-wrap;">{body}</pre></div>'
+            f'font-family:\'JetBrains Mono\',\'Fira Code\',\'SF Mono\',monospace;'
+            f'font-size:12.5px;line-height:1.6;color:{_SYN_TEXT};'
+            f'white-space:pre-wrap;">{highlighted}</pre>'
+            f'</div>'
+            f'</div>'
         )
         placeholder = f"\x00CODE{len(code_blocks)}\x00"
         code_blocks.append(rendered)
