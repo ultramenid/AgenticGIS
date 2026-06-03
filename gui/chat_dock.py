@@ -371,11 +371,27 @@ class ChatDock(QgsDockWidget):
             self._programmatic_scroll = False
 
     def _scroll_to_bottom_after_layout(self):
-        """Scroll to bottom on the next event-loop tick, when the layout
-        has had a chance to reflow and the new content is part of
-        the scroll range. Call this after adding widgets, especially
-        before streaming starts."""
-        QTimer.singleShot(0, self._scroll_to_bottom)
+        """Scroll to bottom once the scroll range expands to include new content.
+
+        Hooks rangeChanged so we scroll at the exact moment Qt has finished
+        laying out the new widget (not one tick too early). A 150 ms fallback
+        covers the case where content fits the viewport with no range change.
+        """
+        vs = self.scroll.verticalScrollBar()
+        fired = [False]
+
+        def _go(*_):
+            if fired[0]:
+                return
+            fired[0] = True
+            try:
+                vs.rangeChanged.disconnect(_go)
+            except (RuntimeError, TypeError):
+                pass
+            self._scroll_to_bottom()
+
+        vs.rangeChanged.connect(_go)
+        QTimer.singleShot(150, _go)
 
     def _on_scroll_changed(self, value):
         """Detect user-initiated scroll during streaming and lock auto-scroll.
@@ -397,11 +413,9 @@ class ChatDock(QgsDockWidget):
 
     def _add_widget(self, widget):
         """Insert widget above the trailing stretch, then scroll to bottom
-        on the next tick so the layout has time to reflow. Without the
-        singleShot, the scrollbar maximum is still its pre-insert value
-        and we scroll to the wrong place."""
+        once the layout has expanded the scroll range to include it."""
         self.transcript_layout.insertWidget(self.transcript_layout.count() - 1, widget)
-        QTimer.singleShot(0, self._scroll_to_bottom)
+        self._scroll_to_bottom_after_layout()
 
     # -- High-level adders ---------------------------------------------- #
     def _add_user_message(self, text: str):
