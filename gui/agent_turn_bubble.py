@@ -7,7 +7,7 @@ Tool calls group by name with braille spinners → ✓/! on completion.
 import html as _html
 import json
 
-from qgis.PyQt.QtCore import Qt, QTimer
+from qgis.PyQt.QtCore import Qt
 from qgis.PyQt.QtGui import QFont
 from qgis.PyQt.QtWidgets import (
     QFrame, QHBoxLayout, QLabel,
@@ -33,7 +33,6 @@ _WARN        = "#d99a3c"
 _SUCCESS     = "#5aa86f"
 _DANGER      = "#d05a5a"
 
-_BRAILLE = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 
 
 class ReasoningTicker(QWidget):
@@ -104,7 +103,6 @@ class ToolSubItem(QWidget):
         super().__init__(parent)
         self._group = group   # ToolGroupRow | None
         self._done = False
-        self._spin_idx = 0
         self._bubble = None   # set by AgentTurnBubble.add_tool()
         self._result = ""
 
@@ -123,7 +121,7 @@ class ToolSubItem(QWidget):
         self._conn_lbl.setStyleSheet(f"color:{_BORDER}; background:transparent;")
         hbox.addWidget(self._conn_lbl)
 
-        self._icon_lbl = QLabel(_BRAILLE[0])
+        self._icon_lbl = QLabel("·")
         self._icon_lbl.setFont(mono)
         self._icon_lbl.setStyleSheet(f"color:{_WARN}; background:transparent;")
         self._icon_lbl.setFixedWidth(14)
@@ -145,12 +143,6 @@ class ToolSubItem(QWidget):
         hbox.addWidget(json_lbl)
         hbox.addStretch()
 
-        self._timer = QTimer(self)
-        self._timer.setInterval(80)
-        self._timer.timeout.connect(self._tick)
-        self._timer.start()
-        self.destroyed.connect(self._on_destroyed)
-
     # ── Public API ────────────────────────────────────────────────────────
 
     def set_last(self, is_last: bool) -> None:
@@ -161,12 +153,11 @@ class ToolSubItem(QWidget):
             pass
 
     def mark_done(self, is_error: bool = False) -> None:
-        """Stop spinner and show ✓ or !. Internal — call set_result() from chat_dock."""
+        """Show ✓ or !. Internal — call set_result() from chat_dock."""
         if self._done:
             return
         self._done = True
         try:
-            self._timer.stop()
             if is_error:
                 self._icon_lbl.setText("!")
                 self._icon_lbl.setStyleSheet(f"color:{_DANGER}; background:transparent;")
@@ -214,19 +205,6 @@ class ToolSubItem(QWidget):
             return s[:40] if len(s) > 40 else s
         return ""
 
-    def _tick(self):
-        try:
-            self._spin_idx = (self._spin_idx + 1) % len(_BRAILLE)
-            self._icon_lbl.setText(_BRAILLE[self._spin_idx])
-        except RuntimeError:
-            self._timer.stop()
-
-    def _on_destroyed(self):
-        try:
-            self._timer.stop()
-        except RuntimeError:
-            pass
-
 
 class ToolGroupRow(QWidget):
     """Groups all ToolSubItems for one tool_name under a ● header with spinner."""
@@ -234,7 +212,6 @@ class ToolGroupRow(QWidget):
     def __init__(self, tool_name: str, parent=None):
         super().__init__(parent)
         self._items: list = []
-        self._spin_idx = 0
         self._running_count = 0
         self._had_error = False
         self._finalized = False
@@ -277,22 +254,15 @@ class ToolGroupRow(QWidget):
         hbox.addWidget(self._count_lbl)
         hbox.addStretch()
 
-        self._state_lbl = QLabel(_BRAILLE[0])
+        self._state_lbl = QLabel("·")
         self._state_lbl.setFont(mono)
         self._state_lbl.setStyleSheet(f"color:{_WARN}; background:transparent;")
         hbox.addWidget(self._state_lbl)
 
         self._layout.addWidget(header)
 
-        self._timer = QTimer(self)
-        self._timer.setInterval(80)
-        self._timer.timeout.connect(self._tick)
-        self.destroyed.connect(self._on_destroyed)
-
     def add_item(self, tool_input: dict) -> ToolSubItem:
         """Append a sub-item; recalculate connectors so only the last shows └─."""
-        if not self._items:
-            self._timer.start()
         if self._items:
             self._items[-1].set_last(False)
         item = ToolSubItem(tool_input, group=self, is_last=True, parent=self)
@@ -327,7 +297,6 @@ class ToolGroupRow(QWidget):
             return
         self._finalized = True
         try:
-            self._timer.stop()
             if self._had_error:
                 self._dot_lbl.setStyleSheet(f"color:{_DANGER}; background:transparent;")
                 self._state_lbl.setText("!")
@@ -336,19 +305,6 @@ class ToolGroupRow(QWidget):
                 self._dot_lbl.setStyleSheet(f"color:{_SUCCESS}; background:transparent;")
                 self._state_lbl.setText("✓")
                 self._state_lbl.setStyleSheet(f"color:{_SUCCESS}; background:transparent;")
-        except RuntimeError:
-            pass
-
-    def _tick(self):
-        try:
-            self._spin_idx = (self._spin_idx + 1) % len(_BRAILLE)
-            self._state_lbl.setText(_BRAILLE[self._spin_idx])
-        except RuntimeError:
-            self._timer.stop()
-
-    def _on_destroyed(self):
-        try:
-            self._timer.stop()
         except RuntimeError:
             pass
 
