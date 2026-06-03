@@ -185,7 +185,10 @@ TOOL_SPECS = [
             "tool result looks suspicious (no spatial index, empty result, "
             "schema mismatch, out-of-range value). Wait for the user's "
             "reply before continuing. Always provide 2-4 options with the "
-            "first one being the recommended choice."
+            "first one being the recommended choice. Returns a dict with "
+            "'choice' (the picked option's label, or null), 'free_text' "
+            "(typed reply, or null), and 'cancelled' (true if the user "
+            "stopped the question)."
         ),
         "input_schema": {
             "type": "object",
