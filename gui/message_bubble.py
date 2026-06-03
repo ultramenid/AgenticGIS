@@ -20,18 +20,26 @@ from qgis.PyQt.QtWidgets import (
     QWidget,
 )
 
-_SURFACE     = "#131316"
-_CANVAS      = "#0a0a0b"
-_INPUT_BG    = "#1c1c20"
-_BORDER      = "#27272a"
-_BORDER_SOFT = "#1f1f23"
-_TEXT        = "#fafafa"
-_TEXT_2      = "#a1a1aa"
-_TEXT_3      = "#71717a"
-_ACCENT      = "#fafafa"
-_ACCENT_HOV  = "#e4e4e7"
-_DANGER      = "#ef4444"
-_SUCCESS     = "#22c55e"
+# ── Monochrome Minimal Palette ─────────────────────────────
+_SURFACE     = "#161616"
+_CANVAS      = "#0a0a0a"
+_INPUT_BG    = "#1e1e1e"
+_BORDER      = "#2e2e2e"
+_BORDER_SOFT = "#242424"
+_TEXT        = "#ececec"
+_TEXT_2      = "#a0a0a0"
+_TEXT_3      = "#707070"
+_ACCENT      = "#e0e0e0"
+_ACCENT_HOV  = "#c8c8c8"
+_DANGER      = "#e57373"
+_SUCCESS     = "#81c784"
+
+# Carbon.sh-like code block palette
+_CODE_BG     = "#111111"
+_CODE_BORDER = "#1f1f1f"
+_CODE_TEXT   = "#cccccc"
+_CODE_GREEN  = "#7ee787"
+_CODE_DIM    = "#555555"
 
 
 def _render_md_table(match) -> str:
@@ -44,16 +52,16 @@ def _render_md_table(match) -> str:
         return raw
 
     th_style = (
-        f"padding:6px 10px; text-align:left; color:{_TEXT}; font-weight:600; "
+        f"padding:3px 8px; text-align:left; color:{_TEXT}; font-weight:500; "
         f"border-bottom:1px solid {_BORDER}; background:{_SURFACE}; white-space:nowrap;"
     )
     td_style = (
-        f"padding:5px 10px; text-align:left; color:{_TEXT_2}; "
+        f"padding:2px 8px; text-align:left; color:{_TEXT_2}; "
         f"border-bottom:1px solid {_BORDER_SOFT};"
     )
     table_style = (
-        f"border-collapse:collapse; width:100%; margin:6px 0; "
-        f"font-size:12px; font-family:'Consolas','Courier New',monospace; "
+        f"border-collapse:collapse; width:100%; margin:2px 0; "
+        f"font-size:12px; font-family:'SF Mono','JetBrains Mono',monospace; "
         f"background:{_INPUT_BG}; border:1px solid {_BORDER}; border-radius:6px;"
     )
 
@@ -91,11 +99,19 @@ def _md_to_html(text: str) -> str:
 
     def _save_code_block(m):
         body = m.group(2)
+        lang = (m.group(1) or "").strip().lower()
+        lang_tag = f'<div style="color:{_CODE_DIM};font-size:10px;font-family:SF Mono,monospace;letter-spacing:0.03em;margin-bottom:6px;text-transform:uppercase;">{lang}</div>' if lang else ""
+        # Carbon.sh-inspired: pure dark, generous padding, subtle inner border feel
         rendered = (
-            f'<pre style="background:{_SURFACE}; color:{_TEXT_2}; '
-            f'border:1px solid {_BORDER}; border-radius:4px; padding:8px; '
-            f'font-family:monospace; font-size:11px; white-space:pre-wrap; '
-            f'margin:4px 0;">{body}</pre>'
+            f'<div style="background:{_CODE_BG};border:1px solid {_CODE_BORDER};'
+            f'border-radius:10px;padding:14px 16px;margin:6px 0;'
+            f'font-family:\'SF Mono\',\'JetBrains Mono\',\'Fira Code\',monospace;'
+            f'font-size:12.5px;line-height:1.55;color:{_CODE_TEXT};'
+            f'white-space:pre-wrap;overflow-x:auto;">'
+            f'{lang_tag}'
+            f'<pre style="margin:0;padding:0;background:transparent;border:none;'
+            f'font-family:inherit;font-size:inherit;line-height:inherit;color:inherit;'
+            f'white-space:pre-wrap;">{body}</pre></div>'
         )
         placeholder = f"\x00CODE{len(code_blocks)}\x00"
         code_blocks.append(rendered)
@@ -103,35 +119,39 @@ def _md_to_html(text: str) -> str:
 
     safe = re.sub(r"```([^\n]*)\n(.*?)```", _save_code_block, safe, flags=re.DOTALL)
 
+    # Headings — tighter, no excess spacing
     safe = re.sub(
         r"(?m)^### (.+)$",
         lambda m: (
-            f'<div style="font-size:12px; font-weight:600; color:{_TEXT_2}; '
-            f'margin:3px 0 2px 0;">{m.group(1)}</div>'
+            f'<div style="font-size:13px; font-weight:600; color:{_TEXT_2}; '
+            f'margin:10px 0 3px 0;">{m.group(1)}</div>'
         ),
         safe,
     )
     safe = re.sub(
         r"(?m)^## (.+)$",
         lambda m: (
-            f'<div style="font-size:13px; font-weight:bold; color:{_ACCENT_HOV}; '
-            f'margin:4px 0 2px 0;">{m.group(1)}</div>'
+            f'<div style="font-size:14px; font-weight:600; color:{_TEXT}; '
+            f'margin:12px 0 4px 0;">{m.group(1)}</div>'
         ),
         safe,
     )
     safe = re.sub(
         r"(?m)^# (.+)$",
         lambda m: (
-            f'<div style="font-size:15px; font-weight:bold; color:{_TEXT}; '
-            f'margin:6px 0 3px 0;">{m.group(1)}</div>'
+            f'<div style="font-size:16px; font-weight:700; color:{_TEXT}; '
+            f'margin:14px 0 4px 0;letter-spacing:-0.01em;">{m.group(1)}</div>'
         ),
         safe,
     )
 
+    # Bullet list items — tighter line-height, minimal margin, no heavy bullet character
     safe = re.sub(
         r"(?m)^- (.+)$",
         lambda m: (
-            f'<div style="padding-left:12px; color:{_TEXT};">• {m.group(1)}</div>'
+            f'<div style="padding-left:12px; color:{_TEXT}; '
+            f'font-size:13px; line-height:1.35; margin:0 0 1px 0;">'
+            f'<span style="color:{_TEXT_3};margin-right:6px;">—</span>{m.group(1)}</div>'
         ),
         safe,
     )
@@ -139,9 +159,9 @@ def _md_to_html(text: str) -> str:
     safe = re.sub(
         r"`([^`]+)`",
         lambda m: (
-            f'<code style="background:{_SURFACE}; color:{_SUCCESS}; '
-            f'border-radius:3px; padding:1px 4px; font-family:monospace; '
-            f'font-size:12px;">{m.group(1)}</code>'
+            f'<code style="background:{_SURFACE}; color:{_CODE_GREEN}; '
+            f'border-radius:4px; padding:1px 5px; font-family:monospace; '
+            f'font-size:12px;letter-spacing:-0.01em;">{m.group(1)}</code>'
         ),
         safe,
     )
@@ -149,7 +169,7 @@ def _md_to_html(text: str) -> str:
     safe = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", safe)
     safe = re.sub(r"\*(.+?)\*", r"<i>\1</i>", safe)
 
-    # Markdown tables — must run before \n→<br> so row structure is intact
+    # Markdown tables
     safe = re.sub(r"(?m)(?:^\|[^\n]*\n){2,}(?:^\|[^\n]*)?", _render_md_table, safe)
 
     safe = safe.replace("\n", "<br>")
@@ -169,20 +189,24 @@ def _md_inline(text: str) -> str:
     """
     safe = html.escape(text)
 
-    # Bullet list items
+    # Bullet list items — tighter, en-dash instead of bullet
     safe = re.sub(
         r"(?m)^- (.+)$",
-        lambda m: f'<div style="padding-left:12px; color:{_TEXT};">• {m.group(1)}</div>',
+        lambda m: (
+            f'<div style="padding-left:12px; color:{_TEXT}; '
+            f'font-size:13px; line-height:1.35; margin:0 0 1px 0;">'
+            f'<span style="color:{_TEXT_3};margin-right:6px;">—</span>{m.group(1)}</div>'
+        ),
         safe,
     )
 
-    # Inline code (backtick)
+    # Inline code
     safe = re.sub(
-        r"`([^`\n]+)`",
+        r"`([^`]+)`",
         lambda m: (
-            f'<code style="background:{_SURFACE}; color:{_SUCCESS}; '
-            f'border-radius:3px; padding:1px 4px; font-family:monospace; '
-            f'font-size:12px;">{m.group(1)}</code>'
+            f'<code style="background:{_SURFACE}; color:{_CODE_GREEN}; '
+            f'border-radius:4px; padding:1px 5px; font-family:monospace; '
+            f'font-size:12px;letter-spacing:-0.01em;">{m.group(1)}</code>'
         ),
         safe,
     )
@@ -254,7 +278,7 @@ class MessageBubble(QFrame):
         """)
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(12, 9, 12, 9)
+        layout.setContentsMargins(10, 7, 10, 7)
         layout.setSpacing(0)
 
         initial_html = html.escape(self.text) if self.text else ""
@@ -334,7 +358,8 @@ class MessageBubble(QFrame):
         """
         delta = text[len(self._last_text):]
         self._last_text = text
-        cursor = f'<span style="color:{_TEXT_2};">▋</span>'
+        # Minimal cursor — thin vertical bar, muted
+        cursor = f'<span style="color:{_TEXT_3};font-weight:300;">|</span>'
 
         if not delta:
             # No new text — just refresh cursor position
@@ -346,22 +371,23 @@ class MessageBubble(QFrame):
         html_delta = html.escape(delta)
 
         def _inline_transforms(chunk: str) -> str:
-            # Bullet list items (line-start only)
+            # Bullet list items (line-start only) — tighter, en-dash instead of heavy bullet
             chunk = re.sub(
                 r"(?m)^- (.+)$",
                 lambda m: (
-                    f'<div style="padding-left:12px; color:{_TEXT};">'
-                    f'• {m.group(1)}</div>'
+                    f'<div style="padding-left:12px; color:{_TEXT}; '
+                    f'font-size:13px; line-height:1.35; margin:0 0 1px 0;">'
+                    f'<span style="color:{_TEXT_3};margin-right:6px;">—</span>{m.group(1)}</div>'
                 ),
                 chunk,
             )
             # Inline code
             chunk = re.sub(
-                r"`([^`\n]+)`",
+                r"`([^`]+)`",
                 lambda m: (
-                    f'<code style="background:{_SURFACE}; color:{_SUCCESS}; '
-                    f'border-radius:3px; padding:1px 4px; font-family:monospace; '
-                    f'font-size:12px;">{m.group(1)}</code>'
+                    f'<code style="background:{_SURFACE}; color:{_CODE_GREEN}; '
+                    f'border-radius:4px; padding:1px 5px; font-family:monospace; '
+                    f'font-size:12px;letter-spacing:-0.01em;">{m.group(1)}</code>'
                 ),
                 chunk,
             )
@@ -415,8 +441,8 @@ class MessageContainer(QWidget):
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
 
         outer = QVBoxLayout(self)
-        outer.setContentsMargins(16, 0, 16, 0)
-        outer.setSpacing(3)
+        outer.setContentsMargins(12, 0, 12, 0)
+        outer.setSpacing(2)
 
         if sender_name and not is_tool:
             name_label = QLabel(sender_name)

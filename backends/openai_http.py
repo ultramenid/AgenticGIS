@@ -220,15 +220,22 @@ class OpenAIHttpClient:
         """Convert our Anthropic-shaped tool specs to OpenAI function-calling format.
 
         Each input_schema dict becomes a JSON Schema ``parameters`` object.
+        Empty properties objects are replaced with an empty object schema to
+        satisfy strict providers (DeepSeek, etc.).
         """
         tools = []
         for spec in tool_specs:
+            schema = spec.get("input_schema", {"type": "object"})
+            # Some providers reject empty properties objects; expand to a generic
+            # empty object if needed.
+            if schema.get("type") == "object" and not schema.get("properties"):
+                schema = {"type": "object"}
             tools.append({
                 "type": "function",
                 "function": {
                     "name": spec["name"],
                     "description": spec["description"],
-                    "parameters": spec.get("input_schema", {"type": "object"}),
+                    "parameters": schema,
                 },
             })
         return tools

@@ -55,18 +55,18 @@ _FORMAT_LABELS = [
 # ---------------------------------------------------------------------------
 # Design tokens
 # ---------------------------------------------------------------------------
-_SURFACE     = "#131316"
+_SURFACE     = "#161616"
 _CANVAS      = "#0a0a0b"
-_INPUT_BG    = "#1c1c20"
-_BORDER      = "#27272a"
-_BORDER_SOFT = "#1f1f23"
-_TEXT        = "#fafafa"
-_TEXT_2      = "#a1a1aa"
-_TEXT_3      = "#71717a"
-_ACCENT      = "#fafafa"
-_ACCENT_HOV  = "#e4e4e7"
-_DANGER      = "#ef4444"
-_SUCCESS     = "#22c55e"
+_INPUT_BG    = "#1e1e1e"
+_BORDER      = "#2e2e2e"
+_BORDER_SOFT = "#242424"
+_TEXT        = "#ececec"
+_TEXT_2      = "#a0a0a0"
+_TEXT_3      = "#707070"
+_ACCENT      = "#e0e0e0"
+_ACCENT_HOV  = "#c8c8c8"
+_DANGER      = "#e57373"
+_SUCCESS     = "#81c784"
 
 # ---------------------------------------------------------------------------
 # Shared stylesheet fragments

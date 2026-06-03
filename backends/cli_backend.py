@@ -147,7 +147,6 @@ class CliToolBackend(AgentBackend):
                 "--output-format", "stream-json", "--verbose",
                 "--mcp-config", self._mcp_config_json(base_url),
                 "--permission-mode", "bypassPermissions",
-                "--allowedTools", "mcp__AgenticGIS",
             ]
             if self._session_id:
                 cmd += ["--resume", self._session_id]

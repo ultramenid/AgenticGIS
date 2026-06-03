@@ -8,16 +8,18 @@ from qgis.PyQt.QtCore import Qt, QPoint, QSize
 from qgis.PyQt.QtGui import QColor, QFont, QFontMetrics, QPainter, QPen, QBrush, QPolygon
 from qgis.PyQt.QtWidgets import QFrame, QSizePolicy
 
-_SURFACE  = "#131316"
-_INPUT_BG = "#1c1c20"
-_BORDER   = "#27272a"
-_TEXT     = "#fafafa"
-_TEXT_2   = "#a1a1aa"
-_TEXT_3   = "#71717a"
+# Design tokens — darker, softer (match chat_dock.py)
+_SURFACE  = "#161616"
+_INPUT_BG = "#1e1e1e"
+_BORDER   = "#2e2e2e"
+_TEXT     = "#ececec"
+_TEXT_2   = "#a0a0a0"
+_TEXT_3   = "#707070"
 
+# Monochrome palette for charts — using desaturated blues/grays for visibility
 COLORS = [
-    "#2196f3", "#22c55e", "#ff9800", "#ef4444", "#9c27b0",
-    "#03a9f4", "#f59e0b", "#8bc34a", "#e91e63", "#673ab7",
+    "#5d8aa8", "#8a8a8a", "#a9a9a9", "#c0c0c0", "#d3d3d4",
+    "#5f9ea0", "#708090", "#778899", "#808080", "#909090",
 ]
 
 
@@ -50,37 +52,37 @@ class ChartWidget(QFrame):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
 
-        painter.fillRect(self.rect(), QColor(_INPUT_BG))
+        try:
+            painter.fillRect(self.rect(), QColor(_INPUT_BG))
 
-        pad = 16
-        rect = self.rect().adjusted(pad, pad, -pad, -pad)
+            pad = 16
+            rect = self.rect().adjusted(pad, pad, -pad, -pad)
 
-        title_h = 0
-        if self.title:
-            font = QFont("Inter", 10, QFont.Bold)
-            painter.setFont(font)
-            painter.setPen(QColor(_TEXT))
-            painter.drawText(
-                rect.left(), rect.top(), rect.width(), 20,
-                Qt.AlignLeft | Qt.AlignVCenter, self.title
-            )
-            title_h = 24
+            title_h = 0
+            if self.title:
+                font = QFont("Inter", 10, QFont.Bold)
+                painter.setFont(font)
+                painter.setPen(QColor(_TEXT))
+                painter.drawText(
+                    rect.left(), rect.top(), rect.width(), 20,
+                    Qt.AlignLeft | Qt.AlignVCenter, self.title
+                )
+                title_h = 24
 
-        chart_rect = rect.adjusted(0, title_h, 0, 0)
+            chart_rect = rect.adjusted(0, title_h, 0, 0)
 
-        if not self.data:
-            self._draw_empty(painter, chart_rect)
+            if not self.data:
+                self._draw_empty(painter, chart_rect)
+            elif self.chart_type == "bar":
+                self._draw_bar(painter, chart_rect)
+            elif self.chart_type == "line":
+                self._draw_line(painter, chart_rect)
+            elif self.chart_type == "pie":
+                self._draw_pie(painter, chart_rect)
+        except Exception:
+            pass
+        finally:
             painter.end()
-            return
-
-        if self.chart_type == "bar":
-            self._draw_bar(painter, chart_rect)
-        elif self.chart_type == "line":
-            self._draw_line(painter, chart_rect)
-        elif self.chart_type == "pie":
-            self._draw_pie(painter, chart_rect)
-
-        painter.end()
 
     def _draw_empty(self, painter, rect):
         font = QFont("Inter", 9)
@@ -90,7 +92,11 @@ class ChartWidget(QFrame):
 
     def _draw_bar(self, painter, rect):
         bars = self.data[:10]
-        max_val = max((item["value"] for item in bars), default=1) or 1
+        # Safety: filter out invalid entries
+        bars = [b for b in bars if isinstance(b, dict) and "label" in b and "value" in b]
+        if not bars:
+            return  # Empty handled in paintEvent
+        max_val = max((item["value"] for item in bars if isinstance(item.get("value"), (int, float))), default=1) or 1
 
         bottom = rect.bottom() - 22
         chart_h = bottom - rect.top() - 16
@@ -132,7 +138,9 @@ class ChartWidget(QFrame):
     def _draw_line(self, painter, rect):
         if len(self.data) < 2:
             return
-        pts = self.data[:20]
+        pts = [d for d in self.data[:20] if isinstance(d, dict) and "value" in d and isinstance(d.get("value"), (int, float))]
+        if len(pts) < 2:
+            return
         max_val = max((p["value"] for p in pts), default=1) or 1
 
         bottom = rect.bottom() - 4
@@ -186,7 +194,10 @@ class ChartWidget(QFrame):
             painter.drawText(last_x - 20, last_y - 14, 40, 12, Qt.AlignCenter, last_val)
 
     def _draw_pie(self, painter, rect):
-        items = self.data[:7]
+        items = [d for d in self.data[:7] if isinstance(d, dict) and "value" in d and isinstance(d.get("value"), (int, float))]
+        if not items:
+            self._draw_empty(painter, rect)
+            return
         total = sum(item["value"] for item in items) or 1
 
         legend_w = 100

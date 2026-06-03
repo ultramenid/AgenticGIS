@@ -8,16 +8,16 @@ from qgis.PyQt.QtWidgets import (
     QPushButton, QSizePolicy, QWidget,
 )
 
-# Design tokens
-_SURFACE     = "#131316"
-_INPUT_BG    = "#1c1c20"
-_BORDER      = "#27272a"
-_BORDER_SOFT = "#1f1f23"
-_TEXT        = "#fafafa"
-_TEXT_2      = "#a1a1aa"
-_TEXT_3      = "#71717a"
-_DANGER      = "#ef4444"
-_SUCCESS     = "#22c55e"
+# Design tokens - Monochrome minimal
+_SURFACE     = "#1a1a1a"
+_INPUT_BG    = "#222222"
+_BORDER      = "#3a3a3a"
+_BORDER_SOFT = "#2a2a2a"
+_TEXT        = "#f0f0f0"
+_TEXT_2      = "#b0b0b0"
+_TEXT_3      = "#8a8a8a"
+_DANGER      = "#ff6b6b"
+_SUCCESS     = "#86efac"
 
 _DOTS_FRAMES = ["·  ", "·· ", "···", " ··", "  ·"]
 
@@ -112,71 +112,80 @@ class ToolCallBubble(QFrame):
 
     def set_result(self, result_str: str, is_error: bool = False) -> None:
         """Transition widget to Done or Error state with result content."""
-        self._timer.stop()
-        self.dots_label.setVisible(False)
+        try:
+            self._timer.stop()
+            self.dots_label.setVisible(False)
 
-        if is_error:
-            self.state_label.setText("Error")
-            self.status_label.setStyleSheet(f"color: {_DANGER}; font-size: 10px;")
-            self.setStyleSheet(
-                f"QFrame#ToolCallBubble {{"
-                f"  background: #1c0a0a;"
-                f"  border: 1px solid #7f1d1d;"
-                f"  border-radius: 10px;"
-                f"}}"
-            )
-        else:
-            self.state_label.setText("Done")
-            self.status_label.setStyleSheet(f"color: {_SUCCESS}; font-size: 10px;")
+            if is_error:
+                self.state_label.setText("Error")
+                self.status_label.setStyleSheet(f"color: {_DANGER}; font-size: 10px;")
+                self.setStyleSheet(
+                    f"QFrame#ToolCallBubble {{"
+                    f"  background: #1a0a0a;"
+                    f"  border: 1px solid #7f1d1d;"
+                    f"  border-radius: 10px;"
+                    f"}}"
+                )
+            else:
+                self.state_label.setText("Done")
+                self.status_label.setStyleSheet(f"color: {_SUCCESS}; font-size: 10px;")
 
-        self.toggle_btn.setVisible(True)
+            self.toggle_btn.setVisible(True)
 
-        # Build collapsible content
-        content_layout = self.content_widget.layout()
+            # Build collapsible content
+            try:
+                content_layout = self.content_widget.layout()
 
-        mono_style = (
-            f"background: {_INPUT_BG};"
-            f"color: {_TEXT_2};"
-            f"border-radius: 4px;"
-            f"padding: 8px;"
-            f"font-family: Consolas, monospace;"
-            f"font-size: 10px;"
-        )
+                mono_style = (
+                    f"background: {_INPUT_BG};"
+                    f"color: {_TEXT_2};"
+                    f"border-radius: 4px;"
+                    f"padding: 8px;"
+                    f"font-family: Consolas, monospace;"
+                    f"font-size: 10px;"
+                )
 
-        if self._tool_input:
-            raw_input = json.dumps(self._tool_input, indent=2)
-            truncated_input = raw_input[:500] + ("…" if len(raw_input) > 500 else "")
-            input_label = QLabel(truncated_input)
-            input_label.setStyleSheet(mono_style)
-            input_label.setWordWrap(True)
-            input_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
-            content_layout.addWidget(input_label)
+                if self._tool_input:
+                    try:
+                        raw_input = json.dumps(self._tool_input, indent=2)
+                        truncated_input = raw_input[:500] + ("…" if len(raw_input) > 500 else "")
+                        input_label = QLabel(truncated_input)
+                        input_label.setStyleSheet(mono_style)
+                        input_label.setWordWrap(True)
+                        input_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+                        content_layout.addWidget(input_label)
+                    except Exception:
+                        pass
 
-        truncated_result = result_str[:800] + ("…" if len(result_str) > 800 else "")
-        result_label = QLabel(truncated_result)
-        result_label.setStyleSheet(mono_style)
-        result_label.setWordWrap(True)
-        result_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        content_layout.addWidget(result_label)
+                truncated_result = result_str[:800] + ("…" if len(result_str) > 800 else "")
+                result_label = QLabel(truncated_result)
+                result_label.setStyleSheet(mono_style)
+                result_label.setWordWrap(True)
+                result_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+                content_layout.addWidget(result_label)
 
-        copy_btn = QPushButton("Copy")
-        copy_btn.setStyleSheet(
-            f"QPushButton {{"
-            f"  background: transparent;"
-            f"  color: {_TEXT_3};"
-            f"  font-size: 10px;"
-            f"  border: 1px solid {_BORDER};"
-            f"  border-radius: 4px;"
-            f"  padding: 2px 8px;"
-            f"}}"
-            f"QPushButton:hover {{"
-            f"  color: {_TEXT_2};"
-            f"}}"
-        )
-        copy_btn.clicked.connect(lambda: QGuiApplication.clipboard().setText(result_str))
-        content_layout.addWidget(copy_btn, alignment=Qt.AlignLeft)
+                copy_btn = QPushButton("Copy")
+                copy_btn.setStyleSheet(
+                    f"QPushButton {{"
+                    f"  background: transparent;"
+                    f"  color: {_TEXT_3};"
+                    f"  font-size: 10px;"
+                    f"  border: 1px solid {_BORDER};"
+                    f"  border-radius: 4px;"
+                    f"  padding: 2px 8px;"
+                    f"}}"
+                    f"QPushButton:hover {{"
+                    f"  color: {_TEXT_2};"
+                    f"}}"
+                )
+                copy_btn.clicked.connect(lambda: QGuiApplication.clipboard().setText(result_str))
+                content_layout.addWidget(copy_btn, alignment=Qt.AlignLeft)
 
-        self.updateGeometry()
+                self.updateGeometry()
+            except Exception:
+                pass
+        except Exception:
+            pass
 
     # ── Private helpers ───────────────────────────────────────────────────────
 

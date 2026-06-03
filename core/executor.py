@@ -86,19 +86,32 @@ class MainThreadExecutor(QObject):
             self._current_job_id = jid
         try:
             self._submitted.emit(job)
-            if not job.event.wait(timeout):
-                # Mark the job cancelled so a late write from the main thread
-                # becomes a no-op (see _execute).
-                with self._lock:
-                    if self._current_job_id == jid:
-                        self._current_job_id = None
-                job.cancelled = True
-                raise TimeoutError(
-                    "AgenticGIS: main-thread operation timed out "
-                    f"after {timeout}s (the QGIS UI may be busy)."
-                )
+            # Process the event loop periodically while waiting, so we don't
+            # completely block if the main thread is temporarily busy.
+            wait_interval = 0.05  # 50ms chunks
+            elapsed = 0.0
+            while not job.event.wait(wait_interval):
+                # Check if we should stop and if the worker thread is still alive
+                if elapsed >= timeout:
+                    # Mark the job cancelled so a late write from the main thread
+                    # becomes a no-op (see _execute).
+                    with self._lock:
+                        if self._current_job_id == jid:
+                            self._current_job_id = None
+                    job.cancelled = True
+                    raise TimeoutError(
+                        "AgenticGIS: main-thread operation timed out "
+                        f"after {timeout}s (the QGIS UI may be busy)."
+                    )
+                elapsed += wait_interval
             if job.error is not None:
                 raise job.error
+            # If the job was cancelled during the wait, raise TimeoutError
+            # so callers can handle it uniformly.
+            if job.cancelled:
+                raise TimeoutError(
+                    f"AgenticGIS: main-thread operation was cancelled."
+                )
             return job.result
         finally:
             with self._lock:

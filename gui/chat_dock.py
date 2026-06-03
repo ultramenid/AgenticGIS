@@ -29,19 +29,19 @@ from .stats_widget import StatsWidget
 from .typing_indicator import TypingIndicator
 from .ask_user_card import AskUserCard
 
-# ── Design Tokens (dark-minimal palette) ─────────────────────────────
-_SURFACE     = "#131316"
-_CANVAS      = "#0a0a0b"
-_INPUT_BG    = "#1c1c20"
-_BORDER      = "#27272a"
-_BORDER_SOFT = "#1f1f23"
-_TEXT        = "#fafafa"
-_TEXT_2      = "#a1a1aa"
-_TEXT_3      = "#71717a"
-_ACCENT      = "#fafafa"
-_ACCENT_HOV  = "#e4e4e7"
-_DANGER      = "#ef4444"
-_SUCCESS     = "#22c55e"
+# ── Design Tokens (monochrome minimal palette) ─────────────────────────────
+_SURFACE     = "#161616"
+_CANVAS      = "#0a0a0a"
+_INPUT_BG    = "#1e1e1e"
+_BORDER      = "#2e2e2e"
+_BORDER_SOFT = "#242424"
+_TEXT        = "#ececec"
+_TEXT_2      = "#a0a0a0"
+_TEXT_3      = "#707070"
+_ACCENT      = "#e0e0e0"
+_ACCENT_HOV  = "#c8c8c8"
+_DANGER      = "#e57373"
+_SUCCESS     = "#81c784"
 
 
 class ChatWorker(QThread):
@@ -66,8 +66,22 @@ class ChatWorker(QThread):
             self.finished_history.emit(history)
         except Exception:
             import traceback
-            self.event.emit(AgentEvent(EventType.ERROR, {"error": traceback.format_exc()}))
-            self.finished_history.emit(None)
+            try:
+                self.event.emit(AgentEvent(EventType.ERROR, {"error": traceback.format_exc()}))
+            except RuntimeError:
+                # Widget already deleted (QGIS shutting down)
+                pass
+            try:
+                self.finished_history.emit(None)
+            except RuntimeError:
+                # Widget already deleted (QGIS shutting down)
+                pass
+        finally:
+            # Ensure we clean up even on unexpected errors
+            try:
+                self._stop = False  # Reset for potential reuse
+            except Exception:
+                pass
 
 
 class ChatDock(QgsDockWidget):
@@ -129,22 +143,24 @@ class ChatDock(QgsDockWidget):
         top.addStretch(1)
 
         self.status = QLabel(
-            f"<span style='color:{_SUCCESS};'>&#9679;</span> "
+            f"<span style='color:{_SUCCESS};font-size:7px;'>■</span> "
             f"<span style='color:{_TEXT_3}; font-size:11px;'>Ready</span>"
         )
         self.status.setTextFormat(Qt.RichText)
         self.status.setStyleSheet("background: transparent; padding-right: 4px;")
         top.addWidget(self.status)
 
-        for icon, tip in (("⚙", "Settings"), ("⌫", "Clear chat")):
-            btn = QPushButton(icon)
+        for label, tip in (("Set", "Settings"), ("Clr", "Clear chat")):
+            btn = QPushButton(label)
             btn.setToolTip(tip)
-            btn.setFixedSize(28, 28)
+            btn.setFixedSize(32, 28)
             btn.setStyleSheet(f"""
                 QPushButton {{
-                    font-size: 14px;
+                    font-size: 9px;
+                    font-weight: 500;
+                    letter-spacing: 0.04em;
                     border: none;
-                    border-radius: 8px;
+                    border-radius: 6px;
                     background: transparent;
                     color: {_TEXT_3};
                 }}
@@ -255,18 +271,18 @@ class ChatDock(QgsDockWidget):
         pill_layout.addWidget(self.input, 1)
 
         # Send button (circular, accent)
-        self.send_btn = QPushButton("↑")
+        self.send_btn = QPushButton("Send")
         self.send_btn.setToolTip("Send (Enter)")
-        self.send_btn.setFixedSize(32, 32)
+        self.send_btn.setFixedSize(44, 32)
         self.send_btn.setStyleSheet(f"""
             QPushButton {{
                 background-color: {_ACCENT};
                 color: {_CANVAS};
                 border: none;
                 border-radius: 16px;
-                font-size: 15px;
-                font-weight: 700;
-                padding-bottom: 2px;
+                font-size: 10px;
+                font-weight: 600;
+                letter-spacing: 0.03em;
             }}
             QPushButton:hover {{ background-color: {_ACCENT_HOV}; }}
             QPushButton:pressed {{ background-color: {_TEXT_2}; }}
@@ -276,9 +292,9 @@ class ChatDock(QgsDockWidget):
         pill_layout.addWidget(self.send_btn, 0, Qt.AlignVCenter)
 
         # Stop button (circular, danger)
-        self.stop_btn = QPushButton("■")
+        self.stop_btn = QPushButton("Stop")
         self.stop_btn.setToolTip("Stop")
-        self.stop_btn.setFixedSize(32, 32)
+        self.stop_btn.setFixedSize(44, 32)
         self.stop_btn.setStyleSheet(f"""
             QPushButton {{
                 background-color: transparent;
@@ -286,6 +302,8 @@ class ChatDock(QgsDockWidget):
                 border: 1px solid {_DANGER};
                 border-radius: 16px;
                 font-size: 10px;
+                font-weight: 500;
+                letter-spacing: 0.03em;
             }}
             QPushButton:hover {{ background-color: {_DANGER}; color: {_SURFACE}; }}
             QPushButton:disabled {{
@@ -423,7 +441,7 @@ class ChatDock(QgsDockWidget):
         self._ask_user_container.layout().addWidget(card)
         self._ask_user_card = card
         self.status.setText(
-            f"<span style='color:{_TEXT_2};'>&#9679;</span> "
+            f"<span style='color:{_TEXT_2};font-size:7px;'>■</span> "
             f"<span style='color:{_TEXT_3}; font-size:11px;'>Awaiting input</span>"
         )
 
@@ -440,7 +458,7 @@ class ChatDock(QgsDockWidget):
         elif text:
             self._add_user_message(f"\u2192 {text}")
         self.status.setText(
-            f"<span style='color:{_SUCCESS};'>&#9679;</span> "
+            f"<span style='color:{_SUCCESS};font-size:7px;'>■</span> "
             f"<span style='color:{_TEXT_3}; font-size:11px;'>Ready</span>"
         )
         if self._toolkit is not None:
@@ -467,7 +485,7 @@ class ChatDock(QgsDockWidget):
             if w is not None:
                 w.deleteLater()
         self.status.setText(
-            f"<span style='color:{_SUCCESS};'>&#9679;</span> "
+            f"<span style='color:{_SUCCESS};font-size:7px;'>■</span> "
             f"<span style='color:{_TEXT_3}; font-size:11px;'>Ready</span>"
         )
         self._typing_widget = None
@@ -507,7 +525,7 @@ class ChatDock(QgsDockWidget):
         self.stop_btn.setEnabled(True)
         self.stop_btn.setVisible(True)
         self.status.setText(
-            f"<span style='color:{_TEXT_3};'>&#9679;</span> "
+            f"<span style='color:{_TEXT_3};font-size:7px;'>■</span> "
             f"<span style='color:{_TEXT_3}; font-size:11px;'>Thinking</span>"
         )
         self._show_typing()
@@ -534,7 +552,7 @@ class ChatDock(QgsDockWidget):
                     "choice": None, "free_text": None, "cancelled": True,
                 })
             self.status.setText(
-                f"<span style='color:{_DANGER};'>&#9679;</span> "
+                f"<span style='color:{_DANGER};font-size:7px;'>■</span> "
                 f"<span style='color:{_TEXT_3}; font-size:11px;'>Stopping</span>"
             )
 
@@ -582,7 +600,7 @@ class ChatDock(QgsDockWidget):
             # knows the tool didn't return a real error.
             if is_cancelled:
                 self.status.setText(
-                    f"<span style='color:{_DANGER};'>&#9679;</span> "
+                    f"<span style='color:{_DANGER};font-size:7px;'>■</span> "
                     f"<span style='color:{_TEXT_3}; font-size:11px;'>Cancelled</span>"
                 )
             self._maybe_scroll_to_bottom()
@@ -604,7 +622,7 @@ class ChatDock(QgsDockWidget):
 
         elif ev.type == EventType.THINKING:
             self.status.setText(
-                f"<span style='color:{_TEXT_3};'>&#9679;</span> "
+                f"<span style='color:{_TEXT_3};font-size:7px;'>■</span> "
                 f"<span style='color:{_TEXT_3}; font-size:11px;'>Thinking</span>"
             )
 
@@ -620,7 +638,7 @@ class ChatDock(QgsDockWidget):
             self._streaming = False
             self._current_agent_turn = None
             self.status.setText(
-                f"<span style='color:{_SUCCESS};'>&#9679;</span> "
+                f"<span style='color:{_SUCCESS};font-size:7px;'>■</span> "
                 f"<span style='color:{_TEXT_3}; font-size:11px;'>Ready</span>"
             )
             self._scroll_to_bottom()
@@ -657,7 +675,7 @@ class ChatDock(QgsDockWidget):
         self.stop_btn.setVisible(False)
         self._scroll_locked = False
         self.status.setText(
-            f"<span style='color:{_SUCCESS};'>&#9679;</span> "
+            f"<span style='color:{_SUCCESS};font-size:7px;'>■</span> "
             f"<span style='color:{_TEXT_3}; font-size:11px;'>Ready</span>"
         )
         self._worker = None

@@ -1,14 +1,17 @@
-"""Typing indicator — animated wave dots, minimal dark style."""
+"""Typing indicator — animated wave dots, minimal dark style.
+
+Anti-AI-SLOP: no emoji, no heavy icons, pure typography.
+"""
 
 from qgis.PyQt.QtCore import Qt, QTimer
 from qgis.PyQt.QtGui import QFont
 from qgis.PyQt.QtWidgets import QHBoxLayout, QLabel, QSizePolicy, QWidget
 
 # Design tokens (must match chat_dock.py)
-_INPUT_BG    = "#1c1c20"
-_BORDER      = "#27272a"
-_TEXT        = "#fafafa"
-_TEXT_2      = "#a1a1aa"
+_INPUT_BG    = "#1e1e1e"
+_BORDER      = "#2e2e2e"
+_TEXT        = "#ececec"
+_TEXT_2      = "#a0a0a0"
 
 # Wave frames: filled dot = active, circle = inactive
 _WAVE_FRAMES = [

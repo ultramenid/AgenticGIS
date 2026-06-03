@@ -14,12 +14,14 @@ from qgis.PyQt.QtWidgets import (
     QWidget,
 )
 
-_SURFACE  = "#131316"
-_INPUT_BG = "#1c1c20"
-_BORDER   = "#27272a"
-_TEXT     = "#fafafa"
-_TEXT_3   = "#71717a"
-_DANGER   = "#ef4444"
+# Design tokens — darker, softer (match chat_dock.py)
+_SURFACE  = "#161616"
+_INPUT_BG = "#1e1e1e"
+_BORDER   = "#2e2e2e"
+_TEXT     = "#ececec"
+_TEXT_2   = "#a0a0a0"
+_TEXT_3   = "#707070"
+_DANGER   = "#e57373"
 
 
 class StatsWidget(QFrame):
@@ -40,15 +42,14 @@ class StatsWidget(QFrame):
             StatsWidget {{
                 background-color: {_INPUT_BG};
                 border: 1px solid {_BORDER};
-                border-top: 2px solid {_BORDER};
-                border-radius: 8px;
+                border-radius: 10px;
             }}
         """)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
 
         main_layout = QVBoxLayout(self)
         main_layout.setSpacing(8)
-        main_layout.setContentsMargins(12, 10, 12, 10)
+        main_layout.setContentsMargins(14, 12, 14, 12)
 
         layer_name = self.stats_data.get("layer_name", "Layer")
         title = QLabel(layer_name)
@@ -62,41 +63,43 @@ class StatsWidget(QFrame):
         stats_list = []
         total_features = self.stats_data.get("total_features")
         if total_features is not None:
-            stats_list.append(("Features", f"{total_features}", "#2196f3"))
+            stats_list.append(("Features", f"{total_features}"))
         crs = self.stats_data.get("crs")
         if crs:
-            stats_list.append(("CRS", crs, "#4caf50"))
+            stats_list.append(("CRS", crs))
         geometry_type = self.stats_data.get("geometry_type")
         if geometry_type is not None:
             type_names = {0: "Point", 1: "LineString", 2: "Polygon"}
             stats_list.append((
                 "Geometry",
                 type_names.get(geometry_type, f"Type {geometry_type}"),
-                "#ff9800"
             ))
         distinct = self.stats_data.get("distinct_count")
         if distinct is not None:
-            stats_list.append(("Distinct", f"{distinct}", "#9c27b0"))
+            stats_list.append(("Distinct", f"{distinct}"))
         null_count = self.stats_data.get("null_count")
         if null_count is not None:
-            stats_list.append(("Null", f"{null_count}", _DANGER))
+            stats_list.append(("Null", f"{null_count}"))
         min_val = self.stats_data.get("min")
         if min_val is not None:
-            stats_list.append(("Min", f"{min_val}", "#03a9f4"))
+            stats_list.append(("Min", f"{min_val}"))
         max_val = self.stats_data.get("max")
         if max_val is not None:
-            stats_list.append(("Max", f"{max_val}", "#8bc34a"))
+            stats_list.append(("Max", f"{max_val}"))
         mean_val = self.stats_data.get("mean")
         if mean_val is not None:
-            stats_list.append(("Mean", f"{mean_val:.2f}", "#ff9800"))
+            stats_list.append(("Mean", f"{mean_val:.2f}"))
         sum_val = self.stats_data.get("sum")
         if sum_val is not None:
-            stats_list.append(("Sum", f"{sum_val}", "#673ab7"))
+            stats_list.append(("Sum", f"{sum_val}"))
+        stdev_val = self.stats_data.get("stdev")
+        if stdev_val is not None:
+            stats_list.append(("StdDev", f"{stdev_val:.2f}"))
 
         row = 0
         col = 0
-        for label, value, color in stats_list:
-            grid.addWidget(self._create_stat_card(label, value, color), row, col)
+        for label, value in stats_list:
+            grid.addWidget(self._create_stat_card(label, value), row, col)
             col += 1
             if col >= 2:
                 col = 0
@@ -104,7 +107,7 @@ class StatsWidget(QFrame):
 
         main_layout.addLayout(grid)
 
-    def _create_stat_card(self, label, value, color):
+    def _create_stat_card(self, label, value):
         card = QFrame()
         card.setFrameShape(QFrame.NoFrame)
         card.setStyleSheet(f"""
@@ -116,17 +119,17 @@ class StatsWidget(QFrame):
         """)
         layout = QVBoxLayout(card)
         layout.setSpacing(2)
-        layout.setContentsMargins(8, 6, 8, 6)
+        layout.setContentsMargins(10, 8, 10, 8)
 
         label_widget = QLabel(label)
         label_widget.setStyleSheet(
-            f"color: {_TEXT_3}; font-size: 9px; background: transparent;"
+            f"color: {_TEXT_3}; font-size: 9px; background: transparent; letter-spacing: 0.03em;"
         )
         layout.addWidget(label_widget)
 
         value_widget = QLabel(str(value))
         value_widget.setStyleSheet(
-            f"color: {color}; font-size: 15px; font-weight: bold; background: transparent;"
+            f"color: {_TEXT_2}; font-size: 14px; font-weight: 500; background: transparent;"
         )
         value_widget.setWordWrap(True)
         layout.addWidget(value_widget)

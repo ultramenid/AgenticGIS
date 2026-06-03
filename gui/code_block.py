@@ -1,7 +1,6 @@
-"""Code block widget with syntax highlighting for PyQGIS code.
+"""Code block widget — Carbon.sh inspired, minimal, no AI SLOP.
 
-Displays code in a monospaced font with simple keyword highlighting
-and a copy button. Uses only Qt — no external syntax highlighting libs.
+Pure dark surface, generous padding, SF Mono typography, subtle header.
 """
 
 import html
@@ -19,6 +18,20 @@ from qgis.PyQt.QtWidgets import (
     QWidget,
 )
 
+# Carbon.sh-inspired palette
+_BG        = "#111111"
+_HEADER_BG = "#141414"
+_BORDER    = "#1a1a1a"
+_TEXT      = "#cccccc"
+_TEXT_DIM  = "#555555"
+
+# Syntax colors — GitHub Dark / Carbon muted
+_CLR_KEYWORD = "#ff7b72"
+_CLR_QGIS    = "#d2a8ff"
+_CLR_STRING  = "#a5d6ff"
+_CLR_NUMBER  = "#79c0ff"
+_CLR_COMMENT = "#8b949e"
+_CLR_FUNC    = "#d2a8ff"
 
 PYTHON_KEYWORDS = {
     "import", "from", "as", "def", "class", "return", "if", "elif", "else",
@@ -34,7 +47,7 @@ QGIS_KEYWORDS = {
 
 
 class SimplePythonHighlighter(QSyntaxHighlighter):
-    """Lightweight syntax highlighter for Python/PyQGIS code."""
+    """Lightweight syntax highlighter — GitHub Dark palette."""
 
     def __init__(self, document):
         super().__init__(document)
@@ -42,47 +55,36 @@ class SimplePythonHighlighter(QSyntaxHighlighter):
         self._setup_rules()
 
     def _setup_formats(self):
-        # Keyword format
         self.keyword_fmt = QTextCharFormat()
-        self.keyword_fmt.setForeground(QColor("#d73a49"))
-        self.keyword_fmt.setFontWeight(QFont.Bold)
+        self.keyword_fmt.setForeground(QColor(_CLR_KEYWORD))
+        self.keyword_fmt.setFontWeight(QFont.DemiBold)
 
-        # QGIS/PyQGIS format
         self.qgis_fmt = QTextCharFormat()
-        self.qgis_fmt.setForeground(QColor("#6f42c1"))
-        self.qgis_fmt.setFontWeight(QFont.Bold)
+        self.qgis_fmt.setForeground(QColor(_CLR_QGIS))
 
-        # String format
         self.string_fmt = QTextCharFormat()
-        self.string_fmt.setForeground(QColor("#032f62"))
+        self.string_fmt.setForeground(QColor(_CLR_STRING))
 
-        # Number format
         self.number_fmt = QTextCharFormat()
-        self.number_fmt.setForeground(QColor("#005cc5"))
+        self.number_fmt.setForeground(QColor(_CLR_NUMBER))
 
-        # Comment format
         self.comment_fmt = QTextCharFormat()
-        self.comment_fmt.setForeground(QColor("#6a737d"))
+        self.comment_fmt.setForeground(QColor(_CLR_COMMENT))
         self.comment_fmt.setFontStyle(QFont.StyleItalic)
 
-        # Function format
         self.function_fmt = QTextCharFormat()
-        self.function_fmt.setForeground(QColor("#6f42c1"))
+        self.function_fmt.setForeground(QColor(_CLR_FUNC))
 
     def _setup_rules(self):
         from qgis.PyQt.QtCore import QRegularExpression
-        
         self.rules = []
-        # Single-line comments
         self.rules.append((QRegularExpression("#.*"), self.comment_fmt))
-        # Strings (single and double)
-        self.rules.append((QRegularExpression("\"[^\"]*\""), self.string_fmt))
+        self.rules.append((QRegularExpression('"[^"]*"'), self.string_fmt))
         self.rules.append((QRegularExpression("'[^']*'"), self.string_fmt))
 
     def highlightBlock(self, text):
         from qgis.PyQt.QtCore import QRegularExpression
-        
-        # Highlight keywords
+
         for kw in PYTHON_KEYWORDS:
             pattern = QRegularExpression(f"\\b{kw}\\b")
             match_iter = pattern.globalMatch(text)
@@ -90,7 +92,6 @@ class SimplePythonHighlighter(QSyntaxHighlighter):
                 match = match_iter.next()
                 self.setFormat(match.capturedStart(), match.capturedLength(), self.keyword_fmt)
 
-        # Highlight QGIS names
         for name in QGIS_KEYWORDS:
             pattern = QRegularExpression(f"\\b{name}[a-zA-Z]*\\b")
             match_iter = pattern.globalMatch(text)
@@ -98,14 +99,12 @@ class SimplePythonHighlighter(QSyntaxHighlighter):
                 match = match_iter.next()
                 self.setFormat(match.capturedStart(), match.capturedLength(), self.qgis_fmt)
 
-        # Apply regex rules
         for pattern, fmt in self.rules:
             match_iter = pattern.globalMatch(text)
             while match_iter.hasNext():
                 match = match_iter.next()
                 self.setFormat(match.capturedStart(), match.capturedLength(), fmt)
 
-        # Numbers
         number_pattern = QRegularExpression(r"\b\d+\.?\d*\b")
         match_iter = number_pattern.globalMatch(text)
         while match_iter.hasNext():
@@ -114,7 +113,7 @@ class SimplePythonHighlighter(QSyntaxHighlighter):
 
 
 class CodeBlockWidget(QWidget):
-    """A styled code block with syntax highlighting and copy button."""
+    """Carbon.sh-inspired code block — no icons, pure typography."""
 
     def __init__(self, code, language="python", parent=None):
         super().__init__(parent)
@@ -124,80 +123,88 @@ class CodeBlockWidget(QWidget):
 
     def _build_ui(self):
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
-        
+
         main_layout = QVBoxLayout(self)
         main_layout.setContentsMargins(0, 0, 0, 0)
         main_layout.setSpacing(0)
 
-        # Header bar with language label and copy button
+        # ── Minimal header: language + copy ────────────────────────────
         header = QFrame()
-        header.setStyleSheet("""
-            QFrame {
-                background-color: #2d2d2d;
-                border-top-left-radius: 6px;
-                border-top-right-radius: 6px;
-            }
+        header.setStyleSheet(f"""
+            QFrame {{
+                background-color: {_HEADER_BG};
+                border-top-left-radius: 10px;
+                border-top-right-radius: 10px;
+                border: 1px solid {_BORDER};
+                border-bottom: none;
+            }}
         """)
-        header_layout = QHBoxLayout(header)
-        header_layout.setContentsMargins(8, 4, 8, 4)
-        
+        hl = QHBoxLayout(header)
+        hl.setContentsMargins(14, 8, 14, 8)
+        hl.setSpacing(0)
+
         lang_label = QLabel(self.language.upper())
-        lang_label.setStyleSheet("color: #e0e0e0; font: 10px; font-weight: bold;")
-        header_layout.addWidget(lang_label)
-        header_layout.addStretch(1)
-        
+        lang_label.setStyleSheet(
+            f"color: {_TEXT_DIM}; font-family: 'SF Mono', 'JetBrains Mono', monospace; "
+            f"font-size: 10px; letter-spacing: 0.05em; background: transparent;"
+        )
+        hl.addWidget(lang_label)
+        hl.addStretch(1)
+
         copy_btn = QPushButton("Copy")
-        copy_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #424242;
-                color: #e0e0e0;
-                border: none;
-                border-radius: 3px;
-                padding: 2px 8px;
-                font: 9px;
-            }
-            QPushButton:hover {
-                background-color: #505050;
-            }
+        copy_btn.setCursor(Qt.PointingHandCursor)
+        copy_btn.setStyleSheet(f"""
+            QPushButton {{
+                background: transparent;
+                color: {_TEXT_DIM};
+                border: 1px solid {_BORDER};
+                border-radius: 4px;
+                padding: 2px 10px;
+                font-size: 10px;
+            }}
+            QPushButton:hover {{
+                color: {_TEXT};
+                border-color: {_TEXT_DIM};
+            }}
         """)
         copy_btn.clicked.connect(self._copy_code)
-        header_layout.addWidget(copy_btn)
-        
+        hl.addWidget(copy_btn)
+
         main_layout.addWidget(header)
 
-        # Code editor with syntax highlighting
+        # ── Code body ─────────────────────────────────────────────────
         self.editor = QPlainTextEdit()
         self.editor.setReadOnly(True)
         self.editor.setPlainText(self.code)
-        self.editor.setStyleSheet("""
-            QPlainTextEdit {
-                background-color: #1e1e1e;
-                color: #d4d4d4;
-                border: none;
-                border-bottom-left-radius: 6px;
-                border-bottom-right-radius: 6px;
-                padding: 8px;
-                font-family: 'Consolas', 'Monaco', 'Courier New', monospace;
-                font-size: 11px;
-            }
+        self.editor.setStyleSheet(f"""
+            QPlainTextEdit {{
+                background-color: {_BG};
+                color: {_TEXT};
+                border: 1px solid {_BORDER};
+                border-top: none;
+                border-bottom-left-radius: 10px;
+                border-bottom-right-radius: 10px;
+                padding: 14px 16px;
+                font-family: 'SF Mono', 'JetBrains Mono', 'Fira Code', 'Consolas', monospace;
+                font-size: 12.5px;
+                line-height: 1.55;
+            }}
         """)
-        
-        # Calculate height based on lines
+
+        # Auto-height
         fm = QFontMetrics(self.editor.font())
         lines = self.code.count("\n") + 1
-        height = min(max(fm.lineSpacing() * lines + 16, 40), 300)
+        height = min(max(fm.lineSpacing() * lines + 28, 40), 420)
         self.editor.setMaximumHeight(height)
         self.editor.setMinimumHeight(40)
 
-        # Setup highlighter
         self.highlighter = SimplePythonHighlighter(self.editor.document())
-        
         main_layout.addWidget(self.editor)
 
     def _copy_code(self):
         from qgis.PyQt.QtWidgets import QApplication
         QApplication.clipboard().setText(self.code)
-        
+
     def set_code(self, code):
         self.code = code
         self.editor.setPlainText(code)

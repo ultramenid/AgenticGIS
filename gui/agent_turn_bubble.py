@@ -3,6 +3,8 @@
 All tool calls for the turn are grouped in a compact collapsible section
 (max 3 rows visible). The streaming text response appears below.
 Replaces the old approach of separate ToolCallBubble + MessageContainer widgets.
+
+Anti-AI-SLOP: no emoji, no heavy icons, pure typography.
 """
 
 import html as _html
@@ -18,15 +20,17 @@ from qgis.PyQt.QtWidgets import (
 
 from .message_bubble import _md_to_html
 
-_SURFACE     = "#131316"
-_INPUT_BG    = "#1c1c20"
-_BORDER      = "#27272a"
-_BORDER_SOFT = "#1f1f23"
-_TEXT        = "#fafafa"
-_TEXT_2      = "#a1a1aa"
-_TEXT_3      = "#71717a"
-_DANGER      = "#ef4444"
-_SUCCESS     = "#22c55e"
+# Design tokens — darker, softer
+_SURFACE     = "#161616"
+_INPUT_BG    = "#1e1e1e"
+_BORDER      = "#2e2e2e"
+_BORDER_SOFT = "#242424"
+_TEXT        = "#ececec"
+_TEXT_2      = "#a0a0a0"
+_TEXT_3      = "#707070"
+_DANGER      = "#e57373"
+_SUCCESS     = "#81c784"
+_CODE_GREEN  = "#7ee787"
 
 _DOTS = ["·  ", "·· ", "···", " ··", "  ·"]
 MAX_VISIBLE = 3
@@ -42,7 +46,7 @@ class ToolRowWidget(QWidget):
         self._dots_idx = 0
 
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
-        self.setStyleSheet(f"background: transparent;")
+        self.setStyleSheet("background: transparent;")
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
@@ -52,15 +56,16 @@ class ToolRowWidget(QWidget):
         header = QWidget()
         header.setCursor(Qt.PointingHandCursor)
         hbox = QHBoxLayout(header)
-        hbox.setContentsMargins(10, 3, 10, 3)
-        hbox.setSpacing(6)
+        hbox.setContentsMargins(12, 4, 12, 4)
+        hbox.setSpacing(8)
 
-        self.dot = QLabel("●")
-        self.dot.setStyleSheet(f"color:{_TEXT_3}; font-size:8px; min-width:10px;")
-        self.dot.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        # Minimal status dot — tiny square, no emoji
+        self.dot = QLabel("")
+        self.dot.setFixedSize(4, 4)
+        self.dot.setStyleSheet(f"background-color:{_TEXT_3}; border-radius:2px;")
         hbox.addWidget(self.dot)
 
-        mono = QFont("Consolas", 9)
+        mono = QFont("SF Mono", 9)
         mono.setStyleHint(QFont.Monospace)
         name_lbl = QLabel(_html.escape(tool_name))
         name_lbl.setFont(mono)
@@ -68,26 +73,21 @@ class ToolRowWidget(QWidget):
         hbox.addWidget(name_lbl)
         hbox.addStretch()
 
-        self.state_lbl = QLabel("Running")
-        self.state_lbl.setStyleSheet(f"color:{_TEXT_3}; font-size:10px;")
+        self.state_lbl = QLabel("running")
+        self.state_lbl.setStyleSheet(f"color:{_TEXT_3}; font-size:10px; letter-spacing:0.03em;")
         hbox.addWidget(self.state_lbl)
 
         self.dots_lbl = QLabel("···")
-        self.dots_lbl.setStyleSheet(f"color:{_TEXT_3}; font-size:10px; min-width:22px;")
+        self.dots_lbl.setStyleSheet(f"color:{_TEXT_3}; font-size:10px; min-width:22px; letter-spacing:1px;")
         hbox.addWidget(self.dots_lbl)
 
-        self.expand_btn = QPushButton("▶")
-        self.expand_btn.setStyleSheet(f"""
-            QPushButton {{
-                background:transparent; color:{_TEXT_3};
-                border:none; font-size:9px; padding:0 2px;
-            }}
-            QPushButton:hover {{ color:{_TEXT_2}; }}
-        """)
-        self.expand_btn.setFixedSize(18, 18)
-        self.expand_btn.setVisible(False)
-        self.expand_btn.clicked.connect(self._toggle)
-        hbox.addWidget(self.expand_btn)
+        # Expand toggle — text label instead of triangle icon
+        self.expand_lbl = QLabel("")
+        self.expand_lbl.setStyleSheet(f"color:{_TEXT_3}; font-size:10px; cursor:pointer;")
+        self.expand_lbl.setVisible(False)
+        self.expand_lbl.setCursor(Qt.PointingHandCursor)
+        self.expand_lbl.mousePressEvent = lambda _ev: self._toggle()
+        hbox.addWidget(self.expand_lbl)
 
         outer.addWidget(header)
 
@@ -96,12 +96,13 @@ class ToolRowWidget(QWidget):
         self.details.setVisible(False)
         self.details.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         dl = QVBoxLayout(self.details)
-        dl.setContentsMargins(10, 4, 10, 6)
+        dl.setContentsMargins(12, 4, 12, 6)
         dl.setSpacing(4)
 
         mono_ss = (
             f"background:{_SURFACE}; color:{_TEXT_2}; border-radius:4px;"
-            f" padding:6px; font-family:Consolas,monospace; font-size:9px;"
+            f" padding:8px; font-family:'SF Mono',monospace; font-size:9.5px;"
+            f" line-height:1.4;"
         )
 
         if tool_input:
@@ -120,18 +121,18 @@ class ToolRowWidget(QWidget):
         self.result_lbl.setTextInteractionFlags(Qt.TextSelectableByMouse)
         dl.addWidget(self.result_lbl)
 
-        # Copy button
+        # Copy button — minimal
         copy_row = QHBoxLayout()
         copy_row.setContentsMargins(0, 0, 0, 0)
         copy_row.addStretch()
-        self._copy_btn = QPushButton("Copy")
+        self._copy_btn = QPushButton("copy")
         self._copy_btn.setStyleSheet(f"""
             QPushButton {{
                 background:transparent; color:{_TEXT_3};
                 border:1px solid {_BORDER}; border-radius:3px;
-                font-size:9px; padding:1px 6px;
+                font-size:9px; padding:1px 8px;
             }}
-            QPushButton:hover {{ color:{_TEXT_2}; }}
+            QPushButton:hover {{ color:{_TEXT_2}; border-color:{_TEXT_3}; }}
         """)
         self._copy_btn.setVisible(False)
         copy_row.addWidget(self._copy_btn)
@@ -153,19 +154,21 @@ class ToolRowWidget(QWidget):
             self._timer.stop()
             self.dots_lbl.setVisible(False)
             if is_error:
-                self.state_lbl.setText("Error")
-                self.state_lbl.setStyleSheet(f"color:{_DANGER}; font-size:10px;")
-                self.dot.setStyleSheet(f"color:{_DANGER}; font-size:8px;")
+                self.state_lbl.setText("error")
+                self.state_lbl.setStyleSheet(f"color:{_DANGER}; font-size:10px; letter-spacing:0.03em;")
+                self.dot.setStyleSheet(f"background-color:{_DANGER}; border-radius:2px;")
             else:
-                self.state_lbl.setText("Done")
-                self.dot.setStyleSheet(f"color:{_SUCCESS}; font-size:8px;")
+                self.state_lbl.setText("done")
+                self.state_lbl.setStyleSheet(f"color:{_SUCCESS}; font-size:10px; letter-spacing:0.03em;")
+                self.dot.setStyleSheet(f"background-color:{_SUCCESS}; border-radius:2px;")
             truncated = result_str[:600] + ("…" if len(result_str) > 600 else "")
             self.result_lbl.setText(_html.escape(truncated))
             self._copy_btn.setVisible(True)
             self._copy_btn.clicked.connect(
                 lambda: QGuiApplication.clipboard().setText(result_str)
             )
-            self.expand_btn.setVisible(True)
+            self.expand_lbl.setVisible(True)
+            self.expand_lbl.setText("details")
         except RuntimeError:
             pass
 
@@ -174,7 +177,7 @@ class ToolRowWidget(QWidget):
     def _toggle(self):
         self._expanded = not self._expanded
         self.details.setVisible(self._expanded)
-        self.expand_btn.setText("▼" if self._expanded else "▶")
+        self.expand_lbl.setText("hide" if self._expanded else "details")
         self.updateGeometry()
 
     def _tick(self):
@@ -246,7 +249,7 @@ class AgentTurnBubble(QFrame):
         self._more_btn.setStyleSheet(f"""
             QPushButton {{
                 background:transparent; color:{_TEXT_3};
-                border:none; font-size:10px; padding:3px 10px;
+                border:none; font-size:10px; padding:3px 12px;
                 text-align:left;
             }}
             QPushButton:hover {{ color:{_TEXT_2}; }}
@@ -320,7 +323,7 @@ class AgentTurnBubble(QFrame):
             for row in self._rows:
                 row.setVisible(True)
             if n > MAX_VISIBLE and self._tools_expanded:
-                self._more_btn.setText("▲ Collapse tools")
+                self._more_btn.setText("show less")
                 self._more_btn.setVisible(True)
             else:
                 self._more_btn.setVisible(False)
@@ -328,7 +331,7 @@ class AgentTurnBubble(QFrame):
             for i, row in enumerate(self._rows):
                 row.setVisible(i < MAX_VISIBLE)
             hidden = n - MAX_VISIBLE
-            self._more_btn.setText(f"▾  {hidden} more tool{'s' if hidden > 1 else ''}…")
+            self._more_btn.setText(f"+ {hidden} more tool{'s' if hidden > 1 else ''}")
             self._more_btn.setVisible(True)
 
     def _toggle_expand(self):
@@ -339,23 +342,28 @@ class AgentTurnBubble(QFrame):
     # ── Text streaming ───────────────────────────────────────────────────
 
     def set_streaming_text(self, text: str) -> None:
-        """Append delta, apply inline markdown, show cursor ▋."""
+        """Append delta, apply inline markdown, show minimal cursor."""
         if text == self._stream_text:
             return
         delta = _html.escape(text[len(self._stream_text):])
         self._stream_text = text
-        # Inline transforms on delta only
+        # Inline transforms on delta only — tight, en-dash bullets
         delta = re.sub(r"(?m)^- (.+)$",
-            lambda m: f'<div style="padding-left:12px;">• {m.group(1)}</div>', delta)
-        delta = re.sub(r"`([^`\n]+)`",
-            lambda m: (f'<code style="background:{_SURFACE};color:{_SUCCESS};'
+            lambda m: (
+                f'<div style="padding-left:12px; color:{_TEXT}; '
+                f'font-size:13px; line-height:1.35; margin:0 0 1px 0;">'
+                f'<span style="color:{_TEXT_3};margin-right:6px;">—</span>{m.group(1)}</div>'
+            ), delta)
+        delta = re.sub(r"`([^`]+)`",
+            lambda m: (f'<code style="background:{_SURFACE};color:{_CODE_GREEN};'
                        f'border-radius:3px;padding:1px 4px;font-family:monospace;'
-                       f'font-size:12px;">{m.group(1)}</code>'), delta)
+                       f'font-size:12px;letter-spacing:-0.01em;">{m.group(1)}</code>'), delta)
         delta = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", delta)
         delta = re.sub(r"\*(.+?)\*", r"<i>\1</i>", delta)
         delta = delta.replace("\n", "<br>")
         self._stream_html += delta
-        cursor = f'<span style="color:{_TEXT_2};">▋</span>'
+        # Minimal cursor — thin bar
+        cursor = f'<span style="color:{_TEXT_3};font-weight:300;">|</span>'
         self.text_lbl.setText(self._stream_html + cursor)
 
     def finalize_text(self, text: str) -> None:

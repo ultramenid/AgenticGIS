@@ -21,6 +21,7 @@ import time
 import traceback
 from contextlib import redirect_stderr, redirect_stdout
 
+from qgis.PyQt.QtCore import QCoreApplication
 from qgis.core import Qgis
 from qgis.core import (
     QgsApplication,
@@ -42,7 +43,11 @@ from .cancellation import CancellationRegistry as _CancellationRegistry
 def _make_qgs_feedback(event):
     """Build a ``QgsFeedback`` whose ``isCanceled`` mirrors ``event``.
 
-    Falls back to ``None`` (and the caller does nothing) if QGIS isn't around.
+    Every time the algorithm polls ``isCanceled`` we also pump the Qt event
+    loop (throttled to ~50 ms) so the UI stays responsive during heavy
+    geometry operations (clip, dissolve, buffer, …) that run on the main
+    thread.  Falls back to ``None`` (and the caller does nothing) if QGIS
+    isn't around.
     """
     if event is None:
         return None
@@ -51,13 +56,16 @@ def _make_qgs_feedback(event):
     except Exception:  # pragma: no cover
         return None
     fb = QgsFeedback()
-    # Wire via a Python property so we don't have to subclass (some QGIS
-    # builds don't allow subclassing of bound Qt types).
-    def _check():
+    _last_pump = [0.0]
+
+    def _check_and_pump():
+        now = time.monotonic()
+        if now - _last_pump[0] >= 0.05:      # 50 ms throttle
+            _last_pump[0] = now
+            QCoreApplication.processEvents()
         return event.is_set()
-    # Use a small QTimer to keep the event loop ticking while the
-    # feedback polls its cancelled state.
-    fb.isCanceled = lambda: _check()
+
+    fb.isCanceled = _check_and_pump
     return fb
 
 
@@ -504,6 +512,7 @@ class QgisToolkit:
         # doesn't accept ``feedback`` (older QGIS).
         event, owner = self._cancel.register()
         feedback = _make_qgs_feedback(event) if owner else None
+
         try:
             if feedback is not None:
                 try:
@@ -532,6 +541,7 @@ class QgisToolkit:
             return {"ok": False, "error": f"{name}: {msg}"}
         finally:
             self._cancel.release(event)
+
         # F17: processing likely mutated the canvas; mark dirty for the dock.
         self._canvas_dirty = True
         # Outputs may contain layers / non-serialisable objects; stringify.
@@ -586,13 +596,17 @@ class QgisToolkit:
             event, owner = None, False
         try:
             values = {}
-            for feature in layer.getFeatures(req):
+            feature_iter = layer.getFeatures(req)
+            for i, feature in enumerate(feature_iter):
                 if owner and event is not None and event.is_set():
                     return {"ok": False, "error": "cancelled by user", "cancelled": True}
                 val = feature.attribute(field_idx)
                 if val not in values:
                     values[val] = 0
                 values[val] += 1
+                # Yield to the event loop every 100 features to prevent UI freeze
+                if i % 100 == 0:
+                    QCoreApplication.processEvents()
         finally:
             if owner:
                 self._cancel.release(event)
@@ -642,7 +656,7 @@ class QgisToolkit:
             try:
                 values = []
                 numeric_values = []
-                for feature in layer.getFeatures(req):
+                for i, feature in enumerate(layer.getFeatures(req)):
                     if owner and event is not None and event.is_set():
                         return {"ok": False, "error": "cancelled by user", "cancelled": True}
                     val = feature.attribute(field_idx)
@@ -654,6 +668,9 @@ class QgisToolkit:
                             numeric_values.append(float(val))
                         except (TypeError, ValueError):
                             pass
+                    # Yield to the event loop every 100 features to prevent UI freeze
+                    if i % 100 == 0:
+                        QCoreApplication.processEvents()
             finally:
                 if owner:
                     self._cancel.release(event)
