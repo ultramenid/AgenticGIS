@@ -738,6 +738,7 @@ class ChatDock(QgsDockWidget):
                     self._scroll_to_bottom()
 
         elif ev.type == EventType.TOOL_USE:
+            self._hide_typing()
             turn = self._get_or_create_agent_turn()
             if self._current_text:
                 # In a tool turn, any prose emitted before the tool call is
@@ -780,7 +781,6 @@ class ChatDock(QgsDockWidget):
                     f"<span style='color:{_TEXT_3};font-size:7px;'>&#9632;</span> "
                     f"<span style='color:{_TEXT_3}; font-size:11px;'>Thinking</span>"
                 )
-                self._show_typing()
             self._maybe_scroll_to_bottom()
 
         elif ev.type == EventType.ASK_USER:
@@ -799,7 +799,7 @@ class ChatDock(QgsDockWidget):
                 self._add_stats(d)
 
         elif ev.type == EventType.THINKING:
-            # Route thinking text to a ThinkingBlock on the current agent turn.
+            self._hide_typing()
             thinking_text = ev.data.get("text", "")
             if thinking_text:
                 try:
