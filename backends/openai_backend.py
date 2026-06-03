@@ -170,6 +170,12 @@ class OpenAIBackend(AgentBackend):
                     if isinstance(result, dict):
                         is_error = result.get("ok") is False
                         is_cancelled = bool(result.get("cancelled"))
+                    else:
+                        # Non-dict result is a contract violation; treat as
+                        # an error so the model and UI see the failure
+                        # rather than silently accepting a string.
+                        is_error = True
+                        is_cancelled = False
                     payload = json.dumps(result, default=str)
                 except Exception as exc:  # noqa: BLE001
                     payload = f"Tool error: {type(exc).__name__}: {exc}"

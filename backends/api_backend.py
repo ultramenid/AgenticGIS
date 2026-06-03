@@ -173,6 +173,12 @@ class ApiBackend(AgentBackend):
                     if isinstance(result, dict):
                         is_error = result.get("ok") is False
                         is_cancelled = bool(result.get("cancelled"))
+                    else:
+                        # Non-dict result is a contract violation; treat as
+                        # an error so the model and UI see the failure
+                        # rather than silently accepting a string.
+                        is_error = True
+                        is_cancelled = False
                     payload = json.dumps(result, default=str)
                     if len(payload) > 200_000:
                         payload = payload[:200_000] + "\n... [output truncated]"

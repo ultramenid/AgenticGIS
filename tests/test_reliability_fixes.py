@@ -370,3 +370,107 @@ def test_tool_specs_dispatch_includes_new_is_error():
     # Both endpoints the dock relies on for rich render still resolve.
     assert tools.TOOL_BY_NAME["create_chart"]["method"] == "create_chart"
     assert tools.TOOL_BY_NAME["get_layer_statistics"]["method"] == "get_layer_statistics"
+
+
+# =========================================================================
+# Tool result contract: every return from a QgisToolkit method must carry
+# ``ok`` and be a dict. The backends' ``isinstance(result, dict)`` check
+# would silently swallow a non-dict return; the ``is_error = result.get(
+# "ok") is False`` check would miss an error if ``ok: False`` were absent.
+# These tests are source-level hunts so a future regression is caught at
+# test time, not in production.
+# =========================================================================
+def _all_return_dict_literals(src):
+    """Return [(line, dict_literal_str), ...] for every ``return {...}`` in src."""
+    out = []
+    i = 0
+    while True:
+        idx = src.find("return {", i)
+        if idx == -1:
+            break
+        depth = 0
+        j = idx + len("return ")
+        while j < len(src):
+            c = src[j]
+            if c == "{":
+                depth += 1
+            elif c == "}":
+                depth -= 1
+                if depth == 0:
+                    break
+            j += 1
+        literal = src[idx + len("return "):j + 1]
+        line = src[:idx].count("\n") + 1
+        out.append((line, literal))
+        i = j + 1
+    return out
+
+
+def test_tool_result_contract_every_error_has_ok_false():
+    """Every dict return containing ``error`` or ``cancelled`` must also
+    carry ``ok: False`` so the backends' ``is_error = result.get("ok")
+    is False`` check fires. Without this, a tool that returns
+    ``{"error": "..."}`` is silently reported as a success.
+    """
+    with open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                           "..", "core", "toolkit.py")) as f:
+        src = f.read()
+    failures = []
+    for line, lit in _all_return_dict_literals(src):
+        if '"error"' in lit or '"cancelled"' in lit:
+            if '"ok": False' not in lit and '"ok":False' not in lit:
+                failures.append(
+                    f"  L{line}: missing 'ok: False' on error return: "
+                    + lit.replace("\n", " ")[:120]
+                )
+    assert not failures, "Tool-result contract violations:\n" + "\n".join(failures)
+
+
+def test_tool_result_contract_cancelled_paths_have_both_flags():
+    """Every ``cancelled: True`` return must also have ``ok: False``."""
+    with open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                           "..", "core", "toolkit.py")) as f:
+        src = f.read()
+    failures = []
+    for line, lit in _all_return_dict_literals(src):
+        if '"cancelled": True' in lit or '"cancelled":True' in lit:
+            if '"ok": False' not in lit and '"ok":False' not in lit:
+                failures.append(
+                    f"  L{line}: cancelled:True without ok:False: "
+                    + lit.replace("\n", " ")[:120]
+                )
+    assert not failures, "Cancel returns missing ok:False:\n" + "\n".join(failures)
+
+
+def test_tool_result_contract_no_bare_string_returns():
+    """A bare ``return "..."`` on a tool method bypasses the
+    ``isinstance(result, dict)`` guard in every backend — the error
+    string is then sent to the model as if it were a successful
+    result. ``ask_user`` had this bug.
+    """
+    import ast
+    with open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                           "..", "core", "toolkit.py")) as f:
+        tree = ast.parse(f.read())
+    failures = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.ClassDef) or node.name != "QgisToolkit":
+            continue
+        for child in ast.walk(node):
+            if not isinstance(child, ast.FunctionDef):
+                continue
+            if child.name.startswith("_") and child.name not in ("_run_pyqgis_inner",):
+                continue
+            for stmt in ast.walk(child):
+                if not isinstance(stmt, ast.Return) or stmt.value is None:
+                    continue
+                v = stmt.value
+                if isinstance(v, ast.Call) or isinstance(v, ast.Name):
+                    continue
+                if isinstance(v, ast.Constant) and isinstance(v.value, str):
+                    line = stmt.lineno
+                    failures.append(
+                        f"  {child.name} (L{line}): returns bare string "
+                        + repr(v.value)[:80]
+                    )
+    assert not failures, "Tool returns bare strings:\n" + "\n".join(failures)

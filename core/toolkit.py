@@ -139,8 +139,14 @@ class QgisToolkit:
     def ask_user(self, question, options, allow_free_text=True):
         """Toolkit implementation of the ``ask_user`` tool.
 
-        Returns a dict ``{"choice": str|None, "free_text": str|None, "cancelled": bool}``.
-        Returns a plain string error for bad inputs so the agent loop can surface it.
+        Return contract (deliberately different from the other toolkit
+        methods, which wrap returns in ``{"ok": ...}``):
+
+        - Success: a raw dict ``{"choice": str|None, "free_text": str|None, "cancelled": bool}``.
+        - Validation failure (bad options / question, or recursive call): a
+          plain string starting with ``"ask_user: "`` describing the error.
+          The backends do not set ``is_error`` on these — schema validation
+          is a separate concern from operation outcome.
         """
         # Validate options
         if not isinstance(options, (list, tuple)):
