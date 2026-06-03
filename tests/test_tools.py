@@ -27,3 +27,17 @@ def test_list_layers_pagination_schema():
     schema = spec["input_schema"]
     assert "limit" in schema["properties"]
     assert "offset" in schema["properties"]
+
+
+def test_ask_user_spec_registered():
+    """The ask_user tool must be in TOOL_BY_NAME and the Anthropic export."""
+    from core import tools
+    assert "ask_user" in tools.TOOL_BY_NAME
+    spec = tools.TOOL_BY_NAME["ask_user"]
+    assert spec["method"] == "ask_user"
+    assert "question" in spec["input_schema"]["properties"]
+    assert "options" in spec["input_schema"]["properties"]
+    assert spec["input_schema"]["required"] == ["question", "options"]
+    # Must be exported to the Anthropic shape too
+    anthropic_list = tools.anthropic_tool_list()
+    assert any(t["name"] == "ask_user" for t in anthropic_list)

@@ -175,6 +175,48 @@ TOOL_SPECS = [
             "required": ["layer_id"],
         },
     },
+    {
+        "name": "ask_user",
+        "method": "ask_user",
+        "description": (
+            "Pause and ask the user a clarifying question. Use proactively "
+            "when the request is ambiguous (e.g. no analysis field named, "
+            "no CRS target, no comparison layer) and reactively when a "
+            "tool result looks suspicious (no spatial index, empty result, "
+            "schema mismatch, out-of-range value). Wait for the user's "
+            "reply before continuing. Always provide 2-4 options with the "
+            "first one being the recommended choice."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "question": {
+                    "type": "string",
+                    "description": "The clarifying question, in the user's working language.",
+                },
+                "options": {
+                    "type": "array",
+                    "minItems": 2,
+                    "maxItems": 4,
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "label": {"type": "string", "description": "Short button label."},
+                            "description": {"type": "string", "description": "Optional helper text."},
+                        },
+                        "required": ["label"],
+                    },
+                    "description": "2-4 options. The first is the recommended choice.",
+                },
+                "allow_free_text": {
+                    "type": "boolean",
+                    "default": True,
+                    "description": "If true, the user can type a reply instead of picking an option.",
+                },
+            },
+            "required": ["question", "options"],
+        },
+    },
 ]
 
 TOOL_BY_NAME = {spec["name"]: spec for spec in TOOL_SPECS}
