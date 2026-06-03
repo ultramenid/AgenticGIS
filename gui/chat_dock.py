@@ -258,12 +258,20 @@ class ChatDock(QgsDockWidget):
         meta_row.addStretch(1)
         input_bar.addLayout(meta_row)
 
-        # Input box + button row
-        input_row = QHBoxLayout()
-        input_row.setContentsMargins(0, 0, 0, 0)
-        input_row.setSpacing(6)
+        # Input field — action button lives inside the same frame
+        input_frame = QFrame()
+        input_frame.setFixedHeight(38)
+        input_frame.setStyleSheet(f"""
+            QFrame {{
+                background-color: {_INPUT_BG};
+                border: 1px solid {_BORDER};
+                border-radius: 6px;
+            }}
+        """)
+        field_row = QHBoxLayout(input_frame)
+        field_row.setContentsMargins(10, 0, 4, 0)
+        field_row.setSpacing(0)
 
-        # Text input — monospace, rectangular with soft border
         self.input = QPlainTextEdit()
         self.input.setPlaceholderText("Message AgenticGIS…")
         self.input.setFixedHeight(36)
@@ -274,63 +282,51 @@ class ChatDock(QgsDockWidget):
         self.input.setFont(mono_font)
         self.input.setStyleSheet(f"""
             QPlainTextEdit {{
-                background-color: {_INPUT_BG};
+                border: none;
+                background: transparent;
                 color: {_TEXT};
-                border: 1px solid {_BORDER};
-                border-radius: 6px;
-                padding: 6px 10px 6px 10px;
-                selection-background-color: {_TEXT};
-                selection-color: {_CANVAS};
+                padding: 0px;
+                selection-background-color: #3a3a3a;
             }}
         """)
-        input_row.addWidget(self.input, 1)
+        field_row.addWidget(self.input, 1)
 
-        # Send button: arrow
+        # Send button — inside the field frame, right edge
         self.send_btn = QPushButton("→")
         self.send_btn.setToolTip("Send (Enter)")
-        self.send_btn.setFixedSize(32, 28)
+        self.send_btn.setFixedSize(28, 28)
         self.send_btn.setStyleSheet(f"""
             QPushButton {{
-                background-color: {_ACCENT};
-                color: {_CANVAS};
-                border: 1px solid {_ACCENT};
-                border-radius: 4px;
-                font-size: 14px;
-                font-weight: 600;
+                font-size: 14px; font-weight: 600;
+                border: none; border-radius: 4px;
+                background: transparent; color: {_TEXT_2};
             }}
-            QPushButton:hover {{ background-color: {_ACCENT_HOV}; border-color: {_ACCENT_HOV}; }}
-            QPushButton:pressed {{ background-color: {_TEXT_2}; border-color: {_TEXT_2}; }}
-            QPushButton:disabled {{ background-color: {_BORDER}; border-color: {_BORDER}; color: {_TEXT_3}; }}
+            QPushButton:hover {{ background-color: {_BORDER}; color: {_TEXT}; }}
+            QPushButton:pressed {{ color: {_TEXT_3}; }}
+            QPushButton:disabled {{ color: {_TEXT_3}; }}
         """)
         self.send_btn.clicked.connect(self._on_send)
-        input_row.addWidget(self.send_btn, 0, Qt.AlignVCenter)
+        field_row.addWidget(self.send_btn, 0, Qt.AlignVCenter)
 
-        # Stop button: block symbol
+        # Stop button — inside the field frame, replaces send when running
         self.stop_btn = QPushButton("■")
-        self.stop_btn.setToolTip("Stop")
-        self.stop_btn.setFixedSize(32, 28)
+        self.stop_btn.setToolTip("Stop (Esc)")
+        self.stop_btn.setFixedSize(28, 28)
         self.stop_btn.setStyleSheet(f"""
             QPushButton {{
-                background-color: transparent;
-                color: {_DANGER};
-                border: 1px solid {_DANGER};
-                border-radius: 4px;
-                font-size: 11px;
-                font-weight: 500;
+                font-size: 10px;
+                border: none; border-radius: 4px;
+                background: transparent; color: {_DANGER};
             }}
-            QPushButton:hover {{ background-color: {_DANGER}; color: {_SURFACE}; border-color: {_DANGER}; }}
-            QPushButton:disabled {{
-                border: 1px solid {_BORDER};
-                color: {_TEXT_3};
-                background-color: transparent;
-            }}
+            QPushButton:hover {{ background-color: {_BORDER}; }}
+            QPushButton:disabled {{ color: {_TEXT_3}; }}
         """)
         self.stop_btn.clicked.connect(self._on_stop)
         self.stop_btn.setEnabled(False)
         self.stop_btn.setVisible(False)
-        input_row.addWidget(self.stop_btn, 0, Qt.AlignVCenter)
+        field_row.addWidget(self.stop_btn, 0, Qt.AlignVCenter)
 
-        input_bar.addLayout(input_row)
+        input_bar.addWidget(input_frame)
         layout.addWidget(input_wrap)
 
         self.setWidget(container)

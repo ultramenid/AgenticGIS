@@ -587,13 +587,12 @@ class AgentTurnBubble(QFrame):
             self._thinking_block.auto_collapse(elapsed_seconds=elapsed)
         delta = _html.escape(text[len(self._stream_text):])
         self._stream_text = text
-        # Inline transforms on delta only — tight, en-dash bullets
+        # Inline transforms on delta only — gentle dot bullets, natural line-height
         delta = re.sub(
             r"(?m)^- (.+)$",
             lambda m: (
-                f'<div style="padding-left:12px; color:{_TEXT}; '
-                f'font-size:13px; line-height:1.35; margin:0 0 1px 0;">'
-                f'<span style="color:{_TEXT_3};margin-right:6px;">—</span>'
+                f'<div style="padding-left:10px; color:{_TEXT}; line-height:1.6; margin:0;">'
+                f'<span style="color:{_TEXT_3};margin-right:5px;">·</span>'
                 f'{m.group(1)}</div>'
             ),
             delta,
@@ -603,7 +602,7 @@ class AgentTurnBubble(QFrame):
             lambda m: (
                 f'<code style="background:{_SURFACE};color:{_CODE_GREEN};'
                 f'border-radius:3px;padding:1px 4px;font-family:monospace;'
-                f'font-size:12px;letter-spacing:-0.01em;">{m.group(1)}</code>'
+                f'font-size:12px;">{m.group(1)}</code>'
             ),
             delta,
         )

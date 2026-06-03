@@ -119,39 +119,39 @@ def _md_to_html(text: str) -> str:
 
     safe = re.sub(r"```([^\n]*)\n(.*?)```", _save_code_block, safe, flags=re.DOTALL)
 
-    # Headings — tighter, no excess spacing
+    # Headings — inline bold, not block dividers; keeps prose flow natural
     safe = re.sub(
         r"(?m)^### (.+)$",
-        lambda m: (
-            f'<div style="font-size:13px; font-weight:600; color:{_TEXT_2}; '
-            f'margin:10px 0 3px 0;">{m.group(1)}</div>'
-        ),
+        lambda m: f'<b style="color:{_TEXT_2};">{m.group(1)}</b>',
         safe,
     )
     safe = re.sub(
         r"(?m)^## (.+)$",
-        lambda m: (
-            f'<div style="font-size:14px; font-weight:600; color:{_TEXT}; '
-            f'margin:12px 0 4px 0;">{m.group(1)}</div>'
-        ),
+        lambda m: f'<b style="color:{_TEXT};">{m.group(1)}</b>',
         safe,
     )
     safe = re.sub(
         r"(?m)^# (.+)$",
+        lambda m: f'<b style="color:{_TEXT}; font-size:14px;">{m.group(1)}</b>',
+        safe,
+    )
+
+    # Bullet list items — gentle indent, no heavy dash
+    safe = re.sub(
+        r"(?m)^- (.+)$",
         lambda m: (
-            f'<div style="font-size:16px; font-weight:700; color:{_TEXT}; '
-            f'margin:14px 0 4px 0;letter-spacing:-0.01em;">{m.group(1)}</div>'
+            f'<div style="padding-left:10px; color:{_TEXT}; line-height:1.6; margin:0;">'
+            f'<span style="color:{_TEXT_3}; margin-right:5px;">·</span>{m.group(1)}</div>'
         ),
         safe,
     )
 
-    # Bullet list items — tighter line-height, minimal margin, no heavy bullet character
+    # Numbered list items
     safe = re.sub(
-        r"(?m)^- (.+)$",
+        r"(?m)^(\d+)\. (.+)$",
         lambda m: (
-            f'<div style="padding-left:12px; color:{_TEXT}; '
-            f'font-size:13px; line-height:1.35; margin:0 0 1px 0;">'
-            f'<span style="color:{_TEXT_3};margin-right:6px;">—</span>{m.group(1)}</div>'
+            f'<div style="padding-left:10px; color:{_TEXT}; line-height:1.6; margin:0;">'
+            f'<span style="color:{_TEXT_3}; margin-right:5px;">{m.group(1)}.</span>{m.group(2)}</div>'
         ),
         safe,
     )
@@ -160,8 +160,8 @@ def _md_to_html(text: str) -> str:
         r"`([^`]+)`",
         lambda m: (
             f'<code style="background:{_SURFACE}; color:{_CODE_GREEN}; '
-            f'border-radius:4px; padding:1px 5px; font-family:monospace; '
-            f'font-size:12px;letter-spacing:-0.01em;">{m.group(1)}</code>'
+            f'border-radius:3px; padding:1px 4px; font-family:monospace; '
+            f'font-size:12px;">{m.group(1)}</code>'
         ),
         safe,
     )
@@ -177,7 +177,11 @@ def _md_to_html(text: str) -> str:
     for i, block in enumerate(code_blocks):
         safe = safe.replace(f"\x00CODE{i}\x00", block)
 
-    return safe
+    # Wrap in prose container for consistent line-height and font
+    return (
+        f'<div style="line-height:1.6; font-size:13px; color:{_TEXT};">'
+        f'{safe}</div>'
+    )
 
 
 def _md_inline(text: str) -> str:
@@ -189,13 +193,12 @@ def _md_inline(text: str) -> str:
     """
     safe = html.escape(text)
 
-    # Bullet list items — tighter, en-dash instead of bullet
+    # Bullet list items — gentle indent, small dot
     safe = re.sub(
         r"(?m)^- (.+)$",
         lambda m: (
-            f'<div style="padding-left:12px; color:{_TEXT}; '
-            f'font-size:13px; line-height:1.35; margin:0 0 1px 0;">'
-            f'<span style="color:{_TEXT_3};margin-right:6px;">—</span>{m.group(1)}</div>'
+            f'<div style="padding-left:10px; color:{_TEXT}; line-height:1.6; margin:0;">'
+            f'<span style="color:{_TEXT_3}; margin-right:5px;">·</span>{m.group(1)}</div>'
         ),
         safe,
     )
@@ -205,8 +208,8 @@ def _md_inline(text: str) -> str:
         r"`([^`]+)`",
         lambda m: (
             f'<code style="background:{_SURFACE}; color:{_CODE_GREEN}; '
-            f'border-radius:4px; padding:1px 5px; font-family:monospace; '
-            f'font-size:12px;letter-spacing:-0.01em;">{m.group(1)}</code>'
+            f'border-radius:3px; padding:1px 4px; font-family:monospace; '
+            f'font-size:12px;">{m.group(1)}</code>'
         ),
         safe,
     )
