@@ -31,8 +31,8 @@ _TEXT_2      = "#a0a0a0"
 _TEXT_3      = "#707070"
 _ACCENT      = "#e0e0e0"
 _ACCENT_HOV  = "#c8c8c8"
-_DANGER      = "#e57373"
-_SUCCESS     = "#81c784"
+_DANGER      = "#ef4444"
+_SUCCESS     = "#22c55e"
 
 # Carbon.sh-like code block palette
 _CODE_BG     = "#111111"
@@ -251,22 +251,22 @@ class MessageBubble(QFrame):
             bg_color      = "#2a0f10"
             text_color    = "#fecaca"
             border_color  = "#7f1d1d"
-            border_radius = "12px"
+            border_radius = "4px"
         elif self.is_tool:
             bg_color      = _SURFACE
             text_color    = _TEXT_2
             border_color  = _BORDER_SOFT
-            border_radius = "12px"
+            border_radius = "4px"
         elif self.is_user:
             bg_color      = _ACCENT
             text_color    = _CANVAS
             border_color  = _ACCENT
-            border_radius = "14px"
+            border_radius = "12px"
         else:
             bg_color      = _INPUT_BG
             text_color    = _TEXT
             border_color  = _BORDER
-            border_radius = "12px"
+            border_radius = "4px"
 
         self.setStyleSheet(f"""
             MessageBubble {{

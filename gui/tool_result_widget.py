@@ -1,4 +1,4 @@
-"""Collapsible tool result widget — matches dark palette."""
+"""Collapsible tool result widget — matches dark terminal palette."""
 
 import html
 import json
@@ -15,20 +15,16 @@ from qgis.PyQt.QtWidgets import (
     QWidget,
 )
 
-# Design tokens (must match chat_dock.py)
-_SURFACE     = "#131316"
-_INPUT_BG    = "#1c1c20"
-_BORDER      = "#27272a"
-_BORDER_SOFT = "#1f1f23"
-_TEXT        = "#fafafa"
-_TEXT_2      = "#a1a1aa"
-_TEXT_3      = "#71717a"
+# Design tokens (must match agent_turn_bubble.py)
+_SURFACE     = "#161616"
+_INPUT_BG    = "#1e1e1e"
+_BORDER      = "#2e2e2e"
+_TEXT        = "#ececec"
+_TEXT_2      = "#a0a0a0"
+_TEXT_3      = "#707070"
 _DANGER      = "#ef4444"
 _SUCCESS     = "#22c55e"
-
-# Error variant colors — on-palette dark reds
-_ERR_BG      = "#1c0a0a"
-_ERR_BORDER  = "#7f1d1d"
+_WARN        = "#f0a500"
 
 
 class ToolResultWidget(QFrame):
@@ -47,20 +43,15 @@ class ToolResultWidget(QFrame):
         self.setFrameShape(QFrame.NoFrame)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
 
-        if self.is_error:
-            bg_color     = _ERR_BG
-            border_color = _ERR_BORDER
-            accent_color = _DANGER
-        else:
-            bg_color     = _SURFACE
-            border_color = _BORDER_SOFT
-            accent_color = _SUCCESS
+        accent_color = _DANGER if self.is_error else _SUCCESS
 
+        # Left-border accent via border-left, hard-edged 4px radius
         self.setStyleSheet(f"""
             ToolResultWidget {{
-                background-color: {bg_color};
-                border: 1px solid {border_color};
-                border-radius: 8px;
+                background-color: {_SURFACE};
+                border: 1px solid {_BORDER};
+                border-left: 2px solid {accent_color};
+                border-radius: 4px;
             }}
         """)
 
@@ -80,16 +71,17 @@ class ToolResultWidget(QFrame):
         status_dot.setStyleSheet("background: transparent;")
         header.addWidget(status_dot)
 
-        # Tool name — monospace so function names render cleanly
-        name_label = QLabel(html.escape(self.tool_name))
-        mono_font = QFont("Consolas")
+        # Tool name — shown as "tool_name()" in monospace
+        display_name = html.escape(self.tool_name) + "()"
+        name_label = QLabel(display_name)
+        mono_font = QFont("SF Mono")
         mono_font.setStyleHint(QFont.Monospace)
         mono_font.setPointSize(10)
         name_label.setFont(mono_font)
         name_label.setStyleSheet(f"""
             color: {_TEXT_2};
             background: transparent;
-            font-family: 'Consolas', 'Courier New', monospace;
+            font-family: 'SF Mono', 'Consolas', 'Courier New', monospace;
             font-size: 11px;
         """)
         header.addWidget(name_label)
@@ -134,7 +126,7 @@ class ToolResultWidget(QFrame):
                 color: {_TEXT_2};
                 border-radius: 4px;
                 padding: 8px;
-                font-family: 'Consolas', 'Courier New', monospace;
+                font-family: 'SF Mono', 'Consolas', 'Courier New', monospace;
                 font-size: 10px;
             """)
             input_display.setTextFormat(Qt.RichText)
@@ -192,7 +184,7 @@ class ToolResultWidget(QFrame):
             color: {_TEXT_2};
             border-radius: 4px;
             padding: 8px;
-            font-family: 'Consolas', 'Courier New', monospace;
+            font-family: 'SF Mono', 'Consolas', 'Courier New', monospace;
             font-size: 10px;
         """)
         result_display.setTextFormat(Qt.RichText)

@@ -1,34 +1,30 @@
-"""Typing indicator — animated wave dots, minimal dark style.
+"""Typing indicator — blinking terminal cursor, minimal dark style.
 
 Anti-AI-SLOP: no emoji, no heavy icons, pure typography.
 """
 
-from qgis.PyQt.QtCore import Qt, QTimer
+from qgis.PyQt.QtCore import QTimer
 from qgis.PyQt.QtGui import QFont
 from qgis.PyQt.QtWidgets import QHBoxLayout, QLabel, QSizePolicy, QWidget
 
 # Design tokens (must match chat_dock.py)
-_INPUT_BG    = "#1e1e1e"
-_BORDER      = "#2e2e2e"
-_TEXT        = "#ececec"
-_TEXT_2      = "#a0a0a0"
+_INPUT_BG = "#1e1e1e"
+_BORDER   = "#2e2e2e"
+_TEXT     = "#ececec"
+_TEXT_3   = "#707070"
 
-# Wave frames: filled dot = active, circle = inactive
-_WAVE_FRAMES = [
-    "●○○",  # ●○○
-    "●●○",  # ●●○
-    "●●●",  # ●●●
-    "●●○",  # ●●○  (reverse, creates wave feel)
-]
+# Blink states: visible cursor vs blank
+_CURSOR_ON  = "_"
+_CURSOR_OFF = " "
 
 
 class TypingIndicator(QWidget):
-    """Animated wave-dot indicator displayed while the agent is working."""
+    """Blinking terminal-cursor indicator displayed while the agent is working."""
 
     def __init__(self, text="AgenticGIS", parent=None):
         super().__init__(parent)
         self.base_text = text
-        self._frame = 0
+        self._cursor_visible = True
         self._setup_ui()
         # Belt-and-suspenders: stop timer if the widget is destroyed
         # (covers the case where deleteLater fires before stop() is called)
@@ -71,37 +67,38 @@ class TypingIndicator(QWidget):
         """)
         layout.addWidget(self.prefix_label)
 
-        # Dot animation label — secondary text color
-        self.dots_label = QLabel(_WAVE_FRAMES[0])
-        dots_font = QFont()
-        dots_font.setFamily("Inter")
-        dots_font.setPointSize(10)
-        dots_font.setStyleHint(QFont.SansSerif)
-        self.dots_label.setFont(dots_font)
-        self.dots_label.setStyleSheet(f"""
-            color: {_TEXT_2};
+        # Blinking terminal cursor label — dim monospace
+        self.cursor_label = QLabel(_CURSOR_ON)
+        cursor_font = QFont()
+        cursor_font.setFamily("SF Mono")
+        cursor_font.setStyleHint(QFont.Monospace)
+        cursor_font.setPointSize(13)
+        self.cursor_label.setFont(cursor_font)
+        self.cursor_label.setMinimumWidth(12)
+        self.cursor_label.setStyleSheet(f"""
+            color: {_TEXT_3};
             background: transparent;
             border: none;
-            letter-spacing: 2px;
+            font-family: 'SF Mono', 'Consolas', 'Menlo', monospace;
         """)
-        layout.addWidget(self.dots_label)
+        layout.addWidget(self.cursor_label)
         layout.addStretch(1)
 
         outer.addWidget(bubble)
 
         self._timer = QTimer(self)
-        self._timer.timeout.connect(self._update_frame)
-        self._timer.start(380)
+        self._timer.timeout.connect(self._update_blink)
+        self._timer.start(500)
 
-    def _update_frame(self):
-        self._frame = (self._frame + 1) % len(_WAVE_FRAMES)
-        self.dots_label.setText(_WAVE_FRAMES[self._frame])
+    def _update_blink(self):
+        self._cursor_visible = not self._cursor_visible
+        self.cursor_label.setText(_CURSOR_ON if self._cursor_visible else _CURSOR_OFF)
 
     def set_text(self, text):
         self.base_text = text
         self.prefix_label.setText(text)
-        self._frame = 0
-        self.dots_label.setText(_WAVE_FRAMES[0])
+        self._cursor_visible = True
+        self.cursor_label.setText(_CURSOR_ON)
 
     def stop(self):
         """Stop the animation timer. Safe to call multiple times."""
