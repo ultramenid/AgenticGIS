@@ -14,7 +14,7 @@ from qgis.PyQt.QtWidgets import (
     QFrame,
     QHBoxLayout,
     QLabel,
-    QPlainTextEdit,
+    QLineEdit,
     QPushButton,
     QScrollArea,
     QSizePolicy,
@@ -30,22 +30,26 @@ from .stats_widget import StatsWidget
 from .typing_indicator import TypingIndicator
 from .ask_user_card import AskUserCard
 
-# ── Design Tokens (Neural Terminal palette) ────────────────────────────────
-_CANVAS      = "#060810"   # deep navy-black
-_SURFACE     = "#0a0d14"   # card surface
-_SURFACE_2   = "#0d1018"   # slightly elevated
-_BORDER      = "#1a1f2e"   # cool dark border
-_BORDER_SOFT = "#131722"   # very subtle
-_TEXT        = "#cdd6e0"   # cool light
-_TEXT_2      = "#7a8899"   # mid cool gray
-_TEXT_3      = "#3d4a5c"   # dim
-_ACCENT      = "#00d4b8"   # electric teal — PRIMARY
-_ACCENT_DIM  = "#00a896"   # teal dimmed
-_ACCENT_HOV  = "#00b8a0"   # teal hover
-_PURPLE      = "#9d4edd"   # thinking purple
-_WARN        = "#f59e0b"   # amber — tools running
-_SUCCESS     = "#10b981"   # emerald — tools done
-_DANGER      = "#ef4444"   # red — error
+# ── Design Tokens (Mono + Signal palette) ──────────────────────────────────
+_CANVAS      = "#141414"   # transcript / app background (true neutral black)
+_SURFACE     = "#1c1c1c"   # card surface
+_SURFACE_2   = "#232323"   # elevated: chips, inline-code background
+_BORDER      = "#2b2b2b"   # hairline border
+_BORDER_SOFT = "#222222"   # fainter border
+_TEXT        = "#e8e8e8"   # primary text
+_TEXT_2      = "#9a9a9a"   # secondary text
+_TEXT_3      = "#6f6f6f"   # muted meta
+_TEXT_4      = "#4a4a4a"   # faint
+# NO decorative accent. These alias to neutrals so existing refs don't break:
+_ACCENT      = "#e8e8e8"   # primary white (send arrow, etc.)
+_ACCENT_DIM  = "#9a9a9a"
+_ACCENT_HOV  = "#ffffff"
+_PURPLE      = "#6f6f6f"   # thinking -> grayscale dim (NO purple)
+# SIGNAL colors — appear ONLY on tool/message STATE, never on plain text or chrome:
+_WARN        = "#d99a3c"   # amber  — tool running
+_SUCCESS     = "#5aa86f"   # green  — tool done / ready dot
+_DANGER      = "#d05a5a"   # red    — error
+_CODE_GREEN  = "#e8e8e8"   # inline-code text -> grayscale (NO green/teal)
 
 
 class ChatWorker(QThread):
@@ -89,6 +93,8 @@ class ChatWorker(QThread):
 
 
 class ChatDock(QgsDockWidget):
+    _ask_user_signal = pyqtSignal(str, object, bool)
+
     def __init__(self, get_backend, open_settings, request_cancel, toolkit=None, parent=None):
         super().__init__("AgenticGIS", parent)
         self.setObjectName("AgenticGisDock")
@@ -103,16 +109,18 @@ class ChatDock(QgsDockWidget):
         self._typing_widget = None
         self._current_agent_turn = None   # AgentTurnBubble for the active turn
         self._current_tool_row = None      # ToolRowWidget awaiting its result
-        self._current_text = ""            # accumulated streaming text
+        self._current_text = ""            # accumulated final-answer text
+        self._thinking_text = ""           # accumulated thinking/progress text
         self._thinking_started = False     # whether add_thinking_block was called this turn
         self._ask_user_card = None
         self._ask_user_payload = None
         self._scroll_locked = False
         self._programmatic_scroll = False
         self._build_ui()
+        self._ask_user_signal.connect(self._show_ask_user, Qt.QueuedConnection)
         if self._toolkit is not None:
             self._toolkit.set_ask_user_emitter(
-                self._ask_user_emitter
+                self._emit_ask_user_threadsafe
             )
 
     # ------------------------------------------------------------------ #
@@ -135,35 +143,24 @@ class ChatDock(QgsDockWidget):
         top.setContentsMargins(20, 14, 16, 14)
         top.setSpacing(8)
 
-        brand = QLabel("AgenticGIS")
-        brand.setStyleSheet(f"""
-            color: {_TEXT_2};
-            font-family: 'JetBrains Mono', 'Fira Code', monospace;
-            font-size: 13px;
-            font-weight: 600;
-            letter-spacing: -0.01em;
-            background: transparent;
-        """)
-        top.addWidget(brand)
-        top.addStretch(1)
-
         self.status = QLabel(
-            f"<span style='color:{_SUCCESS};font-size:7px;'>&#9632;</span> "
+            f"<span style='color:{_SUCCESS};font-size:8px;'>&#9632;</span> "
             f"<span style='color:{_TEXT_3}; font-size:11px;'>Ready</span>"
         )
         self.status.setTextFormat(Qt.RichText)
         self.status.setStyleSheet("background: transparent; padding-right: 4px;")
         top.addWidget(self.status)
+        top.addStretch(1)
 
-        for label, tip in (("Set", "Settings"), ("Clr", "Clear chat")):
+        for label, tip in (("Setting", "Settings"), ("Clear", "Clear chat")):
             btn = QPushButton(label)
             btn.setToolTip(tip)
-            btn.setFixedSize(32, 28)
+            btn.setFixedSize(58, 28)
             btn.setStyleSheet(f"""
                 QPushButton {{
-                    font-size: 9px;
+                    font-size: 10px;
                     font-weight: 500;
-                    letter-spacing: 0.04em;
+                    letter-spacing: 0;
                     border: none;
                     border-radius: 6px;
                     background: transparent;
@@ -219,8 +216,8 @@ class ChatDock(QgsDockWidget):
         self.transcript_widget = QWidget()
         self.transcript_widget.setStyleSheet(f"background-color: {_CANVAS};")
         self.transcript_layout = QVBoxLayout(self.transcript_widget)
-        self.transcript_layout.setContentsMargins(0, 16, 0, 16)
-        self.transcript_layout.setSpacing(18)
+        self.transcript_layout.setContentsMargins(0, 12, 0, 12)
+        self.transcript_layout.setSpacing(12)
         self.transcript_layout.addStretch(1)
 
         self.scroll.setWidget(self.transcript_widget)
@@ -239,26 +236,11 @@ class ChatDock(QgsDockWidget):
 
         # -- Input bar --------------------------------------------------- #
         input_wrap = QWidget()
+        self._input_wrap = input_wrap  # kept for layout lookups in _show_ask_user
         input_wrap.setStyleSheet(f"background-color: {_CANVAS};")
         input_bar = QVBoxLayout(input_wrap)
-        input_bar.setContentsMargins(16, 10, 16, 14)
-        input_bar.setSpacing(6)
-
-        # Model chip row (above input box)
-        meta_row = QHBoxLayout()
-        meta_row.setContentsMargins(0, 0, 0, 0)
-        meta_row.setSpacing(0)
-        self._model_chip = QLabel(self._get_model_name())
-        self._model_chip.setStyleSheet(f"""
-            color: {_TEXT_3};
-            font-family: 'JetBrains Mono', 'Fira Code', monospace;
-            font-size: 10px;
-            background: transparent;
-            padding: 0;
-        """)
-        meta_row.addWidget(self._model_chip)
-        meta_row.addStretch(1)
-        input_bar.addLayout(meta_row)
+        input_bar.setContentsMargins(8, 8, 8, 8)
+        input_bar.setSpacing(0)
 
         # Input field — action button lives inside the same frame
         input_frame = QFrame()
@@ -274,18 +256,19 @@ class ChatDock(QgsDockWidget):
         field_row.setContentsMargins(10, 0, 4, 0)
         field_row.setSpacing(0)
 
-        self.input = QPlainTextEdit()
+        self.input = QLineEdit()
         self.input.setPlaceholderText("Message AgenticGIS…")
-        self.input.setFixedHeight(36)
-        self.input.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.input.setFixedHeight(28)
+        self.input.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        self.input.setTextMargins(0, 0, 0, 0)
         mono_font = QFont("JetBrains Mono")
         mono_font.setStyleHint(QFont.Monospace)
         mono_font.setPointSize(10)
         self.input.setFont(mono_font)
         self.input.setStyleSheet(f"""
-            QPlainTextEdit {{
+            QLineEdit {{
                 font-family: 'JetBrains Mono', 'Fira Code', monospace;
-                font-size: 13px;
+                font-size: 12px;
                 border: none;
                 background: transparent;
                 color: {_TEXT};
@@ -293,7 +276,7 @@ class ChatDock(QgsDockWidget):
                 selection-background-color: {_BORDER};
             }}
         """)
-        field_row.addWidget(self.input, 1)
+        field_row.addWidget(self.input, 1, Qt.AlignVCenter)
 
         # Send button — inside the field frame, right edge
         self.send_btn = QPushButton("→")
@@ -355,7 +338,8 @@ class ChatDock(QgsDockWidget):
 
     def _refresh_model_chip(self):
         """Update the model chip text (call after backend changes)."""
-        self._model_chip.setText(self._get_model_name())
+        if hasattr(self, "_model_chip"):
+            self._model_chip.setText(self._get_model_name())
 
     def showEvent(self, event):
         super().showEvent(event)
@@ -386,8 +370,18 @@ class ChatDock(QgsDockWidget):
         except RuntimeError:
             self._programmatic_scroll = False
 
+    def _scroll_to_bottom_after_layout(self):
+        """Scroll to bottom on the next event-loop tick, when the layout
+        has had a chance to reflow and the new content is part of
+        the scroll range. Call this after adding widgets, especially
+        before streaming starts."""
+        QTimer.singleShot(0, self._scroll_to_bottom)
+
     def _on_scroll_changed(self, value):
-        """Detect user-initiated scroll during streaming and lock auto-scroll."""
+        """Detect user-initiated scroll during streaming and lock auto-scroll.
+        Only lock when the user scrolls *up* by a meaningful amount, and
+        only while streaming. Outside streaming, never lock — the user
+        should be free to scroll wherever they want."""
         if self._programmatic_scroll or not self._streaming:
             return
         vs = self.scroll.verticalScrollBar()
@@ -402,7 +396,10 @@ class ChatDock(QgsDockWidget):
             self._scroll_to_bottom()
 
     def _add_widget(self, widget):
-        """Insert widget above the trailing stretch."""
+        """Insert widget above the trailing stretch, then scroll to bottom
+        on the next tick so the layout has time to reflow. Without the
+        singleShot, the scrollbar maximum is still its pre-insert value
+        and we scroll to the wrong place."""
         self.transcript_layout.insertWidget(self.transcript_layout.count() - 1, widget)
         QTimer.singleShot(0, self._scroll_to_bottom)
 
@@ -450,48 +447,111 @@ class ChatDock(QgsDockWidget):
             self._typing_widget = None
 
     # ------------------------------------------------------------------ #
-    def _ask_user_emitter(self, question, options, allow_free_text):
-        """Called by the toolkit on the main thread to surface a question."""
-        self._show_ask_user(question, options, allow_free_text)
+    def _emit_ask_user_threadsafe(self, question, options, allow_free_text):
+        """Called by the toolkit from worker threads to surface a question."""
+        self._ask_user_signal.emit(question, options, allow_free_text)
 
     def _show_ask_user(self, question, options, allow_free_text):
-        """Build and show the AskUserCard popover; record the pending slot."""
+        """Build and show the AskUserCard as a modal-style popover.
+
+        Renders a translucent backdrop over the entire chat body, with
+        a centered card on top. The user cannot miss it — it lives in
+        the middle of their attention, not in some strip near the
+        input they have to hunt for.
+
+        The overlay is a child widget of the dock's main container so
+        it floats above the transcript. It is created once and shown /
+        hidden as needed; the card inside is rebuilt per question.
+        """
         if self._ask_user_card is not None:
             return
         self._hide_typing()
         self._ask_user_payload = None
-        card = AskUserCard(question, options, allow_free_text=allow_free_text, parent=self)
-        card.submitted.connect(self._resolve_ask_user)
-        if not hasattr(self, "_ask_user_container") or self._ask_user_container is None:
+
+        # ── Backdrop + card overlay ──────────────────────────────────────
+        if not hasattr(self, "_ask_overlay") or self._ask_overlay is None:
             from qgis.PyQt.QtWidgets import QWidget as _QW
-            self._ask_user_container = _QW()
-            self._ask_user_container.setStyleSheet(f"background-color: {_CANVAS};")
-            self.widget().layout().addWidget(self._ask_user_container)
-        from qgis.PyQt.QtWidgets import QVBoxLayout as _QV
-        if self._ask_user_container.layout() is None:
-            self._ask_user_container.setLayout(_QV())
-            self._ask_user_container.layout().setContentsMargins(16, 0, 16, 8)
-        self._ask_user_container.layout().addWidget(card)
+            self._ask_overlay = _QW(self)
+            # Translucent dark backdrop — dims the chat behind the
+            # card. The card itself is a separate child widget we
+            # center on top.
+            self._ask_overlay.setStyleSheet("background-color: rgba(0, 0, 0, 140);")
+            self._ask_overlay.setAttribute(Qt.WA_StyledBackground, True)
+            # Make sure the overlay never grabs focus away from the
+            # card's buttons — the card's child buttons must be
+            # clickable.
+            self._ask_overlay.setFocusPolicy(Qt.NoFocus)
+
+            self._ask_card_frame = _QW(self._ask_overlay)
+            # Transparent positioning frame. AskUserCard owns the actual
+            # surface so we do not render a card inside another card.
+            self._ask_card_frame.setObjectName("AskUserOverlayCard")
+            self._ask_card_frame.setStyleSheet(f"""
+                QWidget#AskUserOverlayCard {{
+                    background-color: transparent;
+                    border: none;
+                }}
+            """)
+            from qgis.PyQt.QtWidgets import QVBoxLayout as _QV
+            card_layout = _QV(self._ask_card_frame)
+            card_layout.setContentsMargins(0, 0, 0, 0)
+            card_layout.setSpacing(0)
+            # The actual AskUserCard (with question + buttons) goes here
+            self._ask_card_layout = card_layout
+        # Build the actual interactive card
+        card = AskUserCard(question, options, allow_free_text=allow_free_text, parent=self._ask_card_frame)
+        card.submitted.connect(self._resolve_ask_user)
+        self._ask_card_layout.addWidget(card)
+        self._ask_card = card
+
+        # Position the overlay to cover the dock's viewport area. We
+        # use the dock widget's rect, accounting for the top-bar height
+        # so the overlay doesn't sit on top of the status bar.
+        self._ask_overlay.setGeometry(self._overlay_rect())
+        self._position_ask_card()
+        self._ask_overlay.show()
+        self._ask_overlay.raise_()
+        # Hand keyboard focus to the first option button so the user
+        # can press Enter to confirm.
+        try:
+            first_option = card.findChild(QFrame, "AskUserOptionRow")
+            if first_option is not None:
+                first_option.setFocus(Qt.OtherFocusReason)
+        except Exception:
+            pass
         self._ask_user_card = card
         self.status.setText(
-            f"<span style='color:{_TEXT_2};font-size:7px;'>&#9632;</span> "
-            f"<span style='color:{_TEXT_3}; font-size:11px;'>Awaiting input</span>"
+            f"<span style='color:{_WARN};font-size:8px;'>&#9632;</span> "
+            f"<span style='color:{_TEXT_2}; font-size:11px;'>Awaiting input</span>"
         )
 
     def _resolve_ask_user(self, payload):
         """User picked an option or typed a reply; close the card and unblock."""
         self._ask_user_payload = payload
+        # Tear down the overlay + card so the chat becomes interactive
+        # again. We keep the overlay widget itself (cheap) but hide it
+        # and clear the inner card so the next question rebuilds clean.
         if self._ask_user_card is not None:
             self._ask_user_card.deleteLater()
             self._ask_user_card = None
+        if hasattr(self, "_ask_overlay") and self._ask_overlay is not None:
+            self._ask_overlay.hide()
+        if hasattr(self, "_ask_card_layout") and self._ask_card_layout is not None:
+            # Remove all children so the next ask starts fresh
+            while self._ask_card_layout.count():
+                item = self._ask_card_layout.takeAt(0)
+                if item.widget() is not None:
+                    item.widget().deleteLater()
         label = payload.get("choice")
         text = payload.get("free_text")
-        if label:
-            self._add_user_message(f"→ {label}")
-        elif text:
-            self._add_user_message(f"→ {text}")
+        chosen_text = label or text
+        if chosen_text:
+            try:
+                self._get_or_create_agent_turn().set_user_decision(chosen_text)
+            except Exception:
+                pass
         self.status.setText(
-            f"<span style='color:{_SUCCESS};font-size:7px;'>&#9632;</span> "
+            f"<span style='color:{_SUCCESS};font-size:8px;'>&#9632;</span> "
             f"<span style='color:{_TEXT_3}; font-size:11px;'>Ready</span>"
         )
         if self._toolkit is not None:
@@ -502,6 +562,37 @@ class ChatDock(QgsDockWidget):
                 "cancelled": cancelled,
             })
 
+    def _overlay_rect(self):
+        """Return the rect for the ask_user overlay.
+
+        Covers the chat body and input area, but skips the top status
+        bar. Coordinates are in the parent (dock widget) frame.
+        """
+        # The dock widget's body rect, in dock-local coordinates.
+        return self.rect()
+
+    def _position_ask_card(self):
+        if not hasattr(self, "_ask_overlay") or self._ask_overlay is None:
+            return
+        if not hasattr(self, "_ask_card_frame") or self._ask_card_frame is None:
+            return
+        ov = self._ask_overlay.geometry()
+        available_w = max(280, ov.width() - 32)
+        card_w = min(560, available_w)
+        self._ask_card_frame.setFixedWidth(card_w)
+        card_size = self._ask_card_frame.sizeHint()
+        card_h = min(card_size.height(), max(240, ov.height() - 32))
+        cx = ov.x() + (ov.width() - card_w) // 2
+        cy = ov.y() + (ov.height() - card_h) // 2
+        self._ask_card_frame.setGeometry(cx, cy, card_w, card_h)
+
+    def resizeEvent(self, event):
+        # Keep the ask_user overlay sized to the dock if it's visible.
+        if hasattr(self, "_ask_overlay") and self._ask_overlay is not None and self._ask_overlay.isVisible():
+            self._ask_overlay.setGeometry(self.rect())
+            self._position_ask_card()
+        super().resizeEvent(event)
+
     # ------------------------------------------------------------------ #
     def _clear(self):
         if self._ask_user_card is not None:
@@ -511,6 +602,9 @@ class ChatDock(QgsDockWidget):
                 })
             self._ask_user_card.deleteLater()
             self._ask_user_card = None
+        # Hide the overlay (modal dialog state) on clear
+        if hasattr(self, "_ask_overlay") and self._ask_overlay is not None:
+            self._ask_overlay.hide()
         self._history = []
         while self.transcript_layout.count() > 1:
             item = self.transcript_layout.takeAt(0)
@@ -518,20 +612,21 @@ class ChatDock(QgsDockWidget):
             if w is not None:
                 w.deleteLater()
         self.status.setText(
-            f"<span style='color:{_SUCCESS};font-size:7px;'>&#9632;</span> "
+            f"<span style='color:{_SUCCESS};font-size:8px;'>&#9632;</span> "
             f"<span style='color:{_TEXT_3}; font-size:11px;'>Ready</span>"
         )
         self._typing_widget = None
         self._current_agent_turn = None
         self._current_tool_row = None
         self._current_text = ""
+        self._thinking_text = ""
         self._thinking_started = False
         self._scroll_locked = False
 
     def _on_send(self):
         if self._worker is not None:
             return
-        message = self.input.toPlainText().strip()
+        message = self.input.text().strip()
         if not message:
             return
 
@@ -546,14 +641,19 @@ class ChatDock(QgsDockWidget):
 
         self.input.clear()
         self._add_user_message(message)
-        self._scroll_to_bottom()
+        # Reset scroll lock and force-scroll to bottom. The user just hit
+        # send, so they want to see the response that follows. We use
+        # the deferred-scroll path so the new message widget has been
+        # laid out into the scroll range first.
+        self._scroll_locked = False
+        self._scroll_to_bottom_after_layout()
         self._streaming = False
         self._pending_tool = None
         self._current_text = ""
+        self._thinking_text = ""
         self._current_agent_turn = None
         self._current_tool_row = None
         self._thinking_started = False
-        self._scroll_locked = False
 
         self.send_btn.setEnabled(False)
         self.send_btn.setVisible(False)
@@ -594,34 +694,49 @@ class ChatDock(QgsDockWidget):
     # ------------------------------------------------------------------ #
     def _on_event(self, ev):
         if ev.type == EventType.TEXT:
-            # Finalize any active thinking block before streaming text
-            if self._thinking_started and self._current_agent_turn is not None:
-                try:
-                    self._current_agent_turn.finalize_thinking()
-                except Exception:
-                    pass
-                self._thinking_started = False
-
-            if not self._streaming:
-                self._streaming = True
-                self._current_text = ""
+            self._hide_typing()
             delta = ev.data.get("text", "")
             if delta:
+                turn = self._get_or_create_agent_turn()
+                if self._current_tool_row is not None:
+                    self._current_tool_row.append_reasoning(delta)
+                    if not self._scroll_locked:
+                        self._scroll_to_bottom()
+                    return
+
+                # Final-answer text begins after thinking/progress. Collapse
+                # the thinking block so the turn stays compact.
+                if self._thinking_started and self._current_agent_turn is not None:
+                    try:
+                        self._current_agent_turn.finalize_thinking()
+                    except Exception:
+                        pass
+                    self._thinking_started = False
+
+                if not self._streaming:
+                    self._streaming = True
                 self._current_text += delta
                 # Render every token immediately for real-time feel —
                 # the delta-based renderer in AgentTurnBubble is cheap,
                 # so no debounce is needed.
-                turn = self._get_or_create_agent_turn()
                 turn.set_streaming_text(self._current_text)
                 if not self._scroll_locked:
                     self._scroll_to_bottom()
 
         elif ev.type == EventType.TOOL_USE:
+            turn = self._get_or_create_agent_turn()
+            if self._current_text:
+                # In a tool turn, any prose emitted before the tool call is
+                # progress/reasoning. Keep it visible in the thinking block
+                # and remove it from the final-answer buffer.
+                self._append_thinking_text(self._current_text)
+                turn.clear_streaming_text()
+                self._current_text = ""
+                self._streaming = False
             self._finish_streaming()
             tool_name = ev.data.get("name", "tool")
             tool_input = ev.data.get("input", {})
             self._pending_tool = (tool_name, tool_input)
-            turn = self._get_or_create_agent_turn()
             self._current_tool_row = turn.add_tool(tool_name, tool_input)
             self._maybe_scroll_to_bottom()
 
@@ -646,6 +761,12 @@ class ChatDock(QgsDockWidget):
                     f"<span style='color:{_DANGER};font-size:7px;'>&#9632;</span> "
                     f"<span style='color:{_TEXT_3}; font-size:11px;'>Cancelled</span>"
                 )
+            else:
+                self.status.setText(
+                    f"<span style='color:{_TEXT_3};font-size:7px;'>&#9632;</span> "
+                    f"<span style='color:{_TEXT_3}; font-size:11px;'>Thinking</span>"
+                )
+                self._show_typing()
             self._maybe_scroll_to_bottom()
 
         elif ev.type == EventType.ASK_USER:
@@ -665,17 +786,10 @@ class ChatDock(QgsDockWidget):
 
         elif ev.type == EventType.THINKING:
             # Route thinking text to a ThinkingBlock on the current agent turn.
-            turn = self._get_or_create_agent_turn()
-            if not self._thinking_started:
-                try:
-                    turn.add_thinking_block()
-                except Exception:
-                    pass
-                self._thinking_started = True
             thinking_text = ev.data.get("text", "")
             if thinking_text:
                 try:
-                    turn.set_thinking_text(thinking_text)
+                    self._append_thinking_text(thinking_text)
                 except Exception:
                     pass
             self.status.setText(
@@ -694,9 +808,10 @@ class ChatDock(QgsDockWidget):
             self._finish_streaming()
             self._streaming = False
             self._thinking_started = False
+            self._thinking_text = ""
             self._current_agent_turn = None
             self.status.setText(
-                f"<span style='color:{_SUCCESS};font-size:7px;'>&#9632;</span> "
+                f"<span style='color:{_SUCCESS};font-size:8px;'>&#9632;</span> "
                 f"<span style='color:{_TEXT_3}; font-size:11px;'>Ready</span>"
             )
             self._scroll_to_bottom()
@@ -705,19 +820,37 @@ class ChatDock(QgsDockWidget):
     def _finish_streaming(self):
         """Finalize streaming text in current agent turn — applies full markdown.
 
-        The bubble already received every token via set_streaming_text, so we
-        just call finalize_text to apply full markdown (code blocks, tables,
-        headings) and drop the cursor.  We do *not* clear ``_current_text``
-        so that text streaming can resume into the same bubble after the
-        tool returns (otherwise the pre-tool text gets lost).
+        The bubble already received every final-answer token via
+        set_streaming_text, so we just call finalize_text to apply full
+        markdown (code blocks, tables, headings) and drop the cursor.
+        Tool/progress prose lives in thinking/tool-row buffers instead.
         """
         if self._current_text:
             turn = self._get_or_create_agent_turn()
             turn.finalize_text(self._current_text)
+            turn.finalize()
         elif self._current_agent_turn is None:
             # No text and no turn yet — create an empty turn so the tool row
             # has somewhere to live.
             self._get_or_create_agent_turn()
+
+    def _append_thinking_text(self, text: str):
+        """Append progress/reasoning text into the turn's thinking block."""
+        if not text:
+            return
+        turn = self._get_or_create_agent_turn()
+        if not self._thinking_started:
+            try:
+                turn.add_thinking_block()
+            except Exception:
+                pass
+            self._thinking_started = True
+
+        if self._thinking_text and not self._thinking_text.endswith((" ", "\n")):
+            if not text.startswith((" ", "\n", ".", ",", ":", ";", ")")):
+                self._thinking_text += " "
+        self._thinking_text += text
+        turn.set_thinking_text(self._thinking_text)
 
     def _on_finished(self, history):
         self._history = history if history is not None else self._history
@@ -734,7 +867,7 @@ class ChatDock(QgsDockWidget):
         self._scroll_locked = False
         self._thinking_started = False
         self.status.setText(
-            f"<span style='color:{_SUCCESS};font-size:7px;'>&#9632;</span> "
+            f"<span style='color:{_SUCCESS};font-size:8px;'>&#9632;</span> "
             f"<span style='color:{_TEXT_3}; font-size:11px;'>Ready</span>"
         )
         self._worker = None

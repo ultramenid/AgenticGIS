@@ -34,7 +34,6 @@ _SUCCESS     = "#5aa86f"
 _DANGER      = "#d05a5a"
 
 _BRAILLE = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
-QWIDGETSIZE_MAX = 16777215
 
 
 class ReasoningTicker(QWidget):
@@ -163,6 +162,8 @@ class ToolSubItem(QWidget):
 
     def mark_done(self, is_error: bool = False) -> None:
         """Stop spinner and show ✓ or !. Internal — call set_result() from chat_dock."""
+        if self._done:
+            return
         self._done = True
         try:
             self._timer.stop()
