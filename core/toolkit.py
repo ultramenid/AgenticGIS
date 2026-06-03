@@ -835,12 +835,19 @@ class QgisToolkit:
         event, owner = self._cancel.register()
         try:
             result = self._run_pyqgis_inner(code, event, owner)
+            elapsed_ms = int((time.perf_counter() - start) * 1000)
             log_event(
                 "toolkit.run_pyqgis.end",
-                elapsed_ms=int((time.perf_counter() - start) * 1000),
+                elapsed_ms=elapsed_ms,
                 ok=bool(result.get("ok")) if isinstance(result, dict) else None,
                 cancelled=bool(result.get("cancelled")) if isinstance(result, dict) else False,
             )
+            if elapsed_ms > 5000 and isinstance(result, dict):
+                result["slow_ms"] = elapsed_ms
+                result.setdefault("hint", (
+                    f"This call took {elapsed_ms // 1000}s on the QGIS main thread. "
+                    "For field stats use get_layer_statistics; for summaries use analyze_layer."
+                ))
             return result
         finally:
             self._cancel.release(event)
