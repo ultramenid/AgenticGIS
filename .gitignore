@@ -26,6 +26,10 @@ Thumbs.db
 *.qgs~
 *.qgz~
 
+# QGIS style databases — auto-created when the plugin references
+# style APIs, but the plugin ships no symbol library.
+*.db
+
 # Local env & runtime logs
 .env
 *.log
