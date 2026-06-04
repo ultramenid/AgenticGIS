@@ -28,30 +28,53 @@ it, and connect.
 
 ## How it works
 
+When you send a message, the agent runs a **think → call tool → observe** loop
+until it has a complete answer:
+
+1. **You type** a request in the chat dock.
+2. **The LLM** reads your project state (layers, CRS, extent) and decides which
+   tool to call.
+3. **The tool executes** inside the live QGIS session — on the main thread, with
+   full access to layers, canvas, Processing algorithms, and every installed
+   plugin.
+4. **The result** streams back: text, a table, a chart, or a new layer added to
+   the project.
+
+Steps 2–4 repeat automatically. One message can trigger a whole chain of tools
+— load data → run an algorithm → visualise the output — without any
+intermediate prompting from you.
+
 ```
-QGIS (main thread)
- ├─ Chat dock (you type here)
- ├─ QgisToolkit ............ run_pyqgis / project state / processing / layers
- ├─ MainThreadExecutor ..... marshals every QGIS op onto the main thread
- ├─ Backend (pluggable):
- │    • CLI tool  → spawns Claude Code / OpenCode → talks to the MCP bridge
- │    • API key   → in-process Anthropic tool-use loop (stdlib urllib)
- │    • Subscription → same loop, OAuth/bearer via env
- └─ MCP bridge (background thread) ... stdlib http.server exposing the toolkit
+ Chat dock  ──────────────────────────────────────────────────────
+   │  your message
+   ▼
+ Backend (your choice)
+   • API key      ──►  Anthropic / OpenAI / Groq / Gemini / DeepSeek / …
+   • CLI tool     ──►  Claude Code / OpenCode  (already logged in, no key)
+   • Custom URL   ──►  any OpenAI- or Anthropic-compatible endpoint
+   │
+   │  tool-use loop (think → call → observe)
+   ▼
+ Tool layer
+   • run_pyqgis          arbitrary PyQGIS — layers, canvas, plugins, console
+   • run_processing      GDAL / GRASS / SAGA / native Processing algorithms
+   • gee_*               Google Earth Engine imagery and indices
+   • get_project_state   layer list, CRS, extent, field schemas
+   • web_fetch           pull a public URL or API response
+   │
+   │  every call marshalled to the QGIS main thread
+   ▼
+ QGIS session  ───  your layers · canvas · toolbox · installed plugins
 ```
 
-The catch-all tool is `run_pyqgis`, which executes arbitrary PyQGIS — that is
-what makes "all features + all plugins" possible. Convenience tools
-(`get_project_state`, `run_processing`, `list_plugins`, …) keep common requests
-cheap and reliable. The same tool set is exposed both in-process (API mode) and
-over MCP (CLI mode) from one definition in `core/tools.py`.
+`run_pyqgis` is the catch-all: it executes arbitrary Python inside the running
+QGIS session, which is what makes "anything QGIS can do" available to the
+agent. Dedicated tools (`run_processing`, `gee_add_layer`, `list_layers`, …)
+handle the most common operations efficiently without writing code each time.
 
-Both transports are hand-rolled on the standard library:
-`backends/anthropic_http.py` (Messages API over `urllib`, SSE streaming) and
-`server/mcp_server.py` (MCP = JSON-RPC 2.0 over `http.server`). This is why
-there is nothing to install and it works on any QGIS, including the Python 3.9
-that the official macOS `.dmg` ships
-([qgis/QGIS#54491](https://github.com/qgis/QGIS/issues/54491)).
+**Zero dependencies.** Both connection paths run on the Python standard library
+— `urllib` for the API wire protocol, `http.server` for the local MCP bridge —
+so nothing needs to be installed and it works on any QGIS Python.
 
 ## Connection modes (Settings → Connect via)
 
