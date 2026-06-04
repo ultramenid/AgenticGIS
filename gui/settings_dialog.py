@@ -22,6 +22,7 @@ from qgis.PyQt.QtWidgets import (
     QScrollArea,
     QSizePolicy,
     QStackedWidget,
+    QTabBar,
     QVBoxLayout,
     QWidget,
 )
@@ -108,6 +109,25 @@ _COMBO_SS = (
     f"  background: {_INPUT_BG}; color: {_TEXT};"
     f"  border: 1px solid {_BORDER};"
     f"  selection-background-color: {_BORDER}; outline: none;"
+    f"}}"
+)
+
+_TAB_SS = (
+    f"QTabBar {{"
+    f"  background: transparent;"
+    f"}}"
+    f"QTabBar::tab {{"
+    f"  background: {_INPUT_BG}; color: {_TEXT_3};"
+    f"  border: 1px solid {_BORDER_SOFT}; border-radius: 6px;"
+    f"  padding: 7px 10px; margin-right: 6px;"
+    f"}}"
+    f"QTabBar::tab:hover {{"
+    f"  background: {_SURFACE_HOV}; color: {_TEXT};"
+    f"  border-color: {_BORDER};"
+    f"}}"
+    f"QTabBar::tab:selected {{"
+    f"  background: {_ACCENT}; color: {_SURFACE};"
+    f"  border-color: {_ACCENT};"
     f"}}"
 )
 
@@ -358,17 +378,16 @@ class SettingsDialog(QDialog):
         conn = _SectionCard("Connection")
         cb = conn.body()
 
-        form1 = QFormLayout()
-        form1.setSpacing(10)
-        form1.setContentsMargins(0, 0, 0, 0)
-        form1.setLabelAlignment(Qt.AlignLeft | Qt.AlignVCenter)
-
-        self.mode_combo = _cmb(QComboBox())
+        self.connection_tabs = QTabBar()
+        self.connection_tabs.setFont(_mono(10, QFont.DemiBold))
+        self.connection_tabs.setStyleSheet(_TAB_SS)
+        self.connection_tabs.setDrawBase(False)
+        self.connection_tabs.setExpanding(False)
+        self.connection_tabs.setUsesScrollButtons(False)
         for label, _ in _MODE_LABELS:
-            self.mode_combo.addItem(label)
-        self.mode_combo.currentIndexChanged.connect(self.stack_set)
-        form1.addRow(_lbl("Connect via:"), self.mode_combo)
-        cb.addLayout(form1)
+            self.connection_tabs.addTab(label)
+        self.connection_tabs.currentChanged.connect(self.stack_set)
+        cb.addWidget(self.connection_tabs, 0, Qt.AlignLeft)
 
         self.stack = QStackedWidget()
         self.stack.setStyleSheet("background: transparent; border: none;")
@@ -437,6 +456,69 @@ class SettingsDialog(QDialog):
     # ── stack panels ──────────────────────────────────────────────────────────
     def stack_set(self, index):
         self.stack.setCurrentIndex(index)
+        self._update_connection_tab_labels()
+
+    def _current_mode(self):
+        index = self.connection_tabs.currentIndex()
+        if index < 0 or index >= len(_MODE_LABELS):
+            index = 0
+        return _MODE_LABELS[index][1]
+
+    def _active_connection_index(self):
+        mode = self.config.get("connection_mode")
+        return next((i for i, (_, value) in enumerate(_MODE_LABELS) if value == mode), 0)
+
+    def _update_connection_tab_labels(self):
+        if not hasattr(self, "connection_tabs"):
+            return
+
+        active_index = self._active_connection_index()
+
+        def active_label(index, text):
+            if index == active_index:
+                return f"Active · {text}"
+            return text
+
+        provider_label = self.provider_combo.currentText() if hasattr(self, "provider_combo") else ""
+        api_model = self.model_edit.text().strip() if hasattr(self, "model_edit") else ""
+        api_base_url = (
+            self.api_base_url_edit.text().strip() if hasattr(self, "api_base_url_edit") else ""
+        )
+        api_text = "API key"
+        self.connection_tabs.setTabText(0, active_label(0, api_text))
+        self.connection_tabs.setTabToolTip(
+            0,
+            "\n".join(
+                part for part in (active_label(0, api_text), provider_label, api_model, api_base_url)
+                if part
+            ),
+        )
+
+        custom_format = (
+            self.custom_format_combo.currentText() if hasattr(self, "custom_format_combo") else ""
+        )
+        custom_model = (
+            self.custom_model_edit.text().strip() if hasattr(self, "custom_model_edit") else ""
+        )
+        custom_url = self.custom_url_edit.text().strip() if hasattr(self, "custom_url_edit") else ""
+        custom_text = "Custom"
+        self.connection_tabs.setTabText(1, active_label(1, custom_text))
+        self.connection_tabs.setTabToolTip(
+            1,
+            "\n".join(
+                part for part in (active_label(1, custom_text), custom_format, custom_model, custom_url)
+                if part
+            ),
+        )
+
+        agent_label = self.cli_agent_combo.currentText() if hasattr(self, "cli_agent_combo") else ""
+        cli_path = self.cli_path_edit.text().strip() if hasattr(self, "cli_path_edit") else ""
+        sub_text = "Subscription"
+        self.connection_tabs.setTabText(2, active_label(2, sub_text))
+        self.connection_tabs.setTabToolTip(
+            2,
+            "\n".join(part for part in (active_label(2, sub_text), agent_label, cli_path) if part),
+        )
 
     @staticmethod
     def _panel_form(w):
@@ -458,10 +540,12 @@ class SettingsDialog(QDialog):
 
         self.model_edit = _inp(QLineEdit())
         self.model_edit.setPlaceholderText("Provider model")
+        self.model_edit.textChanged.connect(self._update_connection_tab_labels)
         form.addRow(_lbl("Model:"), self.model_edit)
 
         self.api_base_url_edit = _inp(QLineEdit())
         self.api_base_url_edit.setPlaceholderText("Provider API base URL")
+        self.api_base_url_edit.textChanged.connect(self._update_connection_tab_labels)
         form.addRow(_lbl("Base URL:"), self.api_base_url_edit)
 
         self.provider_combo.currentIndexChanged.connect(self._on_provider_changed)
@@ -479,6 +563,7 @@ class SettingsDialog(QDialog):
 
         self.custom_url_edit = _inp(QLineEdit())
         self.custom_url_edit.setPlaceholderText("https://api.example.com")
+        self.custom_url_edit.textChanged.connect(self._update_connection_tab_labels)
         form.addRow(_lbl("Base URL:"), self.custom_url_edit)
 
         self.custom_key_edit = _inp(QLineEdit())
@@ -489,10 +574,12 @@ class SettingsDialog(QDialog):
         self.custom_format_combo = _cmb(QComboBox())
         for label, value in _FORMAT_LABELS:
             self.custom_format_combo.addItem(label, value)
+        self.custom_format_combo.currentIndexChanged.connect(self._update_connection_tab_labels)
         form.addRow(_lbl("Wire format:"), self.custom_format_combo)
 
         self.custom_model_edit = _inp(QLineEdit())
         self.custom_model_edit.setPlaceholderText("e.g. llama3.1, gpt-4, claude-sonnet")
+        self.custom_model_edit.textChanged.connect(self._update_connection_tab_labels)
         form.addRow(_lbl("Model:"), self.custom_model_edit)
         return w
 
@@ -505,6 +592,7 @@ class SettingsDialog(QDialog):
         for slug, label in _CLI_AGENTS:
             self.cli_agent_combo.addItem(label, slug)
         self.cli_agent_combo.currentIndexChanged.connect(self._on_cli_agent_changed)
+        self.cli_agent_combo.currentIndexChanged.connect(self._update_connection_tab_labels)
         form.addRow(_lbl("Agent:"), self.cli_agent_combo)
 
         login_row = QHBoxLayout()
@@ -521,6 +609,7 @@ class SettingsDialog(QDialog):
         self.cli_path_edit = _inp(QLineEdit())
         self.cli_path_edit.setPlaceholderText("Auto-detect on PATH (leave empty)")
         self.cli_path_edit.editingFinished.connect(self._update_login_status)
+        self.cli_path_edit.textChanged.connect(self._update_connection_tab_labels)
         path_row.addWidget(self.cli_path_edit, 1)
         browse_cli = _ghost_btn("Browse…")
         browse_cli.clicked.connect(self._browse_cli)
@@ -542,6 +631,7 @@ class SettingsDialog(QDialog):
             self.api_key_edit.setPlaceholderText(
                 f"Paste your key (or set {env})" if env else "Paste your key"
             )
+        self._update_connection_tab_labels()
 
     def _browse_cli(self):
         path, _ = QFileDialog.getOpenFileName(self, "Select agent CLI binary")
@@ -617,7 +707,7 @@ class SettingsDialog(QDialog):
     def _load(self):
         mode = self.config.get("connection_mode")
         index = next((i for i, (_, m) in enumerate(_MODE_LABELS) if m == mode), 0)
-        self.mode_combo.setCurrentIndex(index)
+        self.connection_tabs.setCurrentIndex(index)
         self.stack.setCurrentIndex(index)
 
         pid = self.config.get("provider")
@@ -650,9 +740,10 @@ class SettingsDialog(QDialog):
         self.proc_timeout_edit.setText("" if pt_val is None else str(pt_val))
         pi_val = self.config.get("mcp_poll_interval")
         self.poll_interval_edit.setText("" if pi_val is None else str(pi_val))
+        self._update_connection_tab_labels()
 
     def _save_and_accept(self):
-        mode = _MODE_LABELS[self.mode_combo.currentIndex()][1]
+        mode = self._current_mode()
 
         if mode == config_mod.MODE_API_KEY:
             key = self.api_key_edit.text().strip()

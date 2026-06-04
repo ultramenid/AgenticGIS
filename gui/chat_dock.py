@@ -10,7 +10,7 @@ import time
 
 from qgis.gui import QgsDockWidget
 from qgis.PyQt.QtCore import Qt, QEvent, QThread, pyqtSignal, QTimer
-from qgis.PyQt.QtGui import QFont, QFontMetrics, QTextCursor
+from qgis.PyQt.QtGui import QFont, QTextCursor
 from qgis.PyQt.QtWidgets import (
     QFrame,
     QHBoxLayout,
@@ -219,22 +219,6 @@ class ChatDock(QgsDockWidget):
         self.status.setStyleSheet("background: transparent; padding-right: 4px;")
         top.addWidget(self.status)
 
-        self._connection_chip = QLabel("Connection")
-        self._connection_chip.setFont(QFont("JetBrains Mono", 10))
-        self._connection_chip.setMaximumWidth(360)
-        self._connection_chip.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Fixed)
-        self._connection_chip.setStyleSheet(f"""
-            QLabel {{
-                color: {_TEXT_3};
-                background: {_SURFACE_2};
-                border: 1px solid {_BORDER};
-                border-radius: 6px;
-                padding: 5px 8px;
-                font-size: 10px;
-            }}
-        """)
-        top.addWidget(self._connection_chip, 0, Qt.AlignVCenter)
-        self._refresh_connection_status()
         top.addStretch(1)
 
         for label, tip in (("Setting", "Settings"), ("Clear", "Clear chat")):
@@ -428,51 +412,9 @@ class ChatDock(QgsDockWidget):
         # Install event filter on the input widget so Enter-to-send works
         self.input.installEventFilter(self)
 
-    def _connection_status_text(self):
-        backend = self._get_backend() if self._get_backend else None
-        if backend is None:
-            return "No active connection"
-        cfg = getattr(backend, "config", None)
-        if cfg is None:
-            return getattr(backend, "label", "Connection") or "Connection"
-
-        try:
-            from .. import config as config_mod
-            from ..backends import providers
-
-            mode = cfg.get("connection_mode")
-            if mode == config_mod.MODE_API_KEY:
-                provider_id = cfg.get("provider")
-                provider = providers.get_provider(provider_id)
-                provider_label = provider["label"] if provider else str(provider_id or "Provider")
-                model = cfg.get("model") or (provider.get("default_model") if provider else "")
-                return " · ".join(part for part in ("API key", provider_label, model) if part)
-            if mode == config_mod.MODE_CUSTOM:
-                fmt = (cfg.get("custom_format") or "").lower()
-                wire = "Anthropic" if fmt == "anthropic" else "OpenAI"
-                model = cfg.get("custom_model") or cfg.get("model") or ""
-                return " · ".join(part for part in ("Custom", wire, model) if part)
-            if mode in (config_mod.MODE_SUBSCRIPTION, config_mod.MODE_CLI_TOOL):
-                tool = cfg.get("cli_tool") or "CLI"
-                return f"Subscription · {tool}"
-        except Exception:
-            pass
-        return getattr(backend, "label", "Connection") or "Connection"
-
-    def _refresh_connection_status(self):
-        """Update the top-bar chip with the currently active connection."""
-        if not hasattr(self, "_connection_chip"):
-            return
-        text = self._connection_status_text()
-        fm = QFontMetrics(self._connection_chip.font())
-        shown = fm.elidedText(text, Qt.ElideRight, max(80, self._connection_chip.maximumWidth() - 18))
-        self._connection_chip.setText(shown)
-        self._connection_chip.setToolTip(text)
-
     def showEvent(self, event):
         super().showEvent(event)
         self.input.setFocus(Qt.OtherFocusReason)
-        self._refresh_connection_status()
 
     # ------------------------------------------------------------------ #
     def eventFilter(self, obj, event):

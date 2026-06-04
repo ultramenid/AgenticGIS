@@ -117,6 +117,4 @@ class AgenticGisPlugin:
 
         dialog = SettingsDialog(self.config, self.iface.mainWindow())
         dialog.exec_()
-        if self._dock is not None:
-            self._dock._refresh_connection_status()
         # Backend is rebuilt lazily on the next send via _get_backend().
