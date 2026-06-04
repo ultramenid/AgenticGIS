@@ -98,7 +98,84 @@ that the official macOS `.dmg` ships
 
 That's it — no dependency step.
 
-## Safety
+## Best use case
+
+AgenticGIS works best as a **prepare → analyse → iterate** loop. Each phase
+builds on the last, and the agent keeps full context of what it already loaded
+and found — so each follow-up is a one-liner, not a re-explanation.
+
+### 1. Prepare your workspace
+
+Load everything the analysis will touch before asking questions. The agent
+reads whatever is already in the project; it does not guess at file paths.
+
+- Load your vector and raster layers (`add_layer`, drag-and-drop, or the QGIS
+  browser — all work).
+- If you need satellite imagery, load your area-of-interest layer so the agent
+  can use it as the region boundary for Earth Engine queries.
+- For large or multi-source projects, a brief "*what layers do I have?*" prompt
+  lets the agent map out the project before diving in.
+
+> **Tip:** name your layers meaningfully before starting. The agent references
+> them by id internally, but uses the name when explaining results to you.
+
+### 2. Ask your analysis question
+
+State the question as you would to a colleague — the agent picks the right
+tools, writes the code, runs it, and returns a result. You do not need to know
+which QGIS function or algorithm to use.
+
+Productive question patterns:
+
+| What you want | Example prompt |
+|---|---|
+| Field summary | *"What is the distribution of land-cover classes in the forest layer?"* |
+| Spatial operation | *"Buffer the river layer by 500 m and clip it to the study area."* |
+| Cross-layer analysis | *"How many buildings fall within the flood-risk zone?"* |
+| Remote sensing index | *"Show me an NDVI cloud-masked mosaic for this area for the last dry season."* |
+| Trend over time | *"Plot the monthly average NDVI for the watershed from 2020 to 2024."* |
+| Data quality | *"Are there any null values or geometry errors in the parcels layer?"* |
+
+The agent produces a **summary finding → table → chart → derived layer** in
+one turn. Derived layers are tagged as analysis results and reused by name on
+repeat runs instead of stacking duplicates.
+
+### 3. Iterate — refine, drill down, extend
+
+Once you have a result, keep going in the same session. The agent remembers
+what it loaded and found.
+
+- *"Filter that to only patches larger than 10 ha."*
+- *"Break the previous chart down by ownership category instead."*
+- *"Now do the same analysis but for the northern district only."*
+- *"Export the result layer to GeoPackage."*
+
+Each message refines or extends the prior result without re-loading context.
+For long multi-step workflows, the conversation history is automatically
+compacted when it grows large, preserving layer IDs, key findings, and
+decisions so the agent stays coherent across dozens of turns.
+
+### Real-world workflow example
+
+```
+1.  Load: admin boundaries, land-cover raster, river network, DEM
+2.  "Summarise land-cover distribution by district"
+    → agent returns table + bar chart + district-summary layer
+3.  "Which districts have more than 30 % forest cover?"
+    → filtered layer added; findings stated as a one-sentence claim
+4.  "For those districts, buffer rivers by 200 m and compute what
+     percentage of forest falls within the buffer"
+    → processing chain runs; result layer + percentage table
+5.  "Show me a cloud-free Sentinel-2 NDVI composite for those districts
+     from the last six months"
+    → agent calls gee_status → confirms GEE ready → fetches live STAC
+      metadata → writes cloud-masked mosaic code → adds EE layer
+6.  "Compare NDVI values inside vs outside the river buffer"
+    → zonal statistics → inline stat cards for both zones
+```
+
+Steps 2–6 are each a single sentence. The agent handles the tool chain,
+algorithm selection, and parameter wiring — you steer the analysis.
 
 Generated PyQGIS **auto-runs** (no per-step confirmation), scoped to the
 current QGIS project/layers. Avoid pointing it at irreplaceable data without a
