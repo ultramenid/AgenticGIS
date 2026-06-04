@@ -28,53 +28,29 @@ it, and connect.
 
 ## How it works
 
-When you send a message, the agent runs a **think → call tool → observe** loop
-until it has a complete answer:
-
-1. **You type** a request in the chat dock.
-2. **The LLM** reads your project state (layers, CRS, extent) and decides which
-   tool to call.
-3. **The tool executes** inside the live QGIS session — on the main thread, with
-   full access to layers, canvas, Processing algorithms, and every installed
-   plugin.
-4. **The result** streams back: text, a table, a chart, or a new layer added to
-   the project.
-
-Steps 2–4 repeat automatically. One message can trigger a whole chain of tools
-— load data → run an algorithm → visualise the output — without any
-intermediate prompting from you.
+Your message enters a **think → call tool → observe** loop. The LLM picks a
+tool, it runs inside QGIS, the result feeds back — repeating until the task is
+done. One message can chain many tools without further prompting.
 
 ```
- Chat dock  ──────────────────────────────────────────────────────
-   │  your message
-   ▼
- Backend (your choice)
-   • API key      ──►  Anthropic / OpenAI / Groq / Gemini / DeepSeek / …
-   • CLI tool     ──►  Claude Code / OpenCode  (already logged in, no key)
-   • Custom URL   ──►  any OpenAI- or Anthropic-compatible endpoint
-   │
-   │  tool-use loop (think → call → observe)
-   ▼
- Tool layer
-   • run_pyqgis          arbitrary PyQGIS — layers, canvas, plugins, console
-   • run_processing      GDAL / GRASS / SAGA / native Processing algorithms
-   • gee_*               Google Earth Engine imagery and indices
-   • get_project_state   layer list, CRS, extent, field schemas
-   • web_fetch           pull a public URL or API response
-   │
-   │  every call marshalled to the QGIS main thread
-   ▼
- QGIS session  ───  your layers · canvas · toolbox · installed plugins
+QGIS session
+ ├─ Chat dock ................. you type here; results stream back
+ ├─ Backend (pluggable)
+ │    • API key    → Anthropic / OpenAI / Groq / Gemini / DeepSeek / Ollama / …
+ │    • CLI tool   → Claude Code / OpenCode (no key needed)
+ │    • Custom URL → any OpenAI- or Anthropic-compatible endpoint
+ └─ Tools (every call runs on the QGIS main thread)
+      run_pyqgis         arbitrary PyQGIS — layers, canvas, plugins, console
+      run_processing     GDAL / GRASS / SAGA / native algorithms
+      gee_*              Google Earth Engine imagery & indices
+      get_project_state  layer list, CRS, extent, field schemas
+      web_fetch          pull a public URL or API response
 ```
 
-`run_pyqgis` is the catch-all: it executes arbitrary Python inside the running
-QGIS session, which is what makes "anything QGIS can do" available to the
-agent. Dedicated tools (`run_processing`, `gee_add_layer`, `list_layers`, …)
-handle the most common operations efficiently without writing code each time.
-
-**Zero dependencies.** Both connection paths run on the Python standard library
-— `urllib` for the API wire protocol, `http.server` for the local MCP bridge —
-so nothing needs to be installed and it works on any QGIS Python.
+`run_pyqgis` is the catch-all — it executes arbitrary Python inside the live
+QGIS session, giving the agent access to everything QGIS and every installed
+plugin can do. Both transports are built on the Python standard library, so
+there is nothing to install and it works on any QGIS Python.
 
 ## Connection modes (Settings → Connect via)
 
