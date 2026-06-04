@@ -148,14 +148,14 @@ what it loaded and found.
 - *"Filter that to only patches larger than 10 ha."*
 - *"Break the previous chart down by ownership category instead."*
 - *"Now do the same analysis but for the northern district only."*
-- *"Export the result layer to GeoPackage."*
+- *"Export the result layer"*
 
 Each message refines or extends the prior result without re-loading context.
 For long multi-step workflows, the conversation history is automatically
 compacted when it grows large, preserving layer IDs, key findings, and
 decisions so the agent stays coherent across dozens of turns.
 
-### Real-world workflow example
+### example
 
 ```
 1.  Load: admin boundaries, land-cover raster, river network, DEM

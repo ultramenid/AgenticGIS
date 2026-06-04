@@ -29,3 +29,7 @@ Thumbs.db
 # Local env & runtime logs
 .env
 *.log
+
+# Internal development — not for public release
+dev/
+docs/
