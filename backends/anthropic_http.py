@@ -43,7 +43,7 @@ class AnthropicHttpClient:
         self.version = version
         self._conn = None          # http.client.HTTPSConnection
         self._conn_host = None
-        # F12: serialise access to the connection slot. Cheap uncontended.
+        # serialise access to the connection slot. Cheap uncontended.
         self._conn_lock = threading.Lock()
 
     def _headers(self):
@@ -235,7 +235,7 @@ class AnthropicHttpClient:
                 elif etype == "error":
                     raise AnthropicHttpError(str(event.get("error")))
         finally:
-            # F4: stop trying to drain the socket. The connect-then-close
+            # stop trying to drain the socket. The connect-then-close
             # cost is negligible at our call rate, and the drain branch was
             # the only path that could hang on a half-closed peer.
             if premature_exit:

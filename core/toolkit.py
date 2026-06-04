@@ -367,14 +367,14 @@ class QgisToolkit:
         self._bg_task_lock = threading.Lock()
         self._bg_tasks = set()
         self._analysis_cache = AnalysisCache()
-        self._ns_template = None  # F10: cached exec namespace
-        # F17: dirty flag — set when a tool may have mutated project state.
+        self._ns_template = None  # cached exec namespace
+        # dirty flag — set when a tool may have mutated project state.
         self._canvas_dirty = False
         # Logical-name -> layer_id map of agent-created analysis/result layers.
         # These are meant to persist; the agent reuses them instead of
         # recreating and never auto-deletes them.
         self._analysis_layers = {}
-        # F8: hook QGIS's plugins-changed signal so the algorithm list
+        # hook QGIS's plugins-changed signal so the algorithm list
         # reflects newly-enabled providers (GRASS, SAGA, custom plugins)
         # without a plugin restart.
         try:
@@ -870,7 +870,7 @@ class QgisToolkit:
             with self._bg_task_lock:
                 self._bg_tasks.discard(task)
 
-    # F16: list of (module_path, attribute) tuples we treat as destructive.
+    # list of (module_path, attribute) tuples we treat as destructive.
     # Code that imports any of these is refused when the safety flag is on.
     _DANGEROUS_SYMBOLS = (
         ("os", "system"),
@@ -950,7 +950,7 @@ class QgisToolkit:
         import qgis.core as qgis_core
         import qgis.gui as qgis_gui
 
-        # F10: namespace is built once per toolkit and copied per call.
+        # namespace is built once per toolkit and copied per call.
         if self._ns_template is None:
             ns = {
                 "__name__": "__agenticgis__",
@@ -1050,7 +1050,7 @@ class QgisToolkit:
             return {"ok": False, "error": "run_pyqgis: code must be a non-empty string", "stdout": "", "stderr": ""}
         if len(code) > 200_000:
             return {"ok": False, "error": "run_pyqgis: code is too large (>200k chars)", "stdout": "", "stderr": ""}
-        # F16: optional guard against destructive builtins. The flag is
+        # optional guard against destructive builtins. The flag is
         # opt-in so the existing "zero friction" behaviour is preserved by
         # default; users who want a safety net flip it on in Settings.
         if self._dangerous_calls_blocked(code, ns):
@@ -1080,7 +1080,7 @@ class QgisToolkit:
         finally:
             result["stdout"] = out.getvalue()
             result["stderr"] = err.getvalue()
-        # F17: only refresh if the agent's code may have touched the canvas.
+        # only refresh if the agent's code may have touched the canvas.
         if self._canvas_dirty:
             try:
                 self.iface.mapCanvas().refresh()
@@ -1291,7 +1291,7 @@ class QgisToolkit:
         start = time.perf_counter()
         param_keys = sorted((params or {}).keys()) if isinstance(params, dict) else []
         log_event("toolkit.run_processing.start", alg_id=alg_id, param_keys=param_keys)
-        # F7: wire a feedback so the QGIS processing framework honours our
+        # wire a feedback so the QGIS processing framework honours our
         # cancellation token. Falls back to a direct call if the framework
         # doesn't accept ``feedback`` (older QGIS).
         event, owner = self._cancel.register()
@@ -1323,7 +1323,7 @@ class QgisToolkit:
             )
             return result
         except BaseException as exc:  # noqa: BLE001
-            # F7: distinguish the cancel path from real errors so the agent
+            # distinguish the cancel path from real errors so the agent
             # can decide whether to retry.
             if event is not None and event.is_set():
                 result = {"ok": False, "error": "cancelled by user", "cancelled": True}
@@ -1352,7 +1352,7 @@ class QgisToolkit:
         finally:
             self._cancel.release(event)
 
-        # F17: processing likely mutated the canvas; mark dirty for the dock.
+        # processing likely mutated the canvas; mark dirty for the dock.
         self._canvas_dirty = True
         # Outputs may contain layers / non-serialisable objects; stringify.
         try:
@@ -2388,7 +2388,7 @@ class QgisToolkit:
             if label_idx != -1 and label_field != field_name:
                 attr_names.append(label_field)
 
-        # F9: pull only the one field, no geometry — cuts allocation for big layers.
+        # pull only the one field, no geometry — cuts allocation for big layers.
         from qgis.core import QgsFeatureRequest
         req = QgsFeatureRequest().setFlags(_no_geometry_flag())
         req.setSubsetOfAttributes(attr_names, layer.fields())
@@ -2464,7 +2464,7 @@ class QgisToolkit:
             if field_idx == -1:
                 return {"ok": False, "error": f"Field {field_name!r} not found"}
 
-            # F9: only the requested attribute, no geometry; stream values so
+            # only the requested attribute, no geometry; stream values so
             # large layers don't get materialised into Python lists.
             from qgis.core import QgsFeatureRequest
             req = QgsFeatureRequest().setFlags(_no_geometry_flag())

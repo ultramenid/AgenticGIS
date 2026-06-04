@@ -230,7 +230,7 @@ class _RpcServer(ThreadingHTTPServer):
                     params.get("name"), params.get("arguments", {}),
                 )
                 is_error = isinstance(out, dict) and out.get("ok") is False
-                # F11: explicit is_error flag travels to the client; don't
+                # explicit is_error flag travels to the client; don't
                 # rely on a string-prefix heuristic downstream.
                 if isinstance(out, dict) and out.get("cancelled"):
                     is_error = True
@@ -267,7 +267,7 @@ class McpBridgeServer(QThread):
         self.toolkit = toolkit
         self.executor = executor
         self.host = host
-        # F18: keep a reference to the pre-bound listening socket across
+        # keep a reference to the pre-bound listening socket across
         # thread startup so we don't rebind.
         self._bound_sock, self.port = _allocate_listening_socket(host, port)
         self.poll_interval = poll_interval

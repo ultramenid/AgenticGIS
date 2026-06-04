@@ -12,7 +12,7 @@ _GROUP = "AgenticGIS"
 MODE_CLI_TOOL = "cli_tool"          # use an installed, already-logged-in agent CLI
 MODE_API_KEY = "api_key"            # talk to the provider API directly with a key
 MODE_CUSTOM = "custom"              # any OpenAI-compatible or Anthropic-compatible endpoint
-MODE_SUBSCRIPTION = "subscription"  # use an installed CLI agent (Claude Code / OpenCode / etc.)
+MODE_SUBSCRIPTION = "subscription"  # OAuth / bearer-token session via ANTHROPIC_AUTH_TOKEN (no API key needed)
 
 DEFAULTS = {
     "connection_mode": MODE_API_KEY,
@@ -33,10 +33,10 @@ DEFAULTS = {
     "system_prompt": "",           # empty => built-in default
     "auto_run": True,              # execute generated PyQGIS without confirmation
     "max_iterations": 0,           # 0 or less => unlimited agent tool-use loop
-    # F16: when True, run_pyqgis refuses (returns an error) if agent code
-    # calls a "dangerous" builtin — os.system, subprocess, shutil.rmtree,
-    # ctypes, etc. Users can keep this on and opt out per-call by setting
-    # the variable ``ALLOW_DANGEROUS = True`` at the top of their code.
+    # When True, run_pyqgis refuses (returns an error) if agent code calls a
+    # "dangerous" builtin — os.system, subprocess, shutil.rmtree, ctypes, etc.
+    # Users can opt out per-call by setting ``ALLOW_DANGEROUS = True`` at the
+    # top of their code.
     "confirm_dangerous_calls": False,
     # User can choose "Always allow" in the external access permission popup.
     # This permits future file/path/URL/database access without prompting.

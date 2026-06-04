@@ -1638,7 +1638,7 @@ class ChatDock(QgsDockWidget):
             self._flush_stream_render()
             result = ev.data.get("result", "")
             tool_name = ev.data.get("name", "tool")
-            # F11: prefer the structured is_error / cancelled flags that
+            # prefer the structured is_error / cancelled flags that
             # the backends compute. Fall back to the old string-prefix
             # heuristic for forward-compat with any third-party backend.
             is_err = ev.data.get("is_error")

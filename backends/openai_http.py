@@ -184,7 +184,7 @@ class OpenAIHttpClient:
                     if fn.get("arguments"):
                         tool_calls[idx]["function"]["arguments"] += fn["arguments"]
         finally:
-            # F5: close the response on every exit path (should_stop, error,
+            # close the response on every exit path (should_stop, error,
             # natural end) so a half-closed peer doesn't leave the worker
             # blocked until the OS-level timeout fires.
             try:

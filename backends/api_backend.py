@@ -463,7 +463,7 @@ class ApiBackend(AgentBackend):
                 except Exception as exc:  # noqa: BLE001
                     payload = f"Tool error: {type(exc).__name__}: {exc}"
                     is_error = True
-                # F11: pass structured is_error / cancelled flags through
+                # pass structured is_error / cancelled flags through
                 # the event so the UI can style without a string-prefix
                 # heuristic.
                 emit(

@@ -71,7 +71,7 @@ class CliToolBackend(AgentBackend):
         self.binary = _resolve_binary(self.tool, config.get("cli_path"))
         # Zero-arg callable returning the running MCP server's base URL.
         self._server_provider = server_provider
-        # F15: synchronise mutations of _proc and _session_id across the
+        # synchronise mutations of _proc and _session_id across the
         # dock and the worker thread.
         self._lock = threading.Lock()
         self._proc = None
@@ -217,7 +217,7 @@ class CliToolBackend(AgentBackend):
 
         base_url = self._server_provider()
         cmd = self._build_command(message, base_url)
-        # F15: start_new_session detaches the child from QGIS's process
+        # start_new_session detaches the child from QGIS's process
         # group, so Ctrl-C in the spawned CLI doesn't kill QGIS, and
         # close_fds prevents file-descriptor leaks.
         try:
@@ -340,7 +340,7 @@ class CliToolBackend(AgentBackend):
 
     def _finalize_process(self, proc):
         """Reap the child, escalating to SIGKILL if it refuses to die."""
-        # F15: bounded kill. Try terminate (SIGTERM), wait 5s, then kill.
+        # bounded kill. Try terminate (SIGTERM), wait 5s, then kill.
         try:
             proc.terminate()
         except Exception:
