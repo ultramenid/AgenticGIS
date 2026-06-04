@@ -6,8 +6,8 @@ Three connection modes:
   3. Subscription   — use an installed CLI agent (Claude Code, OpenCode, …).
 """
 
-from qgis.PyQt.QtCore import Qt, QTimer
-from qgis.PyQt.QtGui import QFont
+from qgis.PyQt.QtCore import Qt, QThread, QTimer, pyqtSignal
+from qgis.PyQt.QtGui import QColor, QFont
 from qgis.PyQt.QtWidgets import (
     QComboBox,
     QDialog,
@@ -17,6 +17,8 @@ from qgis.PyQt.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QListWidget,
+    QListWidgetItem,
     QMessageBox,
     QPushButton,
     QScrollArea,
@@ -168,6 +170,271 @@ def _cmb(widget):
     widget.setFont(_mono(10))
     widget.setStyleSheet(_COMBO_SS)
     return widget
+
+
+class _ModelPickerWidget(QWidget):
+    """Select2-style model picker.
+
+    Shows the selected model in a styled button. On click, drops a popup
+    with a search field and a scrollable list — the active model pinned at
+    the top with a coloured badge, the rest sorted alphabetically.
+    Typing filters in real time; pressing Enter or clicking an item selects
+    it. If no list entry matches, pressing Enter saves the typed text as a
+    custom model name.
+    """
+
+    modelChanged = pyqtSignal(str)
+
+    _POPUP_SS = (
+        f"QFrame#ModelPopup {{"
+        f"  background: {_INPUT_BG}; border: 1px solid {_BORDER};"
+        f"  border-radius: 8px;"
+        f"}}"
+        f"QLineEdit {{"
+        f"  background: {_SURFACE_2}; color: {_TEXT};"
+        f"  border: none; border-bottom: 1px solid {_BORDER_SOFT};"
+        f"  border-top-left-radius: 7px; border-top-right-radius: 7px;"
+        f"  border-bottom-left-radius: 0; border-bottom-right-radius: 0;"
+        f"  padding: 7px 10px;"
+        f"}}"
+        f"QListWidget {{"
+        f"  background: transparent; color: {_TEXT};"
+        f"  border: none; outline: none;"
+        f"}}"
+        f"QListWidget::item {{ padding: 6px 10px; border-radius: 4px; }}"
+        f"QListWidget::item:hover {{ background: {_SURFACE_HOV}; }}"
+        f"QListWidget::item:selected {{"
+        f"  background: {_BORDER}; color: {_TEXT};"
+        f"}}"
+        f"QScrollBar:vertical {{"
+        f"  background: {_INPUT_BG}; width: 5px; margin: 0;"
+        f"}}"
+        f"QScrollBar::handle:vertical {{"
+        f"  background: {_BORDER_SOFT}; border-radius: 2px; min-height: 16px;"
+        f"}}"
+        f"QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height: 0; }}"
+    )
+
+    def __init__(self, placeholder="Select or type a model name", parent=None):
+        super().__init__(parent)
+        self._placeholder = placeholder
+        self._models = []    # full sorted list returned by the API
+        self._active = ""    # model id currently saved in config
+        self._selected = ""  # what the user has chosen or typed
+        self._popup = None
+        self._build()
+
+    def _build(self):
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(0)
+        self._btn = QPushButton()
+        self._btn.setFont(_mono(10))
+        self._btn.setCursor(Qt.PointingHandCursor)
+        self._btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self._btn.clicked.connect(self._toggle_popup)
+        self._refresh_btn()
+        lay.addWidget(self._btn)
+
+    def _refresh_btn(self):
+        text = self._selected
+        is_active = bool(text and text == self._active)
+        display = (text + "  ●") if is_active else (text or self._placeholder)
+        color = _TEXT if text else _TEXT_3
+        badge_color = _WARN if is_active else "transparent"
+        self._btn.setText(display)
+        self._btn.setStyleSheet(
+            f"QPushButton {{"
+            f"  background: {_INPUT_BG}; color: {color};"
+            f"  border: 1px solid {_BORDER_SOFT}; border-radius: 6px;"
+            f"  padding: 5px 30px 5px 9px; text-align: left;"
+            f"}}"
+            f"QPushButton:hover {{ border-color: {_WARN}; }}"
+            f"QPushButton::menu-indicator {{ width: 0; }}"
+        )
+        # Arrow overlay via a child label positioned at the right
+        if not hasattr(self, "_arrow_lbl"):
+            self._arrow_lbl = QLabel("▾", self)
+            self._arrow_lbl.setFont(_mono(9))
+            self._arrow_lbl.setStyleSheet(
+                f"color: {_TEXT_3}; background: transparent;"
+            )
+        self._arrow_lbl.adjustSize()
+        self._arrow_lbl.move(
+            self._btn.width() - self._arrow_lbl.width() - 10,
+            (self._btn.height() - self._arrow_lbl.height()) // 2,
+        )
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._refresh_btn()
+
+    # ── public API ────────────────────────────────────────────────────────────
+    def setModels(self, models, keep_current=True):
+        self._models = sorted(models) if models else []
+        if not keep_current:
+            self._selected = ""
+        if self._popup:
+            self._rebuild_list()
+
+    def setActive(self, model_id):
+        self._active = model_id or ""
+        self._refresh_btn()
+
+    def currentText(self):
+        return self._selected
+
+    def setCurrentText(self, text):
+        self._selected = text or ""
+        self._refresh_btn()
+
+    # ── popup ─────────────────────────────────────────────────────────────────
+    def _toggle_popup(self):
+        if self._popup and self._popup.isVisible():
+            self._close_popup()
+        else:
+            self._open_popup()
+
+    def _open_popup(self):
+        popup = QFrame(None, Qt.Popup | Qt.FramelessWindowHint)
+        popup.setObjectName("ModelPopup")
+        popup.setStyleSheet(self._POPUP_SS)
+        popup.setFixedWidth(max(self._btn.width(), 300))
+
+        vlay = QVBoxLayout(popup)
+        vlay.setContentsMargins(0, 0, 0, 6)
+        vlay.setSpacing(0)
+
+        search = QLineEdit()
+        search.setFont(_mono(10))
+        search.setPlaceholderText("Search models or type a custom name…")
+        vlay.addWidget(search)
+
+        lst = QListWidget()
+        lst.setFont(_mono(10))
+        lst.setMaximumHeight(240)
+        vlay.addWidget(lst)
+
+        self._popup = popup
+        popup._search = search
+        popup._list = lst
+
+        self._rebuild_list()
+
+        pos = self._btn.mapToGlobal(self._btn.rect().bottomLeft())
+        popup.move(pos)
+        popup.show()
+        search.setFocus()
+
+        search.textChanged.connect(self._rebuild_list)
+        search.returnPressed.connect(self._commit_search)
+        lst.itemClicked.connect(self._pick_item)
+        lst.itemActivated.connect(self._pick_item)
+
+    def _close_popup(self):
+        if self._popup:
+            self._popup.hide()
+            self._popup.deleteLater()
+            self._popup = None
+
+    def _rebuild_list(self, query=None):
+        if not self._popup:
+            return
+        if query is None:
+            query = self._popup._search.text()
+        lst = self._popup._list
+        lst.clear()
+        q = query.strip().lower()
+
+        # Section header helper
+        def _header(text):
+            it = QListWidgetItem(text)
+            it.setFont(_mono(8, QFont.DemiBold))
+            it.setForeground(QColor(_TEXT_3))
+            it.setFlags(Qt.NoItemFlags)  # not selectable
+            return it
+
+        # ── Active model pinned at top ────────────────────────────────────
+        if self._active:
+            if not q or q in self._active.lower():
+                lst.addItem(_header("  ACTIVE"))
+                it = QListWidgetItem(f"  {self._active}")
+                it.setData(Qt.UserRole, self._active)
+                it.setForeground(QColor(_WARN))
+                it.setFont(_mono(10, QFont.DemiBold))
+                lst.addItem(it)
+
+        # ── Available models ──────────────────────────────────────────────
+        filtered = [
+            m for m in self._models
+            if m != self._active and (not q or q in m.lower())
+        ]
+        if filtered:
+            lst.addItem(_header("  AVAILABLE"))
+            for m in filtered:
+                it = QListWidgetItem(f"  {m}")
+                it.setData(Qt.UserRole, m)
+                lst.addItem(it)
+
+        # ── Custom entry hint when nothing matches ────────────────────────
+        if q and not self._active_matches(q) and not filtered:
+            lst.addItem(_header("  CUSTOM"))
+            it = QListWidgetItem(f'  Use "{query.strip()}"')
+            it.setData(Qt.UserRole, query.strip())
+            it.setForeground(QColor(_TEXT_2))
+            lst.addItem(it)
+
+    def _active_matches(self, q):
+        return bool(self._active and q and q in self._active.lower())
+
+    def _commit_search(self):
+        """Enter pressed in the search box: pick top selectable item or typed text."""
+        if not self._popup:
+            return
+        lst = self._popup._list
+        # Find first selectable item
+        for i in range(lst.count()):
+            it = lst.item(i)
+            if it.flags() & Qt.ItemIsEnabled and it.data(Qt.UserRole):
+                self._apply(it.data(Qt.UserRole))
+                return
+        # Fall back to raw typed text
+        typed = self._popup._search.text().strip()
+        if typed:
+            self._apply(typed)
+
+    def _pick_item(self, item):
+        val = item.data(Qt.UserRole)
+        if val:
+            self._apply(val)
+
+    def _apply(self, model_id):
+        self._selected = model_id
+        self._refresh_btn()
+        self.modelChanged.emit(self._selected)
+        self._close_popup()
+
+
+# ── Background model-list / connection-test worker ─────────────────────────────
+class _ModelFetchWorker(QThread):
+    """Runs a list_models() call off the UI thread.
+
+    ``fn`` returns ``(models, error)``; emits ``done(models, error)`` where an
+    empty error string means success.
+    """
+
+    done = pyqtSignal(list, str)
+
+    def __init__(self, fn, parent=None):
+        super().__init__(parent)
+        self._fn = fn
+
+    def run(self):
+        try:
+            models, err = self._fn()
+        except Exception as exc:  # noqa: BLE001
+            models, err = [], f"{type(exc).__name__}: {exc}"
+        self.done.emit(list(models or []), err or "")
 
 
 def _lbl(text, color=_TEXT_2, size=10, italic=False):
@@ -480,7 +747,7 @@ class SettingsDialog(QDialog):
             return text
 
         provider_label = self.provider_combo.currentText() if hasattr(self, "provider_combo") else ""
-        api_model = self.model_edit.text().strip() if hasattr(self, "model_edit") else ""
+        api_model = self.model_picker.currentText().strip() if hasattr(self, "model_picker") else ""
         api_base_url = (
             self.api_base_url_edit.text().strip() if hasattr(self, "api_base_url_edit") else ""
         )
@@ -498,7 +765,8 @@ class SettingsDialog(QDialog):
             self.custom_format_combo.currentText() if hasattr(self, "custom_format_combo") else ""
         )
         custom_model = (
-            self.custom_model_edit.text().strip() if hasattr(self, "custom_model_edit") else ""
+            self.custom_model_picker.currentText().strip()
+            if hasattr(self, "custom_model_picker") else ""
         )
         custom_url = self.custom_url_edit.text().strip() if hasattr(self, "custom_url_edit") else ""
         custom_text = "Custom"
@@ -528,38 +796,94 @@ class SettingsDialog(QDialog):
         form.setLabelAlignment(Qt.AlignLeft | Qt.AlignVCenter)
         return form
 
+    def _model_group(self, picker_attr):
+        """Hidden-until-connected widget containing the model picker."""
+        group = QWidget()
+        group.setStyleSheet("background: transparent;")
+        mg = QFormLayout(group)
+        mg.setSpacing(6)
+        mg.setContentsMargins(0, 2, 0, 0)
+        mg.setLabelAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+
+        picker = _ModelPickerWidget("Select or type a model name")
+        picker.modelChanged.connect(self._update_connection_tab_labels)
+        setattr(self, picker_attr, picker)
+        mg.addRow(_lbl("Model:"), picker)
+
+        hint = _lbl(
+            "Select from the list or type a custom model name, then press Enter.",
+            color=_TEXT_3, size=9, italic=True,
+        )
+        hint.setWordWrap(True)
+        mg.addRow(hint)
+        group.setVisible(False)
+        return group
+
+    def _test_row(self, btn_attr, status_attr, mode):
+        row = QHBoxLayout()
+        row.setSpacing(8)
+        btn = _ghost_btn("Test connection")
+        btn.clicked.connect(lambda: self._test_connection(mode))
+        setattr(self, btn_attr, btn)
+        row.addWidget(btn, 0)
+        status = _lbl("", color=_TEXT_3, size=9)
+        status.setWordWrap(True)
+        setattr(self, status_attr, status)
+        row.addWidget(status, 1)
+        return row
+
     def _api_key_panel(self):
         w = QWidget()
         w.setStyleSheet("background: transparent;")
-        form = self._panel_form(w)
+        col = QVBoxLayout(w)
+        col.setContentsMargins(0, 4, 0, 4)
+        col.setSpacing(10)
+
+        form_w = QWidget()
+        form_w.setStyleSheet("background: transparent;")
+        form = QFormLayout(form_w)
+        form.setSpacing(10)
+        form.setContentsMargins(0, 0, 0, 0)
+        form.setLabelAlignment(Qt.AlignLeft | Qt.AlignVCenter)
 
         self.provider_combo = _cmb(QComboBox())
         for p in providers.all_providers():
             self.provider_combo.addItem(p["label"], p["id"])
         form.addRow(_lbl("Provider:"), self.provider_combo)
 
-        self.model_edit = _inp(QLineEdit())
-        self.model_edit.setPlaceholderText("Provider model")
-        self.model_edit.textChanged.connect(self._update_connection_tab_labels)
-        form.addRow(_lbl("Model:"), self.model_edit)
-
         self.api_base_url_edit = _inp(QLineEdit())
         self.api_base_url_edit.setPlaceholderText("Provider API base URL")
         self.api_base_url_edit.textChanged.connect(self._update_connection_tab_labels)
         form.addRow(_lbl("Base URL:"), self.api_base_url_edit)
 
-        self.provider_combo.currentIndexChanged.connect(self._on_provider_changed)
-
         self.api_key_edit = _inp(QLineEdit())
         self.api_key_edit.setEchoMode(QLineEdit.Password)
         self.api_key_edit.setPlaceholderText("Paste your API key here")
         form.addRow(_lbl("API key:"), self.api_key_edit)
+        col.addWidget(form_w)
+
+        self.provider_combo.currentIndexChanged.connect(self._on_provider_changed)
+
+        col.addLayout(
+            self._test_row("api_test_btn", "api_status", config_mod.MODE_API_KEY)
+        )
+        self.api_model_group = self._model_group("model_picker")
+        col.addWidget(self.api_model_group)
         return w
 
     def _custom_panel(self):
         w = QWidget()
         w.setStyleSheet("background: transparent;")
-        form = self._panel_form(w)
+        col = QVBoxLayout(w)
+        col.setContentsMargins(0, 4, 0, 4)
+        col.setSpacing(10)
+
+        form_w = QWidget()
+        form_w.setStyleSheet("background: transparent;")
+        form = QFormLayout(form_w)
+        form.setSpacing(10)
+        form.setContentsMargins(0, 0, 0, 0)
+        form.setLabelAlignment(Qt.AlignLeft | Qt.AlignVCenter)
 
         self.custom_url_edit = _inp(QLineEdit())
         self.custom_url_edit.setPlaceholderText("https://api.example.com")
@@ -575,12 +899,17 @@ class SettingsDialog(QDialog):
         for label, value in _FORMAT_LABELS:
             self.custom_format_combo.addItem(label, value)
         self.custom_format_combo.currentIndexChanged.connect(self._update_connection_tab_labels)
+        self.custom_format_combo.currentIndexChanged.connect(
+            lambda _i: self._reset_model_group(config_mod.MODE_CUSTOM)
+        )
         form.addRow(_lbl("Wire format:"), self.custom_format_combo)
+        col.addWidget(form_w)
 
-        self.custom_model_edit = _inp(QLineEdit())
-        self.custom_model_edit.setPlaceholderText("e.g. llama3.1, gpt-4, claude-sonnet")
-        self.custom_model_edit.textChanged.connect(self._update_connection_tab_labels)
-        form.addRow(_lbl("Model:"), self.custom_model_edit)
+        col.addLayout(
+            self._test_row("custom_test_btn", "custom_status", config_mod.MODE_CUSTOM)
+        )
+        self.custom_model_group = self._model_group("custom_model_picker")
+        col.addWidget(self.custom_model_group)
         return w
 
     def _subscription_panel(self):
@@ -625,12 +954,116 @@ class SettingsDialog(QDialog):
         pid = self.provider_combo.itemData(index)
         p = providers.get_provider(pid)
         if p:
-            self.model_edit.setText(p["default_model"])
+            self.model_picker.setCurrentText(p["default_model"])
             self.api_base_url_edit.setText(p["base_url"])
             env = p.get("key_env", "")
             self.api_key_edit.setPlaceholderText(
                 f"Paste your key (or set {env})" if env else "Paste your key"
             )
+        # Changing provider invalidates any prior successful test.
+        self._reset_model_group(config_mod.MODE_API_KEY)
+        self._update_connection_tab_labels()
+
+    # ── connection test / model discovery ───────────────────────────────────────
+    def _panel_widgets(self, mode):
+        """Return (status_label, test_btn, model_picker, model_group) for a mode."""
+        if mode == config_mod.MODE_CUSTOM:
+            return (self.custom_status, self.custom_test_btn,
+                    self.custom_model_picker, self.custom_model_group)
+        return (self.api_status, self.api_test_btn,
+                self.model_picker, self.api_model_group)
+
+    @staticmethod
+    def _set_status(label, text, color):
+        label.setText(text)
+        label.setStyleSheet(f"color: {color}; background: transparent;")
+
+    def _reset_model_group(self, mode):
+        """Hide the model dropdown and clear status — forces a re-test."""
+        status, _btn, _combo, group = self._panel_widgets(mode)
+        group.setVisible(False)
+        self._set_status(status, "", _TEXT_3)
+
+    def _fill_models(self, picker, models):
+        """Push a fresh model list into the picker, keeping the current selection."""
+        picker.setModels(models, keep_current=True)
+
+    def _connection_params(self, mode):
+        """Resolve (wire_format, base_url, api_key) for the given mode's form."""
+        if mode == config_mod.MODE_CUSTOM:
+            fmt = self.custom_format_combo.currentData() or "openai"
+            base_url = self.custom_url_edit.text().strip()
+            key = self.custom_key_edit.text().strip()
+            return fmt, base_url, key
+        pid = self.provider_combo.currentData()
+        p = providers.get_provider(pid) or {}
+        fmt = p.get("format", "openai")
+        base_url = self.api_base_url_edit.text().strip() or p.get("base_url", "")
+        key = self.api_key_edit.text().strip()
+        if not key and p.get("key_env"):
+            import os
+            key = os.environ.get(p["key_env"], "")
+        return fmt, base_url, key
+
+    def _test_connection(self, mode):
+        status, btn, _combo, _group = self._panel_widgets(mode)
+        fmt, base_url, key = self._connection_params(mode)
+
+        if mode == config_mod.MODE_CUSTOM and not base_url:
+            self._set_status(status, "Enter a base URL first.", _DANGER)
+            return
+
+        def fetch(fmt=fmt, base_url=base_url, key=key):
+            if fmt == "anthropic":
+                from ..backends.anthropic_http import AnthropicHttpClient
+                client = AnthropicHttpClient(
+                    api_key=key or None, base_url=base_url or None
+                )
+            else:
+                from ..backends.openai_http import OpenAIHttpClient
+                client = OpenAIHttpClient(
+                    api_key=key or None, base_url=base_url or None
+                )
+            return client.list_models()
+
+        self._set_status(status, "Checking…", _TEXT_3)
+        btn.setEnabled(False)
+        btn.setText("Checking…")
+
+        worker = _ModelFetchWorker(fetch, self)
+        self._fetch_worker = worker  # keep a reference so it isn't GC'd
+        worker.done.connect(
+            lambda models, err, m=mode: self._on_models_fetched(m, models, err)
+        )
+        worker.start()
+
+    def _on_models_fetched(self, mode, models, err):
+        status, btn, picker, group = self._panel_widgets(mode)
+        btn.setEnabled(True)
+        btn.setText("Test connection")
+
+        if err:
+            self._set_status(status, f"Failed — {err}", _DANGER)
+            return
+
+        count = len(models)
+        if count:
+            self._set_status(
+                status,
+                f"Connected · {count} model{'s' if count != 1 else ''} available",
+                _SUCCESS,
+            )
+            # Mark the currently saved model as "active" inside the picker
+            saved = self.config.get("model") or ""
+            picker.setActive(saved)
+            self._fill_models(picker, models)
+        else:
+            self._set_status(
+                status,
+                "Connected · no models listed — type a model name below",
+                _SUCCESS,
+            )
+        group.setVisible(True)
         self._update_connection_tab_labels()
 
     def _browse_cli(self):
@@ -724,7 +1157,6 @@ class SettingsDialog(QDialog):
         cfmt = self.config.get("custom_format")
         fidx = next((i for i, (_, v) in enumerate(_FORMAT_LABELS) if v == cfmt), 0)
         self.custom_format_combo.setCurrentIndex(fidx)
-        self.custom_model_edit.setText(self.config.get("custom_model") or "")
 
         cli = self.config.get("cli_tool")
         cidx = next((i for i, (s, _) in enumerate(_CLI_AGENTS) if s == cli), 0)
@@ -732,7 +1164,26 @@ class SettingsDialog(QDialog):
         self.cli_path_edit.setText(self.config.get("cli_path") or "")
         self._update_login_status()
 
-        self.model_edit.setText(self.config.get("model") or "")
+        # Pre-fill saved models. If one already exists the user has connected
+        # before, so reveal the dropdown without forcing a re-test (Test
+        # connection refreshes the available list).
+        api_model = self.config.get("model") or ""
+        self.model_picker.setCurrentText(api_model)
+        self.model_picker.setActive(api_model)   # badge the saved model as active
+        if api_model:
+            self.api_model_group.setVisible(True)
+            self._set_status(
+                self.api_status, "Test connection to refresh the model list.", _TEXT_3
+            )
+
+        custom_model = self.config.get("custom_model") or ""
+        self.custom_model_picker.setCurrentText(custom_model)
+        self.custom_model_picker.setActive(custom_model)
+        if custom_model:
+            self.custom_model_group.setVisible(True)
+            self._set_status(
+                self.custom_status, "Test connection to refresh the model list.", _TEXT_3
+            )
 
         to_val = self.config.get("main_thread_timeout")
         self.timeout_edit.setText("" if to_val is None else str(to_val))
@@ -762,17 +1213,22 @@ class SettingsDialog(QDialog):
 
         self.config.set("connection_mode", mode)
         if mode == config_mod.MODE_API_KEY:
+            model = self.model_picker.currentText().strip()
+            provider_obj = providers.get_provider(self.provider_combo.currentData())
+            if not model and provider_obj:
+                model = provider_obj.get("default_model", "")
             self.config.set("provider", self.provider_combo.currentData())
             self.config.set("api_key", self.api_key_edit.text().strip())
-            self.config.set("model", self.model_edit.text().strip())
+            self.config.set("model", model)
             self.config.set("api_base_url", self.api_base_url_edit.text().strip())
         elif mode == config_mod.MODE_CUSTOM:
+            custom_model = self.custom_model_picker.currentText().strip()
             self.config.set("provider", "custom")
             self.config.set("custom_base_url", self.custom_url_edit.text().strip())
             self.config.set("custom_api_key", self.custom_key_edit.text().strip())
             self.config.set("custom_format", self.custom_format_combo.currentData())
-            self.config.set("custom_model", self.custom_model_edit.text().strip())
-            self.config.set("model", self.custom_model_edit.text().strip())
+            self.config.set("custom_model", custom_model)
+            self.config.set("model", custom_model)
         elif mode == config_mod.MODE_SUBSCRIPTION:
             self.config.set("cli_tool", self.cli_agent_combo.currentData())
             self.config.set("cli_path", self.cli_path_edit.text().strip())

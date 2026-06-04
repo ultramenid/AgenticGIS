@@ -48,6 +48,46 @@ class OpenAIHttpClient:
         headers.update(self.extra_headers)
         return headers
 
+    def list_models(self, timeout=15):
+        """GET the models list. Doubles as a connection test.
+
+        Returns ``(sorted_model_ids, None)`` on success or
+        ``([], error_message)`` on failure (the message explains why, e.g.
+        ``HTTP 401`` for a bad key). Tries ``/v1/models`` then ``/models`` to
+        tolerate base-URL path differences across OpenAI-compatible providers.
+        """
+        last_err = ""
+        for path in ("/v1/models", "/models"):
+            request = urllib.request.Request(
+                f"{self.base_url}{path}", headers=self._headers(), method="GET"
+            )
+            try:
+                response = urllib.request.urlopen(request, timeout=timeout)
+                body = response.read().decode("utf-8", "replace")
+                data = json.loads(body)
+                items = data.get("data") if isinstance(data, dict) else data
+                models = []
+                for it in items or []:
+                    if isinstance(it, dict) and it.get("id"):
+                        models.append(it["id"])
+                    elif isinstance(it, str):
+                        models.append(it)
+                return sorted(set(models)), None
+            except urllib.error.HTTPError as exc:
+                try:
+                    detail = exc.read().decode("utf-8", "replace")
+                except Exception:
+                    detail = ""
+                last_err = f"HTTP {exc.code}: {detail[:300]}" if detail else f"HTTP {exc.code}"
+                # Auth/permission errors won't be fixed by the other path.
+                if exc.code in (401, 403):
+                    return [], last_err
+            except urllib.error.URLError as exc:
+                return [], f"Connection error: {exc.reason}"
+            except Exception as exc:  # noqa: BLE001
+                last_err = f"{type(exc).__name__}: {exc}"
+        return [], last_err or "Unknown error"
+
     def stream_message(self, model, max_tokens, system, tools, messages,
                        on_text, should_stop, timeout=None):
         """POST /v1/chat/completions with stream=True.

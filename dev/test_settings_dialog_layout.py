@@ -43,13 +43,10 @@ def main():
     assert "Enable dev logging" not in labels
     assert "System prompt:" not in labels
 
-    model_edits = [
-        widget for widget in dialog.findChildren(QLineEdit)
-        if widget is dialog.model_edit
-    ]
-    assert len(model_edits) == 1
-    assert dialog.stack.indexOf(dialog.model_edit.parentWidget()) == 0
-    assert dialog.stack.indexOf(dialog.api_base_url_edit.parentWidget()) == 0
+    # The model picker is a _ModelPickerWidget (custom Select2-style widget).
+    from AgenticGis.gui.settings_dialog import _ModelPickerWidget
+    assert isinstance(dialog.model_picker, _ModelPickerWidget)
+    assert dialog.stack.indexOf(dialog.api_base_url_edit.parentWidget().parentWidget()) == 0
     assert isinstance(dialog.connection_tabs, QTabBar)
     assert dialog.connection_tabs.currentIndex() == 0
     assert dialog.stack.currentIndex() == 0
@@ -83,7 +80,7 @@ def main():
     dialog.config.values["system_prompt"] = "keep"
     dialog.config.values["auto_run"] = False
     dialog.config.values["confirm_dangerous_calls"] = True
-    dialog.model_edit.setText("model-in-connection")
+    dialog.model_picker.setCurrentText("model-in-connection")
     dialog.api_base_url_edit.setText("https://proxy.example.com")
     dialog._save_and_accept()
     assert dialog.config.values["model"] == "model-in-connection"
@@ -91,6 +88,48 @@ def main():
     assert dialog.config.values["system_prompt"] == "keep"
     assert dialog.config.values["auto_run"] is False
     assert dialog.config.values["confirm_dangerous_calls"] is True
+
+    dialog.deleteLater()
+    app.processEvents()
+
+    _test_connect_first_flow(app)
+
+
+def _test_connect_first_flow(app):
+    """Model dropdown stays hidden until a connection test succeeds."""
+    cfg = _Config()
+    cfg.values["model"] = ""            # no saved model -> hidden on load
+    cfg.values["custom_model"] = ""
+    dialog = SettingsDialog(cfg)
+
+    # Hidden until a successful test (isHidden tracks our explicit show/hide
+    # intent even when the dialog itself was never shown on screen).
+    assert dialog.api_model_group.isHidden() is True
+    assert dialog.custom_model_group.isHidden() is True
+
+    # A failed test surfaces the reason and keeps the dropdown hidden.
+    dialog._on_models_fetched(config_mod.MODE_API_KEY, [], "HTTP 401: bad key")
+    assert dialog.api_model_group.isHidden() is True
+    assert "Failed" in dialog.api_status.text()
+    assert "401" in dialog.api_status.text()
+
+    # A successful test reveals the picker and populates the model list.
+    models = ["claude-opus-4-8", "claude-haiku-4-5", "claude-sonnet-4-6"]
+    dialog._on_models_fetched(config_mod.MODE_API_KEY, models, "")
+    assert dialog.api_model_group.isHidden() is False
+    assert "Connected" in dialog.api_status.text()
+    assert dialog.model_picker._models == sorted(models)
+
+    # The user can still set a custom model name directly.
+    dialog.model_picker.setCurrentText("my-private-model")
+    assert dialog.model_picker.currentText() == "my-private-model"
+
+    # Switching provider hides the dropdown again (forces a re-test).
+    dialog.provider_combo.setCurrentIndex(
+        1 if dialog.provider_combo.count() > 1 else 0
+    )
+    if dialog.provider_combo.count() > 1:
+        assert dialog.api_model_group.isHidden() is True
 
     dialog.deleteLater()
     app.processEvents()

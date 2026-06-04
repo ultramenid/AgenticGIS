@@ -58,6 +58,35 @@ class AnthropicHttpClient:
             headers["authorization"] = f"Bearer {self.auth_token}"
         return headers
 
+    def list_models(self, timeout=15):
+        """GET /v1/models. Doubles as a connection test.
+
+        Returns ``(sorted_model_ids, None)`` on success or
+        ``([], error_message)`` on failure.
+        """
+        request = urllib.request.Request(
+            f"{self.base_url}/v1/models", headers=self._headers(), method="GET"
+        )
+        try:
+            response = urllib.request.urlopen(request, timeout=timeout)
+            data = json.loads(response.read().decode("utf-8", "replace"))
+        except urllib.error.HTTPError as exc:
+            try:
+                detail = exc.read().decode("utf-8", "replace")
+            except Exception:
+                detail = ""
+            return [], (f"HTTP {exc.code}: {detail[:300]}" if detail else f"HTTP {exc.code}")
+        except urllib.error.URLError as exc:
+            return [], f"Connection error: {exc.reason}"
+        except Exception as exc:  # noqa: BLE001
+            return [], f"{type(exc).__name__}: {exc}"
+        items = data.get("data") if isinstance(data, dict) else data
+        models = [
+            it["id"] for it in (items or [])
+            if isinstance(it, dict) and it.get("id")
+        ]
+        return sorted(set(models)), None
+
     def _ensure_conn(self, timeout):
         """Return a live HTTPSConnection with a bounded socket timeout.
 
