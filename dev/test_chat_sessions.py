@@ -66,7 +66,7 @@ def _dock(store=None, backend=None):
 def test_header_uses_session_menu_instead_of_clear():
     app, dock, _backend = _dock()
 
-    assert dock._session_btn.text() == "Session"
+    assert "Session" in dock._session_btn.text()
     assert not hasattr(dock, "_clear_btn")
     assert [action.text() for action in dock._session_menu.actions()] == [
         "New session",

@@ -245,10 +245,13 @@ class ChatDock(QgsDockWidget):
 
         top.addStretch(1)
 
-        for label, tip in (("Setting", "Settings"), ("Session", "Chat sessions")):
+        for label, tip, width in (
+            ("Setting", "Settings", 58),
+            ("▦ Session", "Chat sessions", 76),
+        ):
             btn = QPushButton(label)
             btn.setToolTip(tip)
-            btn.setFixedSize(58, 28)
+            btn.setFixedSize(width, 28)
             btn.setStyleSheet(f"""
                 QPushButton {{
                     font-size: 10px;
@@ -258,6 +261,8 @@ class ChatDock(QgsDockWidget):
                     border-radius: 6px;
                     background: transparent;
                     color: {_TEXT_3};
+                    padding: 0px;
+                    text-align: center;
                 }}
                 QPushButton:hover {{
                     background-color: {_SURFACE_2};
@@ -296,7 +301,7 @@ class ChatDock(QgsDockWidget):
             action = QAction(text, self)
             action.triggered.connect(handler)
             self._session_menu.addAction(action)
-        self._session_btn.setMenu(self._session_menu)
+        self._session_btn.clicked.connect(self._show_session_menu)
         layout.addLayout(top)
 
         # -- Hairline divider -------------------------------------------- #
@@ -957,44 +962,131 @@ class ChatDock(QgsDockWidget):
         super().resizeEvent(event)
 
     # ------------------------------------------------------------------ #
+    def _show_session_menu(self):
+        pos = self._session_btn.mapToGlobal(self._session_btn.rect().bottomRight())
+        pos.setX(pos.x() - self._session_menu.sizeHint().width())
+        self._session_menu.exec_(pos)
+
     def _show_startup_session_picker(self):
         dialog = QDialog(self)
         dialog.setWindowTitle("Chat sessions")
         dialog.setModal(True)
-        dialog.setStyleSheet(f"QDialog {{ background: {_CANVAS}; color: {_TEXT}; }}")
+        dialog.setMinimumWidth(420)
+        dialog.setStyleSheet(self._session_dialog_style())
         layout = QVBoxLayout(dialog)
-        layout.setContentsMargins(16, 16, 16, 16)
-        layout.setSpacing(10)
+        layout.setContentsMargins(14, 14, 14, 14)
+        layout.setSpacing(0)
 
-        title = QLabel("Choose a chat session")
-        title.setStyleSheet(f"color:{_TEXT}; font-size:13px; font-weight:600;")
-        layout.addWidget(title)
+        card, card_layout = self._session_dialog_card("Choose a chat session", "Continue or start fresh")
+        layout.addWidget(card)
 
         previous = QPushButton("Continue previous")
         sessions = QPushButton("Session list")
         new_session = QPushButton("New session")
         for button in (previous, sessions, new_session):
-            button.setMinimumHeight(30)
-            button.setStyleSheet(self._session_dialog_button_style())
-            layout.addWidget(button)
+            button.setMinimumHeight(36)
+            button.setCursor(Qt.PointingHandCursor)
+            button.setStyleSheet(self._session_dialog_button_style("wide"))
+            card_layout.addWidget(button)
 
         previous.clicked.connect(lambda: (dialog.accept(), self._switch_to_session(self._session_store.active_session()["id"])))
         sessions.clicked.connect(lambda: (dialog.accept(), self._show_session_list()))
         new_session.clicked.connect(lambda: (dialog.accept(), self._new_session_from_menu()))
         dialog.exec_()
 
-    def _session_dialog_button_style(self):
+    def _session_dialog_style(self):
+        return f"""
+            QDialog {{
+                background-color: {_CANVAS};
+                color: {_TEXT};
+            }}
+            QLabel {{
+                background: transparent;
+                border: none;
+            }}
+        """
+
+    def _session_dialog_card(self, title, subtitle=""):
+        card = QFrame()
+        card.setObjectName("SessionDialogCard")
+        card.setStyleSheet(f"""
+            QFrame#SessionDialogCard {{
+                background-color: {_SURFACE};
+                border: 1px solid {_BORDER};
+                border-radius: 8px;
+            }}
+        """)
+        layout = QVBoxLayout(card)
+        layout.setContentsMargins(18, 16, 18, 16)
+        layout.setSpacing(12)
+
+        header_row = QHBoxLayout()
+        header_row.setContentsMargins(0, 0, 0, 0)
+        header_row.setSpacing(8)
+        marker = QLabel("")
+        marker.setFixedSize(9, 9)
+        marker.setStyleSheet(f"background:{_WARN}; border:1px solid {_WARN}; border-radius:4px;")
+        header_row.addWidget(marker, 0, Qt.AlignVCenter)
+        header = QLabel(title)
+        header.setFont(QFont("JetBrains Mono", 10, QFont.DemiBold))
+        header.setStyleSheet(f"color:{_TEXT_2}; font-size:11px;")
+        header_row.addWidget(header)
+        header_row.addStretch(1)
+        layout.addLayout(header_row)
+
+        if subtitle:
+            desc = QLabel(subtitle)
+            desc.setWordWrap(True)
+            desc.setFont(QFont("JetBrains Mono", 10))
+            desc.setStyleSheet(f"color:{_TEXT_3}; font-size:11px; line-height:1.35;")
+            layout.addWidget(desc)
+        return card, layout
+
+    def _session_dialog_button_style(self, role="secondary"):
+        if role == "danger":
+            bg = _SURFACE_2
+            hover = "#3a2424"
+            color = _DANGER
+            border = _BORDER_SOFT
+        elif role == "wide":
+            bg = _SURFACE_2
+            hover = _BORDER
+            color = _TEXT
+            border = _BORDER_SOFT
+        else:
+            bg = _SURFACE_2
+            hover = _BORDER
+            color = _TEXT_2
+            border = _BORDER_SOFT
         return f"""
             QPushButton {{
-                background: {_SURFACE};
-                color: {_TEXT};
-                border: 1px solid {_BORDER};
+                background: {bg};
+                color: {color};
+                border: 1px solid {border};
                 border-radius: 6px;
                 padding: 6px 10px;
-                text-align: left;
+                font-size: 11px;
+                font-weight: 500;
+                text-align: center;
             }}
             QPushButton:hover {{
-                background: {_SURFACE_2};
+                background: {hover};
+                color: {_TEXT};
+            }}
+            QPushButton:pressed {{
+                background: {_ACCENT};
+                color: {_SURFACE};
+            }}
+        """
+
+    def _session_row_style(self, active=False):
+        border = _WARN if active else _BORDER_SOFT
+        bg = _SURFACE_2 if active else "#202020"
+        return f"""
+            QFrame#SessionListRow {{
+                background-color: {bg};
+                border: 1px solid {border};
+                border-radius: 7px;
             }}
         """
 
@@ -1028,35 +1120,65 @@ class ChatDock(QgsDockWidget):
         dialog = QDialog(self)
         dialog.setWindowTitle("Sessions")
         dialog.setModal(True)
-        dialog.setStyleSheet(f"QDialog {{ background: {_CANVAS}; color: {_TEXT}; }}")
+        dialog.setMinimumWidth(560)
+        dialog.setStyleSheet(self._session_dialog_style())
         layout = QVBoxLayout(dialog)
         layout.setContentsMargins(14, 14, 14, 14)
-        layout.setSpacing(8)
+        layout.setSpacing(0)
 
-        for session in self._session_store.list_sessions():
-            row = QWidget(dialog)
+        sessions = self._session_store.list_sessions()
+        card, card_layout = self._session_dialog_card(
+            "Sessions",
+            f"{len(sessions)} saved chats. Latest 20 are kept.",
+        )
+        layout.addWidget(card)
+
+        for session in sessions:
+            active = session["id"] == self._active_session_id
+            row = QFrame(dialog)
+            row.setObjectName("SessionListRow")
+            row.setStyleSheet(self._session_row_style(active))
             row_layout = QHBoxLayout(row)
-            row_layout.setContentsMargins(0, 0, 0, 0)
-            row_layout.setSpacing(6)
-            label = QLabel(f"{session.get('name', DEFAULT_SESSION_NAME)}\n{self._format_session_time(session.get('updated_at'))}")
-            label.setStyleSheet(f"color:{_TEXT}; font-size:11px; background:transparent;")
-            row_layout.addWidget(label, 1)
+            row_layout.setContentsMargins(12, 9, 10, 9)
+            row_layout.setSpacing(8)
+
+            text_col = QVBoxLayout()
+            text_col.setContentsMargins(0, 0, 0, 0)
+            text_col.setSpacing(3)
+            name = QLabel(session.get("name", DEFAULT_SESSION_NAME))
+            name.setWordWrap(True)
+            name.setFont(QFont("JetBrains Mono", 11, QFont.DemiBold))
+            name.setStyleSheet(f"color:{_TEXT}; font-size:12px;")
+            meta = QLabel(
+                f"{'Current' if active else 'Updated'} - {self._format_session_time(session.get('updated_at'))}"
+            )
+            meta.setFont(QFont("JetBrains Mono", 10))
+            meta.setStyleSheet(f"color:{_WARN if active else _TEXT_3}; font-size:10px;")
+            text_col.addWidget(name)
+            text_col.addWidget(meta)
+            row_layout.addLayout(text_col, 1)
+
             for text, handler in (
                 ("Open", lambda _checked=False, sid=session["id"]: (dialog.accept(), self._switch_to_session(sid))),
                 ("Rename", lambda _checked=False, sid=session["id"]: self._rename_session_from_list(sid, dialog)),
                 ("Delete", lambda _checked=False, sid=session["id"]: self._delete_session_from_list(sid, dialog)),
             ):
                 button = QPushButton(text)
+                button.setCursor(Qt.PointingHandCursor)
                 button.setFixedHeight(28)
-                button.setStyleSheet(self._session_dialog_button_style())
+                button.setMinimumWidth(58)
+                role = "danger" if text == "Delete" else "secondary"
+                button.setStyleSheet(self._session_dialog_button_style(role))
                 button.clicked.connect(handler)
                 row_layout.addWidget(button)
-            layout.addWidget(row)
+            card_layout.addWidget(row)
 
         close = QPushButton("Close")
-        close.setStyleSheet(self._session_dialog_button_style())
+        close.setCursor(Qt.PointingHandCursor)
+        close.setMinimumHeight(34)
+        close.setStyleSheet(self._session_dialog_button_style("wide"))
         close.clicked.connect(dialog.reject)
-        layout.addWidget(close)
+        card_layout.addWidget(close)
         dialog.exec_()
 
     def _rename_session_from_list(self, session_id, dialog):
