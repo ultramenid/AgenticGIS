@@ -83,11 +83,29 @@ there is nothing to install and it works on any QGIS Python.
 
 ## Install
 
-1. Copy/symlink this folder into the QGIS plugins directory as `AgenticGIS`:
-   `~/Library/Application Support/QGIS/QGIS3/profiles/default/python/plugins/`
-2. Enable **AgenticGIS** in Plugins → Manage and Install Plugins.
-3. Click the toolbar icon to open the chat dock, then **⚙ Settings** to pick a
-   connection mode.
+The QGIS Plugins menu handles both install paths.
+
+### Option A — from a downloaded zip (recommended)
+
+1. Go to the [**Releases** page](https://github.com/ultramenid/AgenticGIS/releases)
+   and download the latest `AgenticGIS-<version>.zip`.
+2. In QGIS: **Plugins → Manage and Install Plugins → Install from ZIP**.
+3. Browse to the downloaded zip, click **Install Plugin**.
+4. Enable **AgenticGIS** in the same dialog if it isn't already ticked.
+5. Click the new toolbar icon to open the chat dock, then **⚙ Settings** to
+   pick a connection mode and enter your API key.
+
+### Option B — manual folder install
+
+1. Locate your QGIS profile's `python/plugins` folder:
+   - **macOS:** `~/Library/Application Support/QGIS/QGIS3/profiles/default/python/plugins/`
+   - **Linux:** `~/.local/share/QGIS/QGIS3/profiles/default/python/plugins/`
+   - **Windows:** `%APPDATA%\QGIS\QGIS3\profiles\default\python\plugins\`
+2. Copy or clone this repository there as `AgenticGIS` (the folder must be
+   named exactly `AgenticGIS`).
+3. Restart QGIS, then enable **AgenticGIS** in **Plugins → Manage and Install
+   Plugins**.
+4. Click the toolbar icon, then **⚙ Settings** to configure.
 
 That's it — no dependency step.
 
