@@ -89,6 +89,14 @@ class CliToolBackend(AgentBackend):
             return "The local MCP bridge could not start."
         return None
 
+    def export_session_state(self):
+        with self._lock:
+            return {"session_id": self._session_id} if self._session_id else {}
+
+    def import_session_state(self, state):
+        with self._lock:
+            self._session_id = (state or {}).get("session_id") or None
+
     # ------------------------------------------------------------------ #
     # Login / auth helpers
     # ------------------------------------------------------------------ #

@@ -7,15 +7,21 @@ mode (default) and respects QGIS's own theme via neutral grays.
 
 import html
 import time
+from datetime import datetime
 
 from qgis.gui import QgsDockWidget
 from qgis.PyQt.QtCore import Qt, QEvent, QThread, pyqtSignal, QTimer
 from qgis.PyQt.QtGui import QFont, QTextCursor
 from qgis.PyQt.QtWidgets import (
+    QAction,
+    QDialog,
     QFrame,
     QHBoxLayout,
     QApplication,
+    QInputDialog,
     QLabel,
+    QMenu,
+    QMessageBox,
     QPushButton,
     QScrollArea,
     QSizePolicy,
@@ -25,6 +31,7 @@ from qgis.PyQt.QtWidgets import (
 )
 
 from ..backends.base import AgentEvent, EventType
+from ..core.session_store import DEFAULT_SESSION_NAME, SessionStore
 from .agent_turn_bubble import AgentTurnBubble, _SPINNER_FRAMES
 from .chart_widget import ChartWidget
 from .message_bubble import MessageContainer
@@ -140,13 +147,29 @@ class ChatWorker(QThread):
 class ChatDock(QgsDockWidget):
     _ask_user_signal = pyqtSignal(str, object, bool)
 
-    def __init__(self, get_backend, open_settings, request_cancel, toolkit=None, parent=None):
+    def __init__(
+        self,
+        get_backend,
+        open_settings,
+        request_cancel,
+        toolkit=None,
+        parent=None,
+        session_store=None,
+        show_startup_picker=True,
+    ):
         super().__init__("AgenticGIS", parent)
         self.setObjectName("AgenticGisDock")
         self._get_backend = get_backend
         self._open_settings = open_settings
         self._request_cancel = request_cancel
         self._toolkit = toolkit
+        self._session_store = session_store or SessionStore()
+        self._active_session_id = self._session_store.active_session()["id"]
+        self._show_startup_picker = bool(show_startup_picker)
+        self._startup_picker_shown = False
+        self._transcript_events = []
+        self._restoring_transcript = False
+        self._current_turn_event = None
         self._history = []
         self._prompt_history = []
         self._prompt_history_index = None
@@ -190,6 +213,7 @@ class ChatDock(QgsDockWidget):
             self._toolkit.set_ask_user_emitter(
                 self._emit_ask_user_threadsafe
             )
+        self._restore_active_session()
 
     # ------------------------------------------------------------------ #
     def _build_ui(self):
@@ -221,7 +245,7 @@ class ChatDock(QgsDockWidget):
 
         top.addStretch(1)
 
-        for label, tip in (("Setting", "Settings"), ("Clear", "Clear chat")):
+        for label, tip in (("Setting", "Settings"), ("Session", "Chat sessions")):
             btn = QPushButton(label)
             btn.setToolTip(tip)
             btn.setFixedSize(58, 28)
@@ -243,9 +267,36 @@ class ChatDock(QgsDockWidget):
             top.addWidget(btn)
 
         self._settings_btn = top.itemAt(top.count() - 2).widget()
-        self._clear_btn = top.itemAt(top.count() - 1).widget()
+        self._session_btn = top.itemAt(top.count() - 1).widget()
         self._settings_btn.clicked.connect(self._open_settings)
-        self._clear_btn.clicked.connect(self._clear)
+        self._session_menu = QMenu(self)
+        self._session_menu.setStyleSheet(f"""
+            QMenu {{
+                background-color: {_SURFACE};
+                color: {_TEXT};
+                border: 1px solid {_BORDER};
+                border-radius: 6px;
+                padding: 4px;
+                font-size: 11px;
+            }}
+            QMenu::item {{
+                padding: 6px 18px 6px 10px;
+                border-radius: 4px;
+            }}
+            QMenu::item:selected {{
+                background-color: {_SURFACE_2};
+            }}
+        """)
+        for text, handler in (
+            ("New session", self._new_session_from_menu),
+            ("Session list", self._show_session_list),
+            ("Rename current", self._rename_current_session),
+            ("Delete current", self._delete_current_session),
+        ):
+            action = QAction(text, self)
+            action.triggered.connect(handler)
+            self._session_menu.addAction(action)
+        self._session_btn.setMenu(self._session_menu)
         layout.addLayout(top)
 
         # -- Hairline divider -------------------------------------------- #
@@ -415,6 +466,13 @@ class ChatDock(QgsDockWidget):
     def showEvent(self, event):
         super().showEvent(event)
         self.input.setFocus(Qt.OtherFocusReason)
+        if (
+            self._show_startup_picker
+            and not self._startup_picker_shown
+            and self._session_store.had_existing_sessions
+        ):
+            self._startup_picker_shown = True
+            QTimer.singleShot(0, self._show_startup_session_picker)
 
     # ------------------------------------------------------------------ #
     def eventFilter(self, obj, event):
@@ -586,36 +644,74 @@ class ChatDock(QgsDockWidget):
         self.transcript_layout.insertWidget(self.transcript_layout.count() - 1, widget)
         self._scroll_to_bottom_after_layout()
 
+    def _record_transcript_event(self, event):
+        if self._restoring_transcript:
+            return
+        self._transcript_events.append(dict(event))
+        self._save_current_session()
+
+    def _ensure_current_turn_event(self):
+        if self._restoring_transcript:
+            return None
+        if self._current_turn_event is None:
+            self._current_turn_event = {
+                "type": "agent_turn",
+                "thinking": "",
+                "tools": [],
+                "text": "",
+            }
+        return self._current_turn_event
+
+    def _finalize_current_turn_event(self):
+        if self._restoring_transcript or self._current_turn_event is None:
+            self._current_turn_event = None
+            return
+        event = self._current_turn_event
+        has_text = bool(event.get("text"))
+        has_thinking = bool(event.get("thinking"))
+        has_tools = bool(event.get("tools"))
+        if has_text or has_thinking or has_tools:
+            self._transcript_events.append(dict(event))
+            self._save_current_session()
+        self._current_turn_event = None
+
     # -- High-level adders ---------------------------------------------- #
     def _add_user_message(self, text: str):
         self._add_widget(MessageContainer(text, sender_name="You", is_user=True))
+        self._record_transcript_event({"type": "user", "text": text})
 
     def _get_or_create_agent_turn(self) -> AgentTurnBubble:
         """Return the active AgentTurnBubble, creating and adding one if needed."""
         if self._current_agent_turn is None:
             self._hide_typing()
-            container = QWidget()
-            container.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
-            vl = QVBoxLayout(container)
-            vl.setContentsMargins(16, 0, 16, 0)
-            vl.setSpacing(3)
-            sender = QLabel("AgenticGIS")
-            sender.setStyleSheet(
-                f"color:{_TEXT_3}; font-size:10px; background:transparent; border:none;"
-            )
-            vl.addWidget(sender)
-            turn = AgentTurnBubble()
-            vl.addWidget(turn)
-            self._add_widget(container)
-            self._current_agent_turn = turn
+            self._current_agent_turn = self._add_agent_turn_widget()
             self._thinking_started = False
+            self._ensure_current_turn_event()
         return self._current_agent_turn
+
+    def _add_agent_turn_widget(self):
+        container = QWidget()
+        container.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        vl = QVBoxLayout(container)
+        vl.setContentsMargins(16, 0, 16, 0)
+        vl.setSpacing(3)
+        sender = QLabel("AgenticGIS")
+        sender.setStyleSheet(
+            f"color:{_TEXT_3}; font-size:10px; background:transparent; border:none;"
+        )
+        vl.addWidget(sender)
+        turn = AgentTurnBubble()
+        vl.addWidget(turn)
+        self._add_widget(container)
+        return turn
 
     def _add_chart(self, chart_data):
         self._add_widget(ChartWidget(chart_data))
+        self._record_transcript_event({"type": "chart", "data": chart_data})
 
     def _add_stats(self, stats_data):
         self._add_widget(StatsWidget(stats_data))
+        self._record_transcript_event({"type": "stats", "data": stats_data})
 
     def _add_compaction_notice(self):
         w = QLabel("── history compacted ──")
@@ -625,6 +721,54 @@ class ChatDock(QgsDockWidget):
             f" padding:4px 0; background:transparent;"
         )
         self._add_widget(w)
+        self._record_transcript_event({"type": "compaction"})
+
+    def _add_error_message(self, text):
+        msg = html.escape(str(text or ""))
+        self._add_widget(MessageContainer(msg, is_user=False, is_error=True))
+        self._record_transcript_event({"type": "error", "text": str(text or "")})
+
+    def _restore_transcript(self, events):
+        self._restoring_transcript = True
+        try:
+            self._clear_live_ui()
+            for event in events or []:
+                etype = event.get("type") if isinstance(event, dict) else None
+                if etype == "user":
+                    self._add_widget(MessageContainer(event.get("text", ""), sender_name="You", is_user=True))
+                elif etype == "agent_turn":
+                    self._restore_agent_turn(event)
+                elif etype == "chart":
+                    self._add_widget(ChartWidget(event.get("data") or {}))
+                elif etype == "stats":
+                    self._add_widget(StatsWidget(event.get("data") or {}))
+                elif etype == "error":
+                    self._add_widget(MessageContainer(html.escape(str(event.get("text", ""))), is_user=False, is_error=True))
+                elif etype == "compaction":
+                    self._add_compaction_notice()
+        finally:
+            self._restoring_transcript = False
+            self._typing_widget = None
+            self._current_agent_turn = None
+            self._current_tool_row = None
+            self._current_turn_event = None
+            self._pending_tool = None
+            self._streaming = False
+
+    def _restore_agent_turn(self, event):
+        turn = self._add_agent_turn_widget()
+        thinking = event.get("thinking", "")
+        if thinking:
+            turn.add_thinking_block()
+            turn.set_thinking_text(thinking)
+        for tool in event.get("tools") or []:
+            item = turn.add_tool(tool.get("name", "tool"), tool.get("input") or {})
+            if "result" in tool:
+                item.set_result(str(tool.get("result", "")), bool(tool.get("is_error", False)))
+        text = event.get("text", "")
+        if text:
+            turn.finalize_text(text)
+        turn.finalize()
 
     # -- Typing indicator ----------------------------------------------- #
     def _show_typing(self):
@@ -813,7 +957,245 @@ class ChatDock(QgsDockWidget):
         super().resizeEvent(event)
 
     # ------------------------------------------------------------------ #
+    def _show_startup_session_picker(self):
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Chat sessions")
+        dialog.setModal(True)
+        dialog.setStyleSheet(f"QDialog {{ background: {_CANVAS}; color: {_TEXT}; }}")
+        layout = QVBoxLayout(dialog)
+        layout.setContentsMargins(16, 16, 16, 16)
+        layout.setSpacing(10)
+
+        title = QLabel("Choose a chat session")
+        title.setStyleSheet(f"color:{_TEXT}; font-size:13px; font-weight:600;")
+        layout.addWidget(title)
+
+        previous = QPushButton("Continue previous")
+        sessions = QPushButton("Session list")
+        new_session = QPushButton("New session")
+        for button in (previous, sessions, new_session):
+            button.setMinimumHeight(30)
+            button.setStyleSheet(self._session_dialog_button_style())
+            layout.addWidget(button)
+
+        previous.clicked.connect(lambda: (dialog.accept(), self._switch_to_session(self._session_store.active_session()["id"])))
+        sessions.clicked.connect(lambda: (dialog.accept(), self._show_session_list()))
+        new_session.clicked.connect(lambda: (dialog.accept(), self._new_session_from_menu()))
+        dialog.exec_()
+
+    def _session_dialog_button_style(self):
+        return f"""
+            QPushButton {{
+                background: {_SURFACE};
+                color: {_TEXT};
+                border: 1px solid {_BORDER};
+                border-radius: 6px;
+                padding: 6px 10px;
+                text-align: left;
+            }}
+            QPushButton:hover {{
+                background: {_SURFACE_2};
+            }}
+        """
+
+    def _prompt_session_name(self, title, current=""):
+        text, accepted = QInputDialog.getText(self, title, "Name:", text=current or "")
+        if not accepted:
+            return None
+        return (text or DEFAULT_SESSION_NAME).strip() or DEFAULT_SESSION_NAME
+
+    def _new_session_from_menu(self):
+        name = self._prompt_session_name("New session", "")
+        if name is None:
+            return
+        self._save_current_session()
+        session = self._session_store.create_session(name)
+        self._switch_to_session(session["id"], save_current=False)
+
+    def _rename_current_session(self):
+        session = self._session_store.get_session(self._active_session_id)
+        if session is None:
+            return
+        name = self._prompt_session_name("Rename session", session.get("name", ""))
+        if name is None:
+            return
+        self._session_store.rename_session(self._active_session_id, name)
+
+    def _delete_current_session(self):
+        self._delete_session(self._active_session_id)
+
+    def _show_session_list(self):
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Sessions")
+        dialog.setModal(True)
+        dialog.setStyleSheet(f"QDialog {{ background: {_CANVAS}; color: {_TEXT}; }}")
+        layout = QVBoxLayout(dialog)
+        layout.setContentsMargins(14, 14, 14, 14)
+        layout.setSpacing(8)
+
+        for session in self._session_store.list_sessions():
+            row = QWidget(dialog)
+            row_layout = QHBoxLayout(row)
+            row_layout.setContentsMargins(0, 0, 0, 0)
+            row_layout.setSpacing(6)
+            label = QLabel(f"{session.get('name', DEFAULT_SESSION_NAME)}\n{self._format_session_time(session.get('updated_at'))}")
+            label.setStyleSheet(f"color:{_TEXT}; font-size:11px; background:transparent;")
+            row_layout.addWidget(label, 1)
+            for text, handler in (
+                ("Open", lambda _checked=False, sid=session["id"]: (dialog.accept(), self._switch_to_session(sid))),
+                ("Rename", lambda _checked=False, sid=session["id"]: self._rename_session_from_list(sid, dialog)),
+                ("Delete", lambda _checked=False, sid=session["id"]: self._delete_session_from_list(sid, dialog)),
+            ):
+                button = QPushButton(text)
+                button.setFixedHeight(28)
+                button.setStyleSheet(self._session_dialog_button_style())
+                button.clicked.connect(handler)
+                row_layout.addWidget(button)
+            layout.addWidget(row)
+
+        close = QPushButton("Close")
+        close.setStyleSheet(self._session_dialog_button_style())
+        close.clicked.connect(dialog.reject)
+        layout.addWidget(close)
+        dialog.exec_()
+
+    def _rename_session_from_list(self, session_id, dialog):
+        session = self._session_store.get_session(session_id)
+        if session is None:
+            return
+        name = self._prompt_session_name("Rename session", session.get("name", ""))
+        if name is None:
+            return
+        self._session_store.rename_session(session_id, name)
+        dialog.accept()
+        self._show_session_list()
+
+    def _delete_session_from_list(self, session_id, dialog):
+        if self._delete_session(session_id):
+            dialog.accept()
+            self._show_session_list()
+
+    def _delete_session(self, session_id):
+        session = self._session_store.get_session(session_id)
+        if session is None:
+            return False
+        answer = QMessageBox.question(
+            self,
+            "Delete session",
+            f"Delete '{session.get('name', DEFAULT_SESSION_NAME)}'?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if answer != QMessageBox.Yes:
+            return False
+        if session_id == self._active_session_id:
+            self._stop_active_worker()
+        fallback = self._session_store.delete_session(session_id)
+        if session_id == self._active_session_id and fallback is not None:
+            self._switch_to_session(fallback["id"], save_current=False)
+        return True
+
+    @staticmethod
+    def _format_session_time(value):
+        if not value:
+            return ""
+        try:
+            dt = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+            return dt.strftime("%Y-%m-%d %H:%M")
+        except ValueError:
+            return str(value)
+
+    def _stop_active_worker(self):
+        if self._worker is None:
+            return False
+        self._stop_requested = True
+        self._worker.stop()
+        if self._request_cancel is not None:
+            try:
+                self._request_cancel()
+            except Exception:
+                pass
+        if self._ask_user_card is not None and self._toolkit is not None:
+            self._toolkit._resolve_ask_user({
+                "choice": None, "free_text": None, "cancelled": True,
+            })
+        return True
+
+    def _save_current_session(self):
+        if not self._active_session_id:
+            return
+        self._session_store.save_session(
+            self._active_session_id,
+            backend_history=list(self._history),
+            transcript_events=list(self._transcript_events),
+            backend_state=self._export_backend_state(),
+        )
+
+    def _export_backend_state(self):
+        try:
+            backend = self._get_backend()
+        except Exception:
+            backend = None
+        if backend is None or not hasattr(backend, "export_session_state"):
+            return {}
+        try:
+            return backend.export_session_state() or {}
+        except Exception:
+            return {}
+
+    def _import_backend_state(self, state):
+        try:
+            backend = self._get_backend()
+        except Exception:
+            backend = None
+        if backend is None or not hasattr(backend, "import_session_state"):
+            return
+        try:
+            backend.import_session_state(state or {})
+        except Exception:
+            pass
+
+    def _restore_active_session(self):
+        session = self._session_store.active_session()
+        self._active_session_id = session["id"]
+        self._history = list(session.get("backend_history") or [])
+        self._transcript_events = list(session.get("transcript_events") or [])
+        self._import_backend_state(session.get("backend_state") or {})
+        self._restore_transcript(self._transcript_events)
+
+    def _switch_to_session(self, session_id, save_current=True):
+        if save_current and session_id != self._active_session_id:
+            self._save_current_session()
+        self._stop_active_worker()
+        if not self._session_store.set_active_session(session_id):
+            return False
+        session = self._session_store.get_session(session_id)
+        if session is None:
+            return False
+        self._active_session_id = session_id
+        self._history = list(session.get("backend_history") or [])
+        self._transcript_events = list(session.get("transcript_events") or [])
+        self._import_backend_state(session.get("backend_state") or {})
+        self._restore_transcript(self._transcript_events)
+        self._set_status("Ready", _SUCCESS, icon="✓")
+        return True
+
+    def _clear_transcript_widgets(self):
+        while self.transcript_layout.count() > 1:
+            item = self.transcript_layout.takeAt(0)
+            w = item.widget()
+            if w is not None:
+                w.deleteLater()
+
     def _clear(self):
+        self._stop_active_worker()
+        self._history = []
+        self._transcript_events = []
+        self._current_turn_event = None
+        self._clear_live_ui()
+        self._save_current_session()
+
+    def _clear_live_ui(self):
         worker_was_active = self._worker is not None
         # Stop any active worker BEFORE clearing widgets to prevent crashes
         if worker_was_active:
@@ -830,12 +1212,7 @@ class ChatDock(QgsDockWidget):
         # Hide the overlay (modal dialog state) on clear
         if hasattr(self, "_ask_overlay") and self._ask_overlay is not None:
             self._ask_overlay.hide()
-        self._history = []
-        while self.transcript_layout.count() > 1:
-            item = self.transcript_layout.takeAt(0)
-            w = item.widget()
-            if w is not None:
-                w.deleteLater()
+        self._clear_transcript_widgets()
         self._set_status("Ready", _SUCCESS, icon="✓")
         self._typing_widget = None
         self._current_agent_turn = None
@@ -974,6 +1351,7 @@ class ChatDock(QgsDockWidget):
             self._flush_stream_render()
             self._hide_typing()
             turn = self._get_or_create_agent_turn()
+            turn_event = self._ensure_current_turn_event()
             if self._current_text:
                 # In a tool turn, any prose emitted before the tool call is
                 # progress/reasoning. Keep it visible in the thinking block
@@ -991,6 +1369,11 @@ class ChatDock(QgsDockWidget):
                 self._showing_tool_progress = False
             self._pending_tool = (tool_name, tool_input)
             self._current_tool_row = turn.add_tool(tool_name, tool_input)
+            if turn_event is not None:
+                turn_event.setdefault("tools", []).append({
+                    "name": tool_name,
+                    "input": tool_input,
+                })
             self._set_tool_progress(f"Processing `{tool_name}`...\n")
             self._maybe_scroll_to_bottom()
 
@@ -1009,6 +1392,16 @@ class ChatDock(QgsDockWidget):
             if self._current_tool_row is not None:
                 self._current_tool_row.set_result(str(result), is_err)
                 self._current_tool_row = None
+            turn_event = self._ensure_current_turn_event()
+            if turn_event is not None:
+                tools = turn_event.setdefault("tools", [])
+                if tools:
+                    tools[-1].update({
+                        "name": tool_name,
+                        "result": str(result),
+                        "is_error": bool(is_err),
+                        "cancelled": is_cancelled,
+                    })
             self._pending_tool = None
             # Surface cancellation as a clear status update so the user
             # knows the tool didn't return a real error.
@@ -1059,13 +1452,13 @@ class ChatDock(QgsDockWidget):
             self._flush_stream_render()
             self._hide_typing()
             self._finish_streaming()
-            msg = html.escape(str(ev.data.get("error", "")))
-            self._add_widget(MessageContainer(msg, is_user=False, is_error=True))
+            self._add_error_message(str(ev.data.get("error", "")))
 
         elif ev.type == EventType.DONE:
             self._flush_stream_render()
             self._hide_typing()
             self._finish_streaming()
+            self._finalize_current_turn_event()
             self._streaming = False
             self._thinking_started = False
             self._thinking_text = ""
@@ -1089,6 +1482,9 @@ class ChatDock(QgsDockWidget):
             turn = self._get_or_create_agent_turn()
             turn.finalize_text(self._current_text)
             turn.finalize()
+            turn_event = self._ensure_current_turn_event()
+            if turn_event is not None:
+                turn_event["text"] = self._current_text
         elif self._current_agent_turn is None:
             # No text and no turn yet — create an empty turn so the tool row
             # has somewhere to live.
@@ -1165,11 +1561,15 @@ class ChatDock(QgsDockWidget):
                 self._thinking_text += " "
         self._thinking_text += text
         turn.set_thinking_text(self._thinking_text)
+        turn_event = self._ensure_current_turn_event()
+        if turn_event is not None:
+            turn_event["thinking"] = self._thinking_text
 
     def _on_finished(self, history, worker=None):
         if worker is not None and self._worker is not None and worker is not self._worker:
             return
         self._history = history if history is not None else self._history
+        self._save_current_session()
         # NOTE: do NOT call _finish_streaming here — the DONE event handler
         # already finalized the turn and reset _current_agent_turn to None.
         # Calling it again would re-create an empty turn and call

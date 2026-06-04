@@ -60,6 +60,14 @@ class AgentBackend(ABC):
         (missing key, missing binary, ...), else ``None``."""
         return None
 
+    def export_session_state(self) -> Dict[str, Any]:
+        """Return backend-owned continuation state for the active chat session."""
+        return {}
+
+    def import_session_state(self, state: Dict[str, Any]) -> None:
+        """Restore backend-owned continuation state for the active chat session."""
+        return None
+
 
 # ── Context compaction helpers ─────────────────────────────────────────────
 _CONTEXT_WINDOWS = {
