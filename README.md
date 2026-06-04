@@ -37,7 +37,6 @@ QGIS session
  ├─ Chat dock ................. you type here; results stream back
  ├─ Backend (pluggable)
  │    • API key    → Anthropic / OpenAI / Groq / Gemini / DeepSeek / Ollama / …
- │    • CLI tool   → Claude Code / OpenCode (no key needed)
  │    • Custom URL → any OpenAI- or Anthropic-compatible endpoint
  └─ Tools (every call runs on the QGIS main thread)
       run_pyqgis         arbitrary PyQGIS — layers, canvas, plugins, console
@@ -54,23 +53,18 @@ there is nothing to install and it works on any QGIS Python.
 
 ## Connection modes (Settings → Connect via)
 
-1. **CLI tool** — use an installed, already-logged-in agent (Claude Code /
-   OpenCode). No API key needed; the plugin auto-starts the local MCP bridge.
-2. **API key** — a built-in provider (Anthropic, OpenAI, Groq, OpenRouter,
-   Google Gemini) using its key or the matching env var (`ANTHROPIC_API_KEY`,
-   `OPENAI_API_KEY`, `GROQ_API_KEY`, …).
-3. **Custom endpoint** — any OpenAI-compatible or Anthropic-compatible base URL
+1. **API key** — a built-in provider (Anthropic, OpenAI, Groq, OpenRouter,
+   Google Gemini, DeepSeek, Mistral, xAI, Ollama) using its key or the matching
+   env var (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GROQ_API_KEY`, …).
+2. **Custom endpoint** — any OpenAI-compatible or Anthropic-compatible base URL
    (self-hosted, proxy, or another provider).
-4. **Subscription / OAuth** — rides an existing login via `ANTHROPIC_AUTH_TOKEN`
-   (+ optional `ANTHROPIC_BASE_URL`). For a key-less subscription, CLI-tool mode
-   is usually simpler.
 
 ## Requirements
 
 - **QGIS 3.22+** — that's the whole hard requirement. The plugin itself needs
   no Python packages (stdlib only).
-- **An LLM connection** — one of the connection modes above (a logged-in CLI
-  agent, or an API key / endpoint).
+- **An LLM connection** — one of the connection modes above (an API key or
+  custom endpoint).
 - **Remote sensing (optional)** — to use the Google Earth Engine features you
   must have the **Google Earth Engine** QGIS plugin (`ee_plugin`) installed
   **and already authenticated**:
