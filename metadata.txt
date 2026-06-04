@@ -1,7 +1,7 @@
 [general]
 name=AgenticGIS
 qgisMinimumVersion=3.22
-description=An in-QGIS agentic chat assistant that operates QGIS via PyQGIS. Connect to an installed CLI agent (Claude Code / OpenCode), an API key, or a subscription login.
+description=An in-QGIS agentic chat assistant that operates QGIS via PyQGIS. Connect with an API key from a built-in provider, or any OpenAI-/Anthropic-compatible endpoint.
 about=AgenticGIS adds a chat dock to QGIS. Type a request in natural language and an LLM agent carries it out by generating and running PyQGIS code, giving it access to every QGIS feature and every installed plugin.
 version=0.1.0
 author=Muhammad Alichamdan
