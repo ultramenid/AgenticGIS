@@ -289,11 +289,8 @@ class ApiBackend(AgentBackend):
             api_key = self.config.get("api_key") or os.environ.get(p["key_env"], "")
             base_url = (self.config.get("api_base_url") or "").strip() or p["base_url"]
         else:
-            # Fallback for unknown/historical provider
-            api_key = self.config.get("api_key") or os.environ.get(
-                "ANTHROPIC_API_KEY", ""
-            )
-            base_url = os.environ.get("ANTHROPIC_BASE_URL") or None
+            api_key = self.config.get("custom_api_key") or ""
+            base_url = self.config.get("custom_base_url") or None
         return AnthropicHttpClient(
             api_key=api_key or None, auth_token=None, base_url=base_url
         )
@@ -304,12 +301,12 @@ class ApiBackend(AgentBackend):
             key = self.config.get("api_key") or os.environ.get(p["key_env"], "")
             label = p["label"]
         else:
-            key = self.config.get("api_key") or os.environ.get("ANTHROPIC_API_KEY", "")
-            label = "Anthropic"
+            key = self.config.get("custom_api_key")
+            label = "Custom endpoint"
         if not key:
             return (
                 f"No API key set for {label}. "
-                f"Add one in Settings (or set {p['key_env'] if p else 'ANTHROPIC_API_KEY'})."
+                f"Add one in Settings (or set {p['key_env'] if p else 'the provider key env'})."
             )
         return None
 

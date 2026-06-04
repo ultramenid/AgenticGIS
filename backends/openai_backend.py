@@ -252,7 +252,7 @@ class OpenAIBackend(AgentBackend):
             api_key = self.config.get("api_key") or os.environ.get(p["key_env"], "")
             base_url = (self.config.get("api_base_url") or "").strip() or p["base_url"]
         else:
-            api_key = self.config.get("api_key") or ""
+            api_key = self.config.get("custom_api_key") or ""
             base_url = self.config.get("custom_base_url")
         return OpenAIHttpClient(api_key=api_key or None, base_url=base_url)
 
@@ -262,7 +262,7 @@ class OpenAIBackend(AgentBackend):
             key = self.config.get("api_key") or os.environ.get(p["key_env"], "")
             label = p["label"]
         else:
-            key = self.config.get("api_key")
+            key = self.config.get("custom_api_key")
             label = "Custom endpoint"
         if not key:
             return (
