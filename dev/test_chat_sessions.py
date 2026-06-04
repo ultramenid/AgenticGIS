@@ -6,7 +6,7 @@ import sys
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
 
-from qgis.PyQt.QtWidgets import QApplication
+from qgis.PyQt.QtWidgets import QApplication, QFrame, QLineEdit
 
 from AgenticGis.core.session_store import SessionStore
 from AgenticGis.gui.chat_dock import ChatDock
@@ -67,6 +67,7 @@ def test_header_uses_session_menu_instead_of_clear():
     app, dock, _backend = _dock()
 
     assert "Session" in dock._session_btn.text()
+    assert dock._session_name_lbl.text() == "New session"
     assert not hasattr(dock, "_clear_btn")
     assert [action.text() for action in dock._session_menu.actions()] == [
         "New session",
@@ -75,6 +76,43 @@ def test_header_uses_session_menu_instead_of_clear():
         "Delete current",
     ]
 
+    dock.deleteLater()
+    app.processEvents()
+
+
+def test_topbar_session_name_updates_when_switching_and_renaming():
+    store = SessionStore(settings=_Settings())
+    first = store.active_session()
+    second = store.create_session("Flood map")
+    app, dock, _backend = _dock(store=store)
+
+    dock._switch_to_session(second["id"])
+    assert dock._session_name_lbl.text() == "Flood map"
+
+    dock._session_store.rename_session(second["id"], "Updated flood map")
+    dock._update_session_name_label()
+    assert dock._session_name_lbl.text() == "Updated flood map"
+
+    dock._switch_to_session(first["id"])
+    assert dock._session_name_lbl.text() == "New session"
+
+    dock.deleteLater()
+    app.processEvents()
+
+
+def test_session_name_prompt_uses_card_style_not_default_input_dialog():
+    app, dock, _backend = _dock()
+
+    dialog, field = dock._build_session_name_dialog("Rename session", "Current")
+
+    assert dialog.objectName() == "SessionNameDialog"
+    assert isinstance(field, QLineEdit)
+    assert field.text() == "Current"
+    assert dialog.findChild(QFrame, "SessionDialogCard") is not None
+    assert "background-color" in field.styleSheet()
+    assert "border-radius: 7px" in field.styleSheet()
+
+    dialog.deleteLater()
     dock.deleteLater()
     app.processEvents()
 
@@ -169,6 +207,8 @@ def test_restore_replays_completed_records_and_skips_live_state():
 
 def main():
     test_header_uses_session_menu_instead_of_clear()
+    test_topbar_session_name_updates_when_switching_and_renaming()
+    test_session_name_prompt_uses_card_style_not_default_input_dialog()
     test_session_switching_preserves_separate_history_and_backend_state()
     test_switch_stops_running_worker_before_restoring_session()
     test_restore_replays_completed_records_and_skips_live_state()

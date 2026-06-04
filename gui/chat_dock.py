@@ -18,8 +18,8 @@ from qgis.PyQt.QtWidgets import (
     QFrame,
     QHBoxLayout,
     QApplication,
-    QInputDialog,
     QLabel,
+    QLineEdit,
     QMenu,
     QMessageBox,
     QPushButton,
@@ -242,6 +242,23 @@ class ChatDock(QgsDockWidget):
         self.status.setTextFormat(Qt.RichText)
         self.status.setStyleSheet("background: transparent; padding-right: 4px;")
         top.addWidget(self.status)
+
+        self._session_name_lbl = QLabel("")
+        self._session_name_lbl.setTextFormat(Qt.PlainText)
+        self._session_name_lbl.setMinimumWidth(0)
+        self._session_name_lbl.setMaximumWidth(220)
+        self._session_name_lbl.setStyleSheet(f"""
+            QLabel {{
+                color: {_TEXT_2};
+                background-color: {_SURFACE};
+                border: 1px solid {_BORDER_SOFT};
+                border-radius: 6px;
+                padding: 5px 8px;
+                font-size: 10px;
+                font-weight: 500;
+            }}
+        """)
+        top.addWidget(self._session_name_lbl, 0, Qt.AlignVCenter)
 
         top.addStretch(1)
 
@@ -1042,6 +1059,67 @@ class ChatDock(QgsDockWidget):
             layout.addWidget(desc)
         return card, layout
 
+    def _build_session_name_dialog(self, title, current=""):
+        dialog = QDialog(self)
+        dialog.setObjectName("SessionNameDialog")
+        dialog.setWindowTitle(title)
+        dialog.setModal(True)
+        dialog.setMinimumWidth(420)
+        dialog.setStyleSheet(self._session_dialog_style())
+
+        layout = QVBoxLayout(dialog)
+        layout.setContentsMargins(14, 14, 14, 14)
+        layout.setSpacing(0)
+
+        card, card_layout = self._session_dialog_card(title, "Name this chat session")
+        layout.addWidget(card)
+
+        field = QLineEdit(current or "")
+        field.setObjectName("SessionNameField")
+        field.setMinimumHeight(36)
+        field.setFont(QFont("JetBrains Mono", 10))
+        field.setPlaceholderText(DEFAULT_SESSION_NAME)
+        field.setStyleSheet(f"""
+            QLineEdit {{
+                background-color: {_SURFACE_2};
+                color: {_TEXT};
+                border: 1px solid {_BORDER_SOFT};
+                border-radius: 7px;
+                padding: 7px 10px;
+                font-size: 12px;
+                selection-background-color: {_TEXT};
+                selection-color: {_SURFACE};
+            }}
+            QLineEdit:focus {{
+                border-color: {_WARN};
+            }}
+        """)
+        card_layout.addWidget(field)
+
+        actions = QHBoxLayout()
+        actions.setContentsMargins(0, 0, 0, 0)
+        actions.setSpacing(8)
+        actions.addStretch(1)
+        cancel = QPushButton("Cancel")
+        cancel.setCursor(Qt.PointingHandCursor)
+        cancel.setFixedHeight(32)
+        cancel.setMinimumWidth(72)
+        cancel.setStyleSheet(self._session_dialog_button_style("secondary"))
+        confirm = QPushButton("Save")
+        confirm.setCursor(Qt.PointingHandCursor)
+        confirm.setFixedHeight(32)
+        confirm.setMinimumWidth(72)
+        confirm.setStyleSheet(self._session_dialog_button_style("wide"))
+        cancel.clicked.connect(dialog.reject)
+        confirm.clicked.connect(dialog.accept)
+        field.returnPressed.connect(dialog.accept)
+        actions.addWidget(cancel)
+        actions.addWidget(confirm)
+        card_layout.addLayout(actions)
+        field.setFocus(Qt.OtherFocusReason)
+        field.selectAll()
+        return dialog, field
+
     def _session_dialog_button_style(self, role="secondary"):
         if role == "danger":
             bg = _SURFACE_2
@@ -1091,10 +1169,19 @@ class ChatDock(QgsDockWidget):
         """
 
     def _prompt_session_name(self, title, current=""):
-        text, accepted = QInputDialog.getText(self, title, "Name:", text=current or "")
-        if not accepted:
+        dialog, field = self._build_session_name_dialog(title, current)
+        if dialog.exec_() != QDialog.Accepted:
             return None
+        text = field.text()
         return (text or DEFAULT_SESSION_NAME).strip() or DEFAULT_SESSION_NAME
+
+    def _update_session_name_label(self):
+        if not hasattr(self, "_session_name_lbl"):
+            return
+        session = self._session_store.get_session(self._active_session_id)
+        name = (session or {}).get("name") or DEFAULT_SESSION_NAME
+        self._session_name_lbl.setText(name)
+        self._session_name_lbl.setToolTip(f"Active session: {name}")
 
     def _new_session_from_menu(self):
         name = self._prompt_session_name("New session", "")
@@ -1112,6 +1199,7 @@ class ChatDock(QgsDockWidget):
         if name is None:
             return
         self._session_store.rename_session(self._active_session_id, name)
+        self._update_session_name_label()
 
     def _delete_current_session(self):
         self._delete_session(self._active_session_id)
@@ -1189,6 +1277,8 @@ class ChatDock(QgsDockWidget):
         if name is None:
             return
         self._session_store.rename_session(session_id, name)
+        if session_id == self._active_session_id:
+            self._update_session_name_label()
         dialog.accept()
         self._show_session_list()
 
@@ -1284,6 +1374,7 @@ class ChatDock(QgsDockWidget):
         self._transcript_events = list(session.get("transcript_events") or [])
         self._import_backend_state(session.get("backend_state") or {})
         self._restore_transcript(self._transcript_events)
+        self._update_session_name_label()
 
     def _switch_to_session(self, session_id, save_current=True):
         if save_current and session_id != self._active_session_id:
@@ -1299,6 +1390,7 @@ class ChatDock(QgsDockWidget):
         self._transcript_events = list(session.get("transcript_events") or [])
         self._import_backend_state(session.get("backend_state") or {})
         self._restore_transcript(self._transcript_events)
+        self._update_session_name_label()
         self._set_status("Ready", _SUCCESS, icon="✓")
         return True
 
