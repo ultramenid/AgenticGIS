@@ -21,7 +21,6 @@ from qgis.PyQt.QtWidgets import (
     QLabel,
     QLineEdit,
     QMenu,
-    QMessageBox,
     QPushButton,
     QScrollArea,
     QSizePolicy,
@@ -199,6 +198,7 @@ class ChatDock(QgsDockWidget):
         self._status_color = _TEXT_3
         self._status_icon = "✓"
         self._status_spinning = False
+        self._status_session_name = DEFAULT_SESSION_NAME
         self._last_escape_press_at = 0.0
         self._build_ui()
         self._status_timer = QTimer(self)
@@ -242,23 +242,6 @@ class ChatDock(QgsDockWidget):
         self.status.setTextFormat(Qt.RichText)
         self.status.setStyleSheet("background: transparent; padding-right: 4px;")
         top.addWidget(self.status)
-
-        self._session_name_lbl = QLabel("")
-        self._session_name_lbl.setTextFormat(Qt.PlainText)
-        self._session_name_lbl.setMinimumWidth(0)
-        self._session_name_lbl.setMaximumWidth(220)
-        self._session_name_lbl.setStyleSheet(f"""
-            QLabel {{
-                color: {_TEXT_2};
-                background-color: {_SURFACE};
-                border: 1px solid {_BORDER_SOFT};
-                border-radius: 6px;
-                padding: 5px 8px;
-                font-size: 10px;
-                font-weight: 500;
-            }}
-        """)
-        top.addWidget(self._session_name_lbl, 0, Qt.AlignVCenter)
 
         top.addStretch(1)
 
@@ -826,9 +809,12 @@ class ChatDock(QgsDockWidget):
             mark = _SPINNER_FRAMES[self._status_phase]
         else:
             mark = self._status_icon or "·"
+        session_name = self._status_session_name or DEFAULT_SESSION_NAME
         self.status.setText(
             f"<span style='color:{self._status_color};font-size:11px;'>{html.escape(mark)}</span> "
             f"<span style='color:{_TEXT_3}; font-size:11px;'>{html.escape(self._status_text)}</span>"
+            f"<span style='color:{_TEXT_4}; font-size:11px;'> - </span>"
+            f"<span style='color:{_TEXT_2}; font-size:11px;'>{html.escape(session_name)}</span>"
         )
 
     # ------------------------------------------------------------------ #
@@ -1120,6 +1106,70 @@ class ChatDock(QgsDockWidget):
         field.selectAll()
         return dialog, field
 
+    def _build_delete_session_dialog(self, session):
+        name = (session or {}).get("name") or DEFAULT_SESSION_NAME
+        dialog = QDialog(self)
+        dialog.setObjectName("SessionDeleteDialog")
+        dialog.setWindowTitle("Delete session")
+        dialog.setModal(True)
+        dialog.setMinimumWidth(420)
+        dialog.setStyleSheet(self._session_dialog_style())
+
+        layout = QVBoxLayout(dialog)
+        layout.setContentsMargins(14, 14, 14, 14)
+        layout.setSpacing(0)
+
+        card, card_layout = self._session_dialog_card(
+            "Delete session",
+            "This removes the saved transcript and backend continuation for this chat.",
+        )
+        layout.addWidget(card)
+
+        row = QFrame(dialog)
+        row.setObjectName("SessionListRow")
+        row.setStyleSheet(self._session_row_style(active=True))
+        row_layout = QVBoxLayout(row)
+        row_layout.setContentsMargins(12, 9, 12, 9)
+        row_layout.setSpacing(3)
+        title = QLabel(name)
+        title.setWordWrap(True)
+        title.setFont(QFont("JetBrains Mono", 11, QFont.DemiBold))
+        title.setStyleSheet(f"color:{_TEXT}; font-size:12px;")
+        meta = QLabel("Deletion cannot be undone")
+        meta.setFont(QFont("JetBrains Mono", 10))
+        meta.setStyleSheet(f"color:{_DANGER}; font-size:10px;")
+        row_layout.addWidget(title)
+        row_layout.addWidget(meta)
+        card_layout.addWidget(row)
+
+        actions = QHBoxLayout()
+        actions.setContentsMargins(0, 0, 0, 0)
+        actions.setSpacing(8)
+        actions.addStretch(1)
+        cancel = QPushButton("Cancel")
+        cancel.setCursor(Qt.PointingHandCursor)
+        cancel.setFixedHeight(32)
+        cancel.setMinimumWidth(72)
+        cancel.setStyleSheet(self._session_dialog_button_style("secondary"))
+        delete = QPushButton("Delete")
+        delete.setCursor(Qt.PointingHandCursor)
+        delete.setFixedHeight(32)
+        delete.setMinimumWidth(72)
+        delete.setStyleSheet(self._session_dialog_button_style("danger"))
+        cancel.clicked.connect(dialog.reject)
+        delete.clicked.connect(dialog.accept)
+        actions.addWidget(cancel)
+        actions.addWidget(delete)
+        card_layout.addLayout(actions)
+        return dialog
+
+    def _confirm_delete_session(self, session):
+        dialog = self._build_delete_session_dialog(session)
+        try:
+            return dialog.exec_() == QDialog.Accepted
+        finally:
+            dialog.deleteLater()
+
     def _session_dialog_button_style(self, role="secondary"):
         if role == "danger":
             bg = _SURFACE_2
@@ -1176,12 +1226,12 @@ class ChatDock(QgsDockWidget):
         return (text or DEFAULT_SESSION_NAME).strip() or DEFAULT_SESSION_NAME
 
     def _update_session_name_label(self):
-        if not hasattr(self, "_session_name_lbl"):
-            return
         session = self._session_store.get_session(self._active_session_id)
         name = (session or {}).get("name") or DEFAULT_SESSION_NAME
-        self._session_name_lbl.setText(name)
-        self._session_name_lbl.setToolTip(f"Active session: {name}")
+        self._status_session_name = name
+        if hasattr(self, "status"):
+            self.status.setToolTip(f"Active session: {name}")
+            self._render_status()
 
     def _new_session_from_menu(self):
         name = self._prompt_session_name("New session", "")
@@ -1291,14 +1341,7 @@ class ChatDock(QgsDockWidget):
         session = self._session_store.get_session(session_id)
         if session is None:
             return False
-        answer = QMessageBox.question(
-            self,
-            "Delete session",
-            f"Delete '{session.get('name', DEFAULT_SESSION_NAME)}'?",
-            QMessageBox.Yes | QMessageBox.No,
-            QMessageBox.No,
-        )
-        if answer != QMessageBox.Yes:
+        if not self._confirm_delete_session(session):
             return False
         if session_id == self._active_session_id:
             self._stop_active_worker()
