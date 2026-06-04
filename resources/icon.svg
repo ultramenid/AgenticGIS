@@ -1,0 +1,33 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" role="img" aria-label="AgenticGIS icon">
+  <defs>
+    <linearGradient id="surface" x1="20" y1="14" x2="108" y2="116" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#222222"/>
+      <stop offset="1" stop-color="#121212"/>
+    </linearGradient>
+    <linearGradient id="paper" x1="64" y1="29" x2="91" y2="93" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#eeeeee"/>
+      <stop offset="1" stop-color="#a9a9a9"/>
+    </linearGradient>
+  </defs>
+
+  <rect x="12" y="12" width="104" height="104" rx="28" fill="url(#surface)"/>
+  <rect x="13.25" y="13.25" width="101.5" height="101.5" rx="26.75" fill="none" stroke="#313131" stroke-width="2.5"/>
+
+  <g fill="none" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M29 40c13-8 26-8 39 0s23 8 32 1" stroke="#323232" stroke-width="3.5"/>
+    <path d="M27 63c13-7 26-7 39 0s24 7 35 0" stroke="#3b3b3b" stroke-width="3.5"/>
+    <path d="M30 87c13-8 25-8 38 0 8 5 17 7 27 2" stroke="#323232" stroke-width="3.5"/>
+
+    <path d="M38 97c12-16 23-25 34-32 9-6 18-15 26-29" stroke="#6f6f6f" stroke-width="3"/>
+    <path d="M38 97c12-16 23-25 34-32 9-6 18-15 26-29" stroke="#79a883" stroke-width="1.35"/>
+  </g>
+
+  <circle cx="38" cy="97" r="4" fill="#79a883"/>
+  <circle cx="72" cy="65" r="3.5" fill="#bbbbbb"/>
+  <circle cx="98" cy="36" r="4" fill="#e5e5e5"/>
+
+  <path d="M68 31l20 55-15-9-8 18z" fill="url(#paper)" stroke="#f1f1f1" stroke-width="2.5" stroke-linejoin="round"/>
+  <path d="M75 45l8 23-7-4-4 8z" fill="#171717" opacity="0.88"/>
+
+  <path d="M30 102h18" fill="none" stroke="#666666" stroke-width="3.5" stroke-linecap="round"/>
+</svg>

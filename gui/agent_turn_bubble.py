@@ -7,14 +7,14 @@ Tool calls group by name with braille spinners → ✓/! on completion.
 import html as _html
 import json
 
-from qgis.PyQt.QtCore import Qt
+from qgis.PyQt.QtCore import Qt, QElapsedTimer, QTimer
 from qgis.PyQt.QtGui import QFont
 from qgis.PyQt.QtWidgets import (
     QFrame, QHBoxLayout, QLabel,
     QSizePolicy, QVBoxLayout, QWidget,
 )
 
-from .message_bubble import _md_to_html
+from .message_bubble import _md_to_html, _show_code_context_menu
 
 # Design tokens
 _CANVAS      = "#141414"
@@ -33,6 +33,7 @@ _WARN        = "#d99a3c"
 _SUCCESS     = "#5aa86f"
 _DANGER      = "#d05a5a"
 
+_SPINNER_FRAMES = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
 
 
 class ReasoningTicker(QWidget):
@@ -43,6 +44,7 @@ class ReasoningTicker(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._buffer = ""
+        self._phase = 0
         self.setVisible(False)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
 
@@ -54,10 +56,11 @@ class ReasoningTicker(QWidget):
         hbox.setContentsMargins(12, 2, 12, 2)
         hbox.setSpacing(4)
 
-        prefix = QLabel("▸")
-        prefix.setFont(mono)
-        prefix.setStyleSheet(f"color:{_TEXT_3}; background:transparent;")
-        hbox.addWidget(prefix)
+        self._prefix_lbl = QLabel(_SPINNER_FRAMES[0])
+        self._prefix_lbl.setFont(mono)
+        self._prefix_lbl.setFixedWidth(18)
+        self._prefix_lbl.setStyleSheet(f"color:{_TEXT_3}; background:transparent;")
+        hbox.addWidget(self._prefix_lbl)
 
         self._lbl = QLabel("")
         self._lbl.setFont(mono)
@@ -67,6 +70,10 @@ class ReasoningTicker(QWidget):
         self._lbl.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         hbox.addWidget(self._lbl)
 
+        self._timer = QTimer(self)
+        self._timer.setInterval(120)
+        self._timer.timeout.connect(self._tick)
+
     def append(self, text_chunk: str) -> None:
         """Append a streaming delta and update the single-line display."""
         if not text_chunk:
@@ -75,6 +82,8 @@ class ReasoningTicker(QWidget):
         self._render()
         if not self.isVisible():
             self.setVisible(True)
+        if not self._timer.isActive():
+            self._timer.start()
 
     def set_full(self, text: str) -> None:
         """Replace buffer entirely (for cumulative set_thinking_text calls)."""
@@ -82,17 +91,26 @@ class ReasoningTicker(QWidget):
         self._render()
         if self._buffer and not self.isVisible():
             self.setVisible(True)
+        if self._buffer and not self._timer.isActive():
+            self._timer.start()
         elif not self._buffer:
+            self._timer.stop()
             self.setVisible(False)
 
     def hide_ticker(self) -> None:
+        self._timer.stop()
         self.setVisible(False)
+
+    def _tick(self) -> None:
+        self._phase = (self._phase + 1) % len(_SPINNER_FRAMES)
+        self._render()
 
     def _render(self) -> None:
         display = self._buffer
         if len(display) > self._MAX_CHARS:
             display = "…" + display[-self._MAX_CHARS:]
         display = display.replace("\r\n", " ").replace("\n", " ").replace("\r", " ")
+        self._prefix_lbl.setText(_SPINNER_FRAMES[self._phase])
         self._lbl.setText(_html.escape(display))
 
 
@@ -207,7 +225,7 @@ class ToolSubItem(QWidget):
 
 
 class ToolGroupRow(QWidget):
-    """Groups all ToolSubItems for one tool_name under a ● header with spinner."""
+    """Groups all ToolSubItems for one tool_name under a CLI-style spinner."""
 
     def __init__(self, tool_name: str, parent=None):
         super().__init__(parent)
@@ -215,6 +233,9 @@ class ToolGroupRow(QWidget):
         self._running_count = 0
         self._had_error = False
         self._finalized = False
+        self._pulse = 0
+        self._elapsed = QElapsedTimer()
+        self._elapsed.start()
 
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         self.setStyleSheet("background:transparent;")
@@ -233,8 +254,9 @@ class ToolGroupRow(QWidget):
         hbox.setContentsMargins(12, 2, 12, 2)
         hbox.setSpacing(6)
 
-        self._dot_lbl = QLabel("●")
+        self._dot_lbl = QLabel(_SPINNER_FRAMES[0])
         self._dot_lbl.setFont(mono)
+        self._dot_lbl.setFixedWidth(18)
         self._dot_lbl.setStyleSheet(f"color:{_WARN}; background:transparent;")
         hbox.addWidget(self._dot_lbl)
 
@@ -260,6 +282,12 @@ class ToolGroupRow(QWidget):
         hbox.addWidget(self._state_lbl)
 
         self._layout.addWidget(header)
+
+        self._timer = QTimer(self)
+        self._timer.setInterval(250)
+        self._timer.timeout.connect(self._tick_running)
+        self._timer.start()
+        self._tick_running()
 
     def add_item(self, tool_input: dict) -> ToolSubItem:
         """Append a sub-item; recalculate connectors so only the last shows └─."""
@@ -296,17 +324,32 @@ class ToolGroupRow(QWidget):
         if self._finalized:
             return
         self._finalized = True
+        if hasattr(self, "_timer"):
+            self._timer.stop()
         try:
             if self._had_error:
+                self._dot_lbl.setText("!")
                 self._dot_lbl.setStyleSheet(f"color:{_DANGER}; background:transparent;")
                 self._state_lbl.setText("!")
                 self._state_lbl.setStyleSheet(f"color:{_DANGER}; background:transparent;")
             else:
+                self._dot_lbl.setText("✓")
                 self._dot_lbl.setStyleSheet(f"color:{_SUCCESS}; background:transparent;")
                 self._state_lbl.setText("✓")
                 self._state_lbl.setStyleSheet(f"color:{_SUCCESS}; background:transparent;")
         except RuntimeError:
             pass
+
+    def _tick_running(self) -> None:
+        if self._finalized:
+            return
+        self._pulse = (self._pulse + 1) % len(_SPINNER_FRAMES)
+        elapsed = self._elapsed.elapsed() / 1000.0
+        try:
+            self._dot_lbl.setText(_SPINNER_FRAMES[self._pulse])
+            self._state_lbl.setText(f"processing {elapsed:.1f}s")
+        except RuntimeError:
+            self._timer.stop()
 
 
 class AgentTurnBubble(QFrame):
@@ -317,6 +360,8 @@ class AgentTurnBubble(QFrame):
         self._groups: dict = {}   # tool_name → ToolGroupRow
         self._stream_text = ""
         self._stream_html = ""
+        self._progress_text = ""
+        self._progress_phase = 0
         self._user_decision_lbl = None
 
         self.setFrameShape(QFrame.NoFrame)
@@ -355,6 +400,8 @@ class AgentTurnBubble(QFrame):
             Qt.TextBrowserInteraction | Qt.TextSelectableByMouse
         )
         self.text_lbl.setOpenExternalLinks(True)
+        self.text_lbl.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.text_lbl.customContextMenuRequested.connect(self._show_text_context_menu)
         font = QFont("JetBrains Mono", 12)
         font.setStyleHint(QFont.Monospace)
         self.text_lbl.setFont(font)
@@ -366,7 +413,14 @@ class AgentTurnBubble(QFrame):
         self.text_lbl.setContentsMargins(12, 6, 12, 0)
         self._outer.addWidget(self.text_lbl)
 
+        self._progress_timer = QTimer(self)
+        self._progress_timer.setInterval(180)
+        self._progress_timer.timeout.connect(self._render_progress_text)
+
     # ── Core public API ───────────────────────────────────────────────────
+
+    def _show_text_context_menu(self, pos) -> None:
+        _show_code_context_menu(self, self.text_lbl, pos, self._stream_text)
 
     def add_tool(self, tool_name: str, tool_input: dict) -> ToolSubItem:
         """Add a tool call; creates group if tool_name is new. Returns ToolSubItem."""
@@ -383,7 +437,9 @@ class AgentTurnBubble(QFrame):
         self._ticker.append(text_chunk)
 
     def set_streaming_text(self, text: str) -> None:
-        if text == self._stream_text:
+        was_progress = self._progress_timer.isActive()
+        self._stop_progress()
+        if text == self._stream_text and not was_progress:
             return
         if self._ticker.isVisible():
             self._ticker.hide_ticker()
@@ -392,7 +448,22 @@ class AgentTurnBubble(QFrame):
         cursor = f'<span style="color:{_TEXT_3};font-weight:300;">|</span>'
         self.text_lbl.setText(self._stream_html + cursor)
 
+    def set_progress_text(self, text: str) -> None:
+        clean = (text or "").strip()
+        if not clean:
+            self.clear_streaming_text()
+            return
+        if self._ticker.isVisible():
+            self._ticker.hide_ticker()
+        self._progress_text = clean.rstrip(".")
+        self._stream_text = clean
+        self._progress_phase = 0
+        self._render_progress_text()
+        if not self._progress_timer.isActive():
+            self._progress_timer.start()
+
     def finalize_text(self, text: str) -> None:
+        self._stop_progress()
         self._ticker.hide_ticker()
         self._stream_text = text
         self._stream_html = _md_to_html(text) if text else ""
@@ -408,6 +479,7 @@ class AgentTurnBubble(QFrame):
 
     def finalize(self) -> None:
         """Stop all spinners; mark any still-running tools as timed out."""
+        self._stop_progress()
         self._ticker.hide_ticker()
         self.text_lbl.setText(self._stream_html)
         for group in self._groups.values():
@@ -425,13 +497,39 @@ class AgentTurnBubble(QFrame):
         pass  # no-op; ticker accumulates via append() and hides on set_streaming_text()
 
     def clear_streaming_text(self) -> None:
+        self._stop_progress()
         self._stream_text = ""
         self._stream_html = ""
         self.text_lbl.setText("")
         self.updateGeometry()
 
     def has_content(self) -> bool:
-        return bool(self._groups) or bool(self._stream_text) or self._ticker.isVisible()
+        return (
+            bool(self._groups)
+            or bool(self._stream_text)
+            or bool(self._progress_text)
+            or self._ticker.isVisible()
+        )
+
+    def _stop_progress(self) -> None:
+        if self._progress_timer.isActive():
+            self._progress_timer.stop()
+        self._progress_text = ""
+
+    def _render_progress_text(self) -> None:
+        if not self._progress_text:
+            return
+        frame = _SPINNER_FRAMES[self._progress_phase % len(_SPINNER_FRAMES)]
+        tail = "." * (self._progress_phase % 4)
+        self._progress_phase += 1
+        prefix = (
+            f'<span style="color:{_TEXT_3};font-weight:400;">{frame}</span>'
+            f'<span style="color:{_TEXT_4};">&nbsp;&nbsp;</span>'
+        )
+        body = _md_to_html(f"{self._progress_text}{tail}")
+        body = body.replace(">", f">{prefix}", 1)
+        self._stream_html = body
+        self.text_lbl.setText(body)
 
     def set_user_decision(self, text: str) -> None:
         clean = (text or "").strip()

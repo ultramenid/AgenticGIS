@@ -25,3 +25,7 @@ Thumbs.db
 # QGIS
 *.qgs~
 *.qgz~
+
+# Local env & runtime logs
+.env
+*.log

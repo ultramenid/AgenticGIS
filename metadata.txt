@@ -10,7 +10,6 @@ tracker=https://example.com/agenticgis/issues
 repository=https://example.com/agenticgis
 tags=ai,agent,chat,llm,automation,pyqgis,assistant
 category=Plugins
-icon=resources/icon.png
 experimental=True
 deprecated=False
 hasProcessingProvider=no

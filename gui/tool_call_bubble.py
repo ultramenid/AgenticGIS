@@ -19,7 +19,7 @@ _TEXT_3      = "#8a8a8a"
 _DANGER      = "#ff6b6b"
 _SUCCESS     = "#86efac"
 
-_DOTS_FRAMES = ["·  ", "·· ", "···", " ··", "  ·"]
+_SPINNER_FRAMES = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
 
 
 class ToolCallBubble(QFrame):
@@ -51,7 +51,7 @@ class ToolCallBubble(QFrame):
         header = QHBoxLayout()
         header.setSpacing(8)
 
-        self.status_label = QLabel("●")
+        self.status_label = QLabel(_SPINNER_FRAMES[0])
         self.status_label.setStyleSheet(f"color: {_TEXT_3}; font-size: 10px;")
         self.status_label.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
         header.addWidget(self.status_label)
@@ -66,11 +66,11 @@ class ToolCallBubble(QFrame):
 
         header.addStretch()
 
-        self.state_label = QLabel("Running")
+        self.state_label = QLabel("processing")
         self.state_label.setStyleSheet(f"color: {_TEXT_3}; font-size: 10px;")
         header.addWidget(self.state_label)
 
-        self.dots_label = QLabel("···")
+        self.dots_label = QLabel("")
         self.dots_label.setStyleSheet(f"color: {_TEXT_3}; font-size: 10px;")
         header.addWidget(self.dots_label)
 
@@ -118,6 +118,7 @@ class ToolCallBubble(QFrame):
 
             if is_error:
                 self.state_label.setText("Error")
+                self.status_label.setText("!")
                 self.status_label.setStyleSheet(f"color: {_DANGER}; font-size: 10px;")
                 self.setStyleSheet(
                     f"QFrame#ToolCallBubble {{"
@@ -128,6 +129,7 @@ class ToolCallBubble(QFrame):
                 )
             else:
                 self.state_label.setText("Done")
+                self.status_label.setText("✓")
                 self.status_label.setStyleSheet(f"color: {_SUCCESS}; font-size: 10px;")
 
             self.toggle_btn.setVisible(True)
@@ -203,7 +205,7 @@ class ToolCallBubble(QFrame):
 
     def _animate_dots(self) -> None:
         try:
-            self._dots_index = (self._dots_index + 1) % len(_DOTS_FRAMES)
-            self.dots_label.setText(_DOTS_FRAMES[self._dots_index])
+            self._dots_index = (self._dots_index + 1) % len(_SPINNER_FRAMES)
+            self.status_label.setText(_SPINNER_FRAMES[self._dots_index])
         except RuntimeError:
             self._timer.stop()

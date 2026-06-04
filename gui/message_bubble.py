@@ -11,34 +11,39 @@ import re
 from qgis.PyQt.QtCore import Qt, QPropertyAnimation, QEasingCurve
 from qgis.PyQt.QtGui import QFont
 from qgis.PyQt.QtWidgets import (
+    QApplication,
     QFrame,
     QGraphicsOpacityEffect,
     QHBoxLayout,
     QLabel,
+    QMenu,
     QSizePolicy,
     QVBoxLayout,
     QWidget,
 )
 
-# ── Neural Terminal Palette ────────────────────────────────
-_CANVAS      = "#060810"   # deep navy-black
-_SURFACE     = "#0a0d14"   # card surface
-_SURFACE_2   = "#0d1018"   # slightly elevated
-_BORDER      = "#1a1f2e"   # cool dark border
-_BORDER_SOFT = "#131722"   # very subtle
-_TEXT        = "#cdd6e0"   # cool light
-_TEXT_2      = "#7a8899"   # mid cool gray
-_TEXT_3      = "#3d4a5c"   # dim
-_ACCENT      = "#00d4b8"   # electric teal — PRIMARY
-_ACCENT_DIM  = "#00a896"   # teal dimmed
-_ACCENT_HOV  = "#00b8a0"   # teal hover
-_PURPLE      = "#9d4edd"   # thinking purple
-_WARN        = "#f59e0b"   # amber — tools running
-_SUCCESS     = "#10b981"   # emerald — tools done
-_DANGER      = "#ef4444"   # red — error
+# ── Mono + Signal Palette ──────────────────────────────────
+_CANVAS      = "#141414"   # transcript / app background (true neutral black)
+_SURFACE     = "#1c1c1c"   # card surface
+_SURFACE_2   = "#232323"   # elevated: chips, inline-code background
+_BORDER      = "#2b2b2b"   # hairline border
+_BORDER_SOFT = "#222222"   # fainter border
+_TEXT        = "#e8e8e8"   # primary text
+_TEXT_2      = "#9a9a9a"   # secondary text
+_TEXT_3      = "#6f6f6f"   # muted meta
+_TEXT_4      = "#4a4a4a"   # faint
+# NO decorative accent — alias to neutrals so existing refs don't break:
+_ACCENT      = "#e8e8e8"   # primary white (send arrow, etc.)
+_ACCENT_DIM  = "#9a9a9a"
+_ACCENT_HOV  = "#ffffff"
+_PURPLE      = "#6f6f6f"   # thinking -> grayscale dim (NO purple)
+# SIGNAL colors — appear ONLY on tool/message STATE, never on plain text/chrome:
+_WARN        = "#d99a3c"   # amber  — tool running
+_SUCCESS     = "#5aa86f"   # green  — tool done / ready dot
+_DANGER      = "#d05a5a"   # red    — error
 
-# Inline-code token color (kept for backtick spans)
-_CODE_GREEN  = "#7ee787"
+# Inline-code token color -> grayscale (NO green/teal)
+_CODE_GREEN  = "#e8e8e8"
 
 # ── One Dark palette (carbon.sh default theme) ─────────────────────────
 _SYN_BG     = "#282c34"
@@ -83,6 +88,96 @@ _GENERIC_KW = frozenset({
     'from', 'pass', 'break', 'continue', 'static', 'public', 'private',
     'protected', 'extends', 'void', 'type', 'interface', 'package',
 })
+
+
+_CODE_MENU_STYLE = f"""
+    QMenu {{
+        background-color: #202020;
+        color: {_TEXT};
+        border: 1px solid {_BORDER};
+        border-radius: 6px;
+        padding: 5px;
+        font-family: 'JetBrains Mono', 'Fira Code', monospace;
+        font-size: 11px;
+    }}
+    QMenu::item {{
+        background-color: transparent;
+        color: {_TEXT};
+        padding: 6px 22px 6px 10px;
+        border-radius: 4px;
+    }}
+    QMenu::item:selected {{
+        background-color: {_SURFACE_2};
+        color: {_TEXT};
+    }}
+    QMenu::item:disabled {{
+        color: {_TEXT_3};
+        background-color: transparent;
+        padding: 5px 22px 5px 10px;
+    }}
+    QMenu::separator {{
+        height: 1px;
+        background: {_BORDER};
+        margin: 5px 6px;
+    }}
+"""
+
+
+def _extract_fenced_code_blocks(text: str) -> list:
+    """Return raw fenced-code block bodies from markdown text."""
+    if not text:
+        return []
+    return [
+        html.unescape(match.group(2))
+        for match in re.finditer(r"```([^\n]*)\n(.*?)```", text, flags=re.DOTALL)
+    ]
+
+
+def _copy_to_clipboard(text: str) -> None:
+    QApplication.clipboard().setText(text or "")
+
+
+def _build_code_context_menu(parent, code_blocks: list, copy_message: str = ""):
+    """Build an opaque context menu for copying code blocks/message text."""
+    menu = QMenu(parent)
+    menu.setStyleSheet(_CODE_MENU_STYLE)
+    title = menu.addAction("Code block" if code_blocks else "Message")
+    title.setEnabled(False)
+
+    for index, code in enumerate(code_blocks):
+        label = "Copy code" if len(code_blocks) == 1 else f"Copy code block {index + 1}"
+        action = menu.addAction(label)
+        action.triggered.connect(lambda _checked=False, c=code: _copy_to_clipboard(c))
+
+    if copy_message and not code_blocks:
+        action = menu.addAction("Copy message")
+        action.triggered.connect(lambda _checked=False, t=copy_message: _copy_to_clipboard(t))
+    return menu
+
+
+def _show_code_context_menu(parent, label, pos, text: str):
+    blocks = _extract_fenced_code_blocks(text)
+    if not blocks and not text:
+        return
+    menu = _build_code_context_menu(parent, blocks, copy_message=text)
+    menu.exec_(label.mapToGlobal(pos))
+
+
+def _table_cells(line: str) -> list:
+    """Parse one escaped markdown table row into plain text cells."""
+    cells = [c.strip() for c in line.split("|")]
+    cells = [c for j, c in enumerate(cells) if c or (0 < j < len(cells) - 1)]
+
+    def clean_cell(cell: str) -> str:
+        cell = html.unescape(cell)
+        # Tables render as preformatted text, so keep common inline markdown
+        # readable instead of leaking literal formatting markers.
+        cell = re.sub(r"`([^`]+)`", r"\1", cell)
+        cell = re.sub(r"\*\*(.+?)\*\*", r"\1", cell)
+        cell = re.sub(r"\*(.+?)\*", r"\1", cell)
+        return cell
+
+    return [clean_cell(c) for c in cells]
 
 
 def _highlight_code(body: str, lang: str) -> str:
@@ -181,7 +276,12 @@ def _highlight_code(body: str, lang: str) -> str:
 
 
 def _render_md_table(match) -> str:
-    """Convert a matched markdown table block to a styled HTML table."""
+    """Convert a markdown table to a bounded overflow-safe monospace block.
+
+    QLabel's rich-text table layout can let wide cells paint over later columns.
+    A preformatted block keeps each row as one clipped/overflowing line instead
+    of asking Qt to solve column layout.
+    """
     raw = match.group(0)
     lines = [ln for ln in raw.strip().splitlines() if ln.strip()]
     # Skip separator lines: rows whose non-pipe content is only -, :, space
@@ -189,35 +289,43 @@ def _render_md_table(match) -> str:
     if not data_lines:
         return raw
 
-    th_style = (
-        f"padding:3px 8px; text-align:left; color:{_TEXT}; font-weight:500; "
-        f"border-bottom:1px solid {_BORDER}; background:{_SURFACE}; white-space:nowrap;"
-    )
-    td_style = (
-        f"padding:2px 8px; text-align:left; color:{_TEXT_2}; "
-        f"border-bottom:1px solid {_BORDER_SOFT};"
-    )
-    table_style = (
-        f"border-collapse:collapse; width:100%; margin:2px 0; "
-        f"font-size:12px; font-family:'JetBrains Mono','Fira Code',monospace; "
-        f"background:{_SURFACE_2}; border:1px solid {_BORDER}; border-radius:6px;"
-    )
-
-    rows_html = []
-    for i, ln in enumerate(data_lines):
-        cells = [c.strip() for c in ln.split("|")]
-        cells = [c for j, c in enumerate(cells) if c or (0 < j < len(cells) - 1)]
-        if not cells:
-            continue
-        if i == 0:
-            cells_html = "".join(f'<th style="{th_style}">{c}</th>' for c in cells)
-        else:
-            cells_html = "".join(f'<td style="{td_style}">{c}</td>' for c in cells)
-        rows_html.append(f"<tr>{cells_html}</tr>")
-
-    if not rows_html:
+    rows = [_table_cells(ln) for ln in data_lines]
+    rows = [row for row in rows if row]
+    if not rows:
         return raw
-    return f'<table style="{table_style}">{"".join(rows_html)}</table>'
+
+    cols = max(len(row) for row in rows)
+    widths = []
+    for i in range(cols):
+        widths.append(max(len(row[i]) if i < len(row) else 0 for row in rows))
+
+    def fmt_row(row: list) -> str:
+        padded = []
+        for i in range(cols):
+            value = row[i] if i < len(row) else ""
+            padded.append(value.ljust(widths[i]))
+        return "  ".join(padded).rstrip()
+
+    rendered_lines = [fmt_row(rows[0])]
+    rendered_lines.append("  ".join("-" * max(3, w) for w in widths).rstrip())
+    rendered_lines.extend(fmt_row(row) for row in rows[1:])
+    table_text = "\n".join(rendered_lines)
+
+    block_style = (
+        f"background:{_SURFACE_2}; border:1px solid {_BORDER}; border-radius:6px; "
+        f"margin:8px 0 12px 0; padding:8px 10px; overflow-x:auto; overflow-y:hidden;"
+    )
+    pre_style = (
+        f"margin:0; padding:0; color:{_TEXT_2}; background:transparent; "
+        f"font-size:12px; line-height:1.45; "
+        f"font-family:'JetBrains Mono','Fira Code',monospace; white-space:pre;"
+    )
+    spacer = '<br><span style="font-size:4px; line-height:4px;">&nbsp;</span><br>'
+    return (
+        f'<div style="{block_style}">'
+        f'<pre style="{pre_style}">{html.escape(table_text)}</pre>'
+        f'</div>{spacer}'
+    )
 
 
 def _md_to_html(text: str) -> str:
@@ -280,20 +388,33 @@ def _md_to_html(text: str) -> str:
 
     safe = re.sub(r"```([^\n]*)\n(.*?)```", _save_code_block, safe, flags=re.DOTALL)
 
+    table_blocks = []
+
+    def _save_table_block(m):
+        rendered = _render_md_table(m)
+        placeholder = f"\x00TABLE{len(table_blocks)}\x00"
+        table_blocks.append(rendered)
+        return placeholder
+
+    # Markdown tables must be protected before inline-code conversion. Otherwise
+    # a table cell containing `code` becomes literal <code style=...> text inside
+    # the preformatted table block.
+    safe = re.sub(r"(?m)(?:^\|[^\n]*\n){2,}(?:^\|[^\n]*)?", _save_table_block, safe)
+
     # Headings — inline bold, not block dividers; keeps prose flow natural
     safe = re.sub(
         r"(?m)^### (.+)$",
-        lambda m: f'<b style="color:{_TEXT_2};">{m.group(1)}</b>',
+        lambda m: f'<b style="color:{_TEXT_2}; font-size:12px;">{m.group(1)}</b>',
         safe,
     )
     safe = re.sub(
         r"(?m)^## (.+)$",
-        lambda m: f'<b style="color:{_TEXT};">{m.group(1)}</b>',
+        lambda m: f'<b style="color:{_TEXT}; font-size:12px;">{m.group(1)}</b>',
         safe,
     )
     safe = re.sub(
         r"(?m)^# (.+)$",
-        lambda m: f'<b style="color:{_TEXT}; font-size:14px;">{m.group(1)}</b>',
+        lambda m: f'<b style="color:{_TEXT}; font-size:13px;">{m.group(1)}</b>',
         safe,
     )
 
@@ -302,7 +423,7 @@ def _md_to_html(text: str) -> str:
         r"(?m)^- (.+)$",
         lambda m: (
             f'<div style="padding-left:10px; color:{_TEXT}; line-height:1.5; margin:0;">'
-            f'<span style="color:#7a8899; margin-right:5px;">·</span>{m.group(1)}</div>'
+            f'<span style="color:{_TEXT_3}; margin-right:5px;">·</span>{m.group(1)}</div>'
         ),
         safe,
     )
@@ -312,7 +433,7 @@ def _md_to_html(text: str) -> str:
         r"(?m)^(\d+)\. (.+)$",
         lambda m: (
             f'<div style="padding-left:10px; color:{_TEXT}; line-height:1.5; margin:0;">'
-            f'<span style="color:#7a8899; margin-right:5px;">{m.group(1)}.</span>{m.group(2)}</div>'
+            f'<span style="color:{_TEXT_3}; margin-right:5px;">{m.group(1)}.</span>{m.group(2)}</div>'
         ),
         safe,
     )
@@ -320,19 +441,16 @@ def _md_to_html(text: str) -> str:
     safe = re.sub(
         r"`([^`]+)`",
         lambda m: (
-            f'<code style="background:#0d1018; color:#00d4b8; '
-            f'border:1px solid #1a1f2e; '
+            f'<code style="background:{_SURFACE_2}; color:{_TEXT}; '
+            f'border:1px solid {_BORDER}; '
             f'border-radius:3px; padding:1px 4px; font-family:monospace; '
-            f'font-size:12px;">{m.group(1)}</code>'
+            f'font-size:11.5px;">{m.group(1)}</code>'
         ),
         safe,
     )
 
     safe = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", safe)
     safe = re.sub(r"\*(.+?)\*", r"<i>\1</i>", safe)
-
-    # Markdown tables
-    safe = re.sub(r"(?m)(?:^\|[^\n]*\n){2,}(?:^\|[^\n]*)?", _render_md_table, safe)
 
     # Strip newlines adjacent to block <div>s before converting \n → <br>
     # Otherwise </div>\n becomes </div><br> — a blank line after every bullet.
@@ -344,10 +462,12 @@ def _md_to_html(text: str) -> str:
 
     for i, block in enumerate(code_blocks):
         safe = safe.replace(f"\x00CODE{i}\x00", block)
+    for i, block in enumerate(table_blocks):
+        safe = safe.replace(f"\x00TABLE{i}\x00", block)
 
     # Wrap in prose container for consistent line-height and font
     return (
-        f'<div style="line-height:1.5; font-size:12px; color:#cdd6e0;'
+        f'<div style="line-height:1.5; font-size:12px; color:{_TEXT};'
         f" font-family:'JetBrains Mono','Fira Code',monospace;\">"
         f'{safe}</div>'
     )
@@ -376,10 +496,10 @@ def _md_inline(text: str) -> str:
     safe = re.sub(
         r"`([^`]+)`",
         lambda m: (
-            f'<code style="background:#0d1018; color:#00d4b8; '
-            f'border:1px solid #1a1f2e; '
+            f'<code style="background:{_SURFACE_2}; color:{_TEXT}; '
+            f'border:1px solid {_BORDER}; '
             f'border-radius:3px; padding:1px 4px; font-family:monospace; '
-            f'font-size:12px;">{m.group(1)}</code>'
+            f'font-size:11.5px;">{m.group(1)}</code>'
         ),
         safe,
     )
@@ -423,9 +543,9 @@ class MessageBubble(QFrame):
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
 
         if self.is_error:
-            bg_color      = "#2a0f10"
-            text_color    = "#fecaca"
-            border_color  = "#7f1d1d"
+            bg_color      = _SURFACE
+            text_color    = _DANGER
+            border_color  = _DANGER
             border_radius = "4px"
         elif self.is_tool:
             bg_color      = _SURFACE
@@ -433,10 +553,10 @@ class MessageBubble(QFrame):
             border_color  = _BORDER_SOFT
             border_radius = "4px"
         elif self.is_user:
-            bg_color      = "#0d1523"
-            text_color    = "#cdd6e0"
-            border_color  = "#1e3a5f"
-            border_radius = "12px"
+            bg_color      = _SURFACE_2
+            text_color    = _TEXT
+            border_color  = _BORDER
+            border_radius = "10px"
         else:
             bg_color      = _SURFACE
             text_color    = _TEXT
@@ -467,8 +587,10 @@ class MessageBubble(QFrame):
             Qt.TextBrowserInteraction | Qt.TextSelectableByMouse
         )
         self.text_label.setOpenExternalLinks(True)
+        self.text_label.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.text_label.customContextMenuRequested.connect(self._show_context_menu)
 
-        font = QFont("JetBrains Mono", 13)
+        font = QFont("JetBrains Mono", 12)
         font.setStyleHint(QFont.Monospace)
         self.text_label.setFont(font)
         self.text_label.setStyleSheet(f"""
@@ -479,6 +601,10 @@ class MessageBubble(QFrame):
         """)
 
         layout.addWidget(self.text_label)
+
+    def _show_context_menu(self, pos):
+        text = self.text or self._last_text or ""
+        _show_code_context_menu(self, self.text_label, pos, text)
 
     def _animate_entrance(self):
         # Only animate bubbles that have text at creation (user msgs, errors, tool msgs).
@@ -550,9 +676,9 @@ class MessageBubble(QFrame):
             chunk = re.sub(
                 r"(?m)^- (.+)$",
                 lambda m: (
-                    f'<div style="padding-left:12px; color:{_TEXT}; '
-                    f'font-size:13px; line-height:1.35; margin:0 0 1px 0;">'
-                    f'<span style="color:{_TEXT_3};margin-right:6px;">—</span>{m.group(1)}</div>'
+                    f'<div style="padding-left:10px; color:{_TEXT}; '
+                    f'font-size:12px; line-height:1.5; margin:0;">'
+                    f'<span style="color:{_TEXT_3};margin-right:5px;">·</span>{m.group(1)}</div>'
                 ),
                 chunk,
             )
@@ -560,10 +686,10 @@ class MessageBubble(QFrame):
             chunk = re.sub(
                 r"`([^`]+)`",
                 lambda m: (
-                    f'<code style="background:#0d1018; color:#00d4b8; '
-                    f'border:1px solid #1a1f2e; '
-                    f'border-radius:4px; padding:1px 5px; font-family:monospace; '
-                    f'font-size:12px;letter-spacing:-0.01em;">{m.group(1)}</code>'
+                    f'<code style="background:{_SURFACE_2}; color:{_TEXT}; '
+                    f'border:1px solid {_BORDER}; '
+                    f'border-radius:3px; padding:1px 4px; font-family:monospace; '
+                    f'font-size:11.5px;">{m.group(1)}</code>'
                 ),
                 chunk,
             )

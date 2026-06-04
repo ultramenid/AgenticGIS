@@ -8,11 +8,12 @@ from qgis.PyQt.QtGui import QFont
 from qgis.PyQt.QtWidgets import QHBoxLayout, QLabel, QSizePolicy, QWidget
 
 # Design tokens (must match chat_dock.py)
-_INPUT_BG = "#0a0d14"
-_BORDER   = "#1a1f2e"
-_TEXT     = "#cdd6e0"
-_TEXT_3   = "#3d4a5c"
-_ACCENT   = "#00d4b8"
+_INPUT_BG = "#1c1c1c"
+_BORDER   = "#2b2b2b"
+_TEXT     = "#e8e8e8"
+_TEXT_2   = "#9a9a9a"
+_TEXT_3   = "#6f6f6f"
+_ACCENT   = "#e8e8e8"
 
 # Blink states: visible cursor vs blank
 _CURSOR_ON  = "▋"
@@ -57,8 +58,8 @@ class TypingIndicator(QWidget):
         self.prefix_label = QLabel(self.base_text)
         font = QFont()
         font.setFamily("JetBrains Mono")
-        font.setPointSize(13)
-        font.setStyleHint(QFont.SansSerif)
+        font.setPointSize(12)
+        font.setStyleHint(QFont.Monospace)
         self.prefix_label.setFont(font)
         self.prefix_label.setStyleSheet(f"""
             color: {_TEXT};
@@ -73,11 +74,11 @@ class TypingIndicator(QWidget):
         cursor_font = QFont()
         cursor_font.setFamily("JetBrains Mono")
         cursor_font.setStyleHint(QFont.Monospace)
-        cursor_font.setPointSize(13)
+        cursor_font.setPointSize(12)
         self.cursor_label.setFont(cursor_font)
         self.cursor_label.setMinimumWidth(12)
         self.cursor_label.setStyleSheet(f"""
-            color: {_ACCENT};
+            color: {_TEXT_2};
             background: transparent;
             border: none;
             font-family: 'JetBrains Mono', 'Fira Code', monospace;

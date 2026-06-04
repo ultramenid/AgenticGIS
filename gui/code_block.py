@@ -14,6 +14,7 @@ from qgis.PyQt.QtWidgets import (
     QPlainTextEdit,
     QPushButton,
     QSizePolicy,
+    QMenu,
     QVBoxLayout,
     QWidget,
 )
@@ -24,6 +25,28 @@ _HEADER_BG = "#141414"
 _BORDER    = "#1a1a1a"
 _TEXT      = "#cccccc"
 _TEXT_DIM  = "#555555"
+
+_MENU_STYLE = """
+    QMenu {
+        background-color: #202020;
+        color: #cccccc;
+        border: 1px solid #2b2b2b;
+        border-radius: 6px;
+        padding: 5px;
+        font-family: 'SF Mono', 'JetBrains Mono', monospace;
+        font-size: 11px;
+    }
+    QMenu::item {
+        background-color: transparent;
+        color: #cccccc;
+        padding: 6px 22px 6px 10px;
+        border-radius: 4px;
+    }
+    QMenu::item:selected {
+        background-color: #232323;
+        color: #e8e8e8;
+    }
+"""
 
 # Syntax colors — GitHub Dark / Carbon muted
 _CLR_KEYWORD = "#ff7b72"
@@ -70,7 +93,7 @@ class SimplePythonHighlighter(QSyntaxHighlighter):
 
         self.comment_fmt = QTextCharFormat()
         self.comment_fmt.setForeground(QColor(_CLR_COMMENT))
-        self.comment_fmt.setFontStyle(QFont.StyleItalic)
+        self.comment_fmt.setFontItalic(True)
 
         self.function_fmt = QTextCharFormat()
         self.function_fmt.setForeground(QColor(_CLR_FUNC))
@@ -176,6 +199,8 @@ class CodeBlockWidget(QWidget):
         self.editor = QPlainTextEdit()
         self.editor.setReadOnly(True)
         self.editor.setPlainText(self.code)
+        self.editor.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.editor.customContextMenuRequested.connect(self._show_context_menu)
         self.editor.setStyleSheet(f"""
             QPlainTextEdit {{
                 background-color: {_BG};
@@ -204,6 +229,13 @@ class CodeBlockWidget(QWidget):
     def _copy_code(self):
         from qgis.PyQt.QtWidgets import QApplication
         QApplication.clipboard().setText(self.code)
+
+    def _show_context_menu(self, pos):
+        menu = QMenu(self)
+        menu.setStyleSheet(_MENU_STYLE)
+        copy_action = menu.addAction("Copy code")
+        copy_action.triggered.connect(self._copy_code)
+        menu.exec_(self.editor.mapToGlobal(pos))
 
     def set_code(self, code):
         self.code = code

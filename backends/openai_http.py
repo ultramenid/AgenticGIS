@@ -70,11 +70,14 @@ class OpenAIHttpClient:
         }
         data = json.dumps(payload).encode("utf-8")
 
+        headers = self._headers()
+        headers["Connection"] = "keep-alive"
         request = urllib.request.Request(
             f"{self.base_url}/v1/chat/completions",
-            data=data, headers=self._headers(), method="POST",
+            data=data, headers=headers, method="POST",
         )
 
+        response = None
         try:
             response = urllib.request.urlopen(request, timeout=effective_timeout)
         except urllib.error.HTTPError as exc:

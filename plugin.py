@@ -5,9 +5,6 @@ bridge) and the chat dock, and rebuilds the active backend whenever settings
 change.
 """
 
-import os
-
-from qgis.PyQt.QtGui import QIcon
 from qgis.PyQt.QtWidgets import QAction
 
 from . import config as config_mod
@@ -30,9 +27,7 @@ class AgenticGisPlugin:
     # QGIS plugin lifecycle                                              #
     # ------------------------------------------------------------------ #
     def initGui(self):
-        icon_path = os.path.join(os.path.dirname(__file__), "resources", "icon.png")
-        icon = QIcon(icon_path) if os.path.exists(icon_path) else QIcon()
-        self._action = QAction(icon, "AgenticGIS Chat", self.iface.mainWindow())
+        self._action = QAction("AgenticGIS", self.iface.mainWindow())
         self._action.setCheckable(True)
         self._action.triggered.connect(self._toggle_dock)
         self.iface.addToolBarIcon(self._action)
@@ -122,5 +117,6 @@ class AgenticGisPlugin:
 
         dialog = SettingsDialog(self.config, self.iface.mainWindow())
         dialog.exec_()
-        # Backend is rebuilt lazily on the next send via _get_backend(), so no
-        # explicit refresh is needed here.
+        if self._dock is not None:
+            self._dock._refresh_connection_status()
+        # Backend is rebuilt lazily on the next send via _get_backend().

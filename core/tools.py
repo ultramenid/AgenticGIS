@@ -6,18 +6,32 @@ spec maps a tool name to a JSON Schema and the ``QgisToolkit`` method that
 implements it.
 """
 
+import time
+import traceback
+
+from .dev_logging import log_event
+
 TOOL_SPECS = [
     {
         "name": "run_pyqgis",
         "method": "run_pyqgis",
         "description": (
             "Execute arbitrary PyQGIS Python code inside the running QGIS "
-            "instance. This is the primary tool: it can reach EVERY QGIS "
-            "feature and EVERY installed plugin. Pre-bound names: iface, "
+            "instance. For layer analysis, prefer dedicated tools for summaries, "
+            "statistics, charts, schema inspection, project state, and processing "
+            "algorithms, especially analyze_layer, before using arbitrary PyQGIS. "
+            "This escape hatch can reach "
+            "EVERY QGIS feature and EVERY installed plugin. Pre-bound names: iface, "
             "QgsProject, QgsApplication, processing, QgsFeatureRequest, "
-            "_iterate_features, and all qgis.core names. "
+            "_iterate_features, _sample_features, and all qgis.core names. "
+            "For large layers: Do not use list(layer.getFeatures()), do not "
+            "materialize all features. Do not fetch geometry when only "
+            "attributes are needed; use _sample_features(...) for previews or "
+            "iterate _iterate_features(..., limit=...) in chunks. "
             "Assign to a variable named `result` to return a value. stdout and "
-            "stderr are captured and returned."
+            "stderr are captured and returned. Access to external files, URLs, "
+            "databases, or other sources outside currently loaded project layers "
+            "requires explicit user permission."
         ),
         "input_schema": {
             "type": "object",
@@ -79,6 +93,53 @@ TOOL_SPECS = [
         },
     },
     {
+        "name": "analyze_layer",
+        "method": "analyze_layer",
+        "description": (
+            "Preferred tool for exploratory vector layer analysis. Returns a "
+            "bounded, performance-safe summary, field statistics, top category "
+            "values, samples, and missing-value counts using no-geometry "
+            "feature requests and background processing where possible. Use "
+            "this before run_pyqgis for layer analysis, especially on large "
+            "layers."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "layer_id": {"type": "string"},
+                "analysis_type": {
+                    "type": "string",
+                    "description": "auto, summary, field_stats, category_counts, top_values, sample, or missing_values",
+                },
+                "fields": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Optional list of fields to analyze. Omit to analyze all fields.",
+                },
+                "field_name": {
+                    "type": "string",
+                    "description": "Convenience single field to analyze when fields is omitted.",
+                },
+                "sample_limit": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "description": "Maximum sample rows to return.",
+                },
+                "scan_limit": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "Maximum features to scan before returning truncated=true.",
+                },
+                "top_limit": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "Maximum top values per categorical field.",
+                },
+            },
+            "required": ["layer_id"],
+        },
+    },
+    {
         "name": "list_plugins",
         "method": "list_plugins",
         "description": (
@@ -105,7 +166,9 @@ TOOL_SPECS = [
         "description": (
             "Run a Processing algorithm by id with a parameter dict, e.g. "
             "alg_id='native:buffer', params={'INPUT': <id>, 'DISTANCE': 50, "
-            "'OUTPUT': 'memory:'}."
+            "'OUTPUT': 'memory:'}. Runs through a QGIS background task when "
+            "available, with cancellation support. File path, URI, database, or non-memory output "
+            "parameters outside loaded layers require explicit user permission."
         ),
         "input_schema": {
             "type": "object",
@@ -119,7 +182,17 @@ TOOL_SPECS = [
     {
         "name": "add_layer",
         "method": "add_layer",
-        "description": "Load a layer from a file path / URI and add it to the project.",
+        "description": (
+            "Load a layer from a file path / URI and add it to the project. "
+            "External sources outside currently loaded layers require explicit "
+            "user permission. By default this does not zoom or force an immediate "
+            "canvas refresh, which keeps large layer loads responsive. "
+            "Set is_analysis=true for layers you derive as analysis results "
+            "(buffers, joins, filtered subsets, etc.): these are tracked as "
+            "persistent results, reused by name instead of duplicated, and "
+            "never auto-deleted. Use zoom_to_layer after loading only when the "
+            "user needs to inspect the result immediately."
+        ),
         "input_schema": {
             "type": "object",
             "properties": {
@@ -129,8 +202,233 @@ TOOL_SPECS = [
                     "type": "string",
                     "description": "ogr (vector, default), gdal (raster), postgres, etc.",
                 },
+                "zoom": {
+                    "type": "boolean",
+                    "description": "Zoom the map canvas to the new layer (default false).",
+                    "default": False,
+                },
+                "is_analysis": {
+                    "type": "boolean",
+                    "description": (
+                        "Mark this as a derived analysis/result layer so it is "
+                        "tracked, reused by name, and kept (not auto-deleted)."
+                    ),
+                    "default": False,
+                },
             },
             "required": ["uri"],
+        },
+    },
+    {
+        "name": "zoom_to_layer",
+        "method": "zoom_to_layer",
+        "description": (
+            "Fit the map canvas to a layer's extent so the user sees the "
+            "result. Provide layer_id (preferred) or an exact layer_name. Call "
+            "this after producing a result layer the user should look at."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "layer_id": {"type": "string"},
+                "layer_name": {"type": "string"},
+            },
+        },
+    },
+    {
+        "name": "gee_status",
+        "method": "gee_status",
+        "description": (
+            "Check whether the Google Earth Engine QGIS plugin (ee_plugin) is "
+            "installed and whether Earth Engine is authenticated and "
+            "initialized. Call this FIRST, before any GEE operation, whenever "
+            "the user's request involves remote sensing, satellite imagery, "
+            "Earth Engine, NDVI or other spectral indices, land cover, or "
+            "image collections. Returns plugin_installed, ee_available, "
+            "initialized, authenticated, and a human-readable message with "
+            "next steps if setup is incomplete."
+        ),
+        "input_schema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "gee_dataset_info",
+        "method": "gee_dataset_info",
+        "description": (
+            "Look up the CURRENT metadata for an Earth Engine dataset from the "
+            "public Earth Engine STAC catalog (no auth needed). Call this BEFORE "
+            "writing gee_add_layer code for a dataset, so the code uses the "
+            "dataset's real, present-day band names, properties, date range, and "
+            "status — not a memorized snapshot that may be deprecated. Returns "
+            "band_names, bands (with gee:scale/offset and gsd), properties "
+            "(per-image/feature schema), date_range, type (image / "
+            "image_collection / table), and a `deprecated` flag. Example: "
+            "gee_dataset_info('COPERNICUS/S2_SR_HARMONIZED'). For cloud masking, "
+            "also look up the companion mask dataset, e.g. "
+            "'GOOGLE/CLOUD_SCORE_PLUS/V1/S2_HARMONIZED'. Also works for the "
+            "user's OWN Earth Engine assets (e.g. "
+            "'projects/<project>/assets/<name>' or 'users/<user>/<asset>'): when "
+            "the id is not in the public catalog it is resolved via the "
+            "authenticated Earth Engine API (result has source='asset'; requires "
+            "gee_status to report authenticated)."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "dataset_id": {
+                    "type": "string",
+                    "description": (
+                        "Exact, case-sensitive Earth Engine dataset id, e.g. "
+                        "'COPERNICUS/S2_SR_HARMONIZED', 'LANDSAT/LC09/C02/T1_L2', "
+                        "'GOOGLE/CLOUD_SCORE_PLUS/V1/S2_HARMONIZED', or one of the "
+                        "user's own assets such as "
+                        "'projects/my-project/assets/my_image'."
+                    ),
+                },
+            },
+            "required": ["dataset_id"],
+        },
+    },
+    {
+        "name": "gee_add_layer",
+        "method": "gee_add_layer",
+        "description": (
+            "Run an Earth Engine expression and add the result to the QGIS "
+            "canvas via the ee_plugin. Only use after gee_status confirms GEE "
+            "is ready AND the user has agreed (via ask_user) to run GEE "
+            "operations. The `code` runs with `ee`, `Map` (ee_plugin), `iface`, "
+            "`region` (an ee.Geometry built from region_layer_id in EPSG:4326 — "
+            "the layer's TRUE geometry by default, not just its bounding box), "
+            "and `features` (an ee.FeatureCollection of that layer's features, "
+            "for per-feature work like zonal stats; None when unavailable) in "
+            "scope. It MUST assign the final ee object (ee.Image / "
+            "ee.ImageCollection mosaic / ee.FeatureCollection) to a variable "
+            "named `result`. Example NDVI clipped to a QGIS layer: "
+            "\"img = ee.ImageCollection('COPERNICUS/S2_SR_HARMONIZED')"
+            ".filterBounds(region).filterDate('2023-01-01','2023-03-01').median(); "
+            "result = img.normalizedDifference(['B8','B4']).clip(region)\". "
+            "Pass vis_params for display, e.g. {'min':-0.2,'max':0.8,"
+            "'palette':['blue','white','green']}. "
+            "IMPORTANT: when geometry_mode is 'auto' (default) and the layer is "
+            "too large to send inline, this returns {ok:false, "
+            "needs_decision:true} instead of running. In that case call ask_user "
+            "with the offered options, then call gee_add_layer again with "
+            "geometry_mode set to 'bbox', 'simplify', or 'exact'."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "code": {
+                    "type": "string",
+                    "description": (
+                        "Earth Engine Python expression. Must assign the ee "
+                        "object to `result`. `region` (ee.Geometry), `features` "
+                        "(ee.FeatureCollection|None) and `ee` are in scope."
+                    ),
+                },
+                "vis_params": {
+                    "type": "object",
+                    "description": (
+                        "Earth Engine visualization params (min, max, palette, "
+                        "bands, gamma). Omit for defaults."
+                    ),
+                },
+                "name": {
+                    "type": "string",
+                    "description": "Display name for the added GEE layer.",
+                },
+                "region_layer_id": {
+                    "type": "string",
+                    "description": (
+                        "Optional QGIS layer id. Its features define `region` "
+                        "and `features` (EPSG:4326) for filtering/clipping, and "
+                        "it is the zoom target."
+                    ),
+                },
+                "zoom": {
+                    "type": "boolean",
+                    "description": "Zoom to region_layer_id after adding (default true).",
+                    "default": True,
+                },
+                "geometry_mode": {
+                    "type": "string",
+                    "enum": ["auto", "exact", "simplify", "bbox"],
+                    "description": (
+                        "How to convert region_layer_id. 'auto' (default): true "
+                        "geometry, but returns needs_decision if too large. "
+                        "'exact': true geometry (subject to hard ceilings). "
+                        "'simplify': reduce vertices to fit. 'bbox': bounding "
+                        "box only. Set this on the retry after asking the user."
+                    ),
+                    "default": "auto",
+                },
+                "max_vertices": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": (
+                        "Vertex budget for inline geometry before 'auto' asks "
+                        "the user (default 5000)."
+                    ),
+                    "default": 5000,
+                },
+                "max_features": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": (
+                        "Feature-count budget before 'auto' asks the user "
+                        "(default 2000)."
+                    ),
+                    "default": 2000,
+                },
+            },
+            "required": ["code"],
+        },
+    },
+    {
+        "name": "remove_layer",
+        "method": "remove_layer",
+        "description": (
+            "Unload one currently loaded layer from the QGIS project by layer_id "
+            "or exact layer_name. This only removes the layer from the project; "
+            "it never deletes the source file, database table, or remote data. "
+            "Use only when the user explicitly asks to remove, clear, unload, "
+            "or delete a loaded layer."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "layer_id": {
+                    "type": "string",
+                    "description": "Exact QGIS layer id from get_project_state or list_layers.",
+                },
+                "layer_name": {
+                    "type": "string",
+                    "description": (
+                        "Exact layer name. If multiple loaded layers have this "
+                        "name, the tool refuses and returns candidate layer IDs."
+                    ),
+                },
+            },
+        },
+    },
+    {
+        "name": "clear_layers",
+        "method": "clear_layers",
+        "description": (
+            "Unload all currently loaded layers from the QGIS project. This "
+            "only clears the project layer list/canvas; it never deletes source "
+            "files, database tables, or remote data. Use only when the user "
+            "explicitly asks to clear or remove all loaded layers. Requires "
+            "confirm=true."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "confirm": {
+                    "type": "boolean",
+                    "description": "Must be true when the user explicitly asked to clear all loaded layers.",
+                },
+            },
+            "required": ["confirm"],
         },
     },
     {
@@ -144,16 +442,45 @@ TOOL_SPECS = [
         "method": "create_chart",
         "description": (
             "Create a chart visualization from a vector layer's field values. "
-            "Returns chart data that can be displayed as a bar, line, or pie chart."
+            "Returns chart data that can be displayed as a bar, line, or pie chart. "
+            "Use optional label_field for readable display labels when field_name "
+            "contains codes/IDs and another field contains names or descriptions. "
+            "Optionally supply a custom colors list (hex strings like '#5d8aa8') "
+            "to use instead of the default palette — one color per data point "
+            "in display order; the list cycles if shorter than the data. "
+            "If colors is omitted, the chart UI uses its default A-to-B gradient."
         ),
         "input_schema": {
             "type": "object",
             "properties": {
                 "layer_id": {"type": "string"},
                 "field_name": {"type": "string"},
+                "label_field": {
+                    "type": "string",
+                    "description": (
+                        "Optional field used only for readable display labels. "
+                        "Use this for generic code/name or id/description field "
+                        "pairs; no hardcoded field names are assumed. If invalid "
+                        "or blank, labels fall back to field_name values."
+                    ),
+                },
                 "chart_type": {
                     "type": "string",
                     "description": "bar (default), line, or pie",
+                },
+                "colors": {
+                    "type": "array",
+                    "description": (
+                        "Optional list of hex color strings (e.g. ['#5d8aa8', "
+                        "'#c678dd', '#98c379']). Applied to the chart in "
+                        "display order; cycles if shorter than the number "
+                        "of data points. Useful for matching a project "
+                        "palette, brand colors, or accessibility needs."
+                    ),
+                    "items": {
+                        "type": "string",
+                        "pattern": "^#(?:[0-9A-Fa-f]{3}|[0-9A-Fa-f]{6})$",
+                    },
                 },
             },
             "required": ["layer_id", "field_name"],
@@ -173,6 +500,41 @@ TOOL_SPECS = [
                 "field_name": {"type": "string", "description": "Optional field to analyze"},
             },
             "required": ["layer_id"],
+        },
+    },
+    {
+        "name": "web_fetch",
+        "method": "web_fetch",
+        "description": (
+            "Fetch the content of a public URL (GET only). Returns the body, "
+            "HTTP status, content-type, and parsed JSON when available. "
+            "Use this to read API documentation, GeoJSON endpoints, or small data "
+            "files accessible over HTTP/HTTPS. External URL access requires "
+            "explicit user permission. If the remote server has an untrusted or "
+            "incomplete SSL certificate chain, set verify_ssl=false to skip "
+            "certificate verification."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "url": {
+                    "type": "string",
+                    "description": "Full URL to fetch (http:// or https://).",
+                },
+                "max_length": {
+                    "type": "integer",
+                    "description": "Maximum response length in bytes (default 500k).",
+                    "minimum": 1,
+                    "maximum": 1_000_000,
+                    "default": 500_000,
+                },
+                "verify_ssl": {
+                    "type": "boolean",
+                    "description": "Verify remote SSL certificate (default true). Set false for incomplete/self-signed certificates.",
+                    "default": True,
+                },
+            },
+            "required": ["url"],
         },
     },
     {
@@ -232,7 +594,87 @@ def dispatch(toolkit, executor, name, arguments):
     spec = TOOL_BY_NAME[name]
     method = getattr(toolkit, spec["method"])
     args = dict(arguments or {})
-    return executor.run_sync(lambda: method(**args))
+    start = time.perf_counter()
+    log_event("tool.dispatch.start", tool=name, arg_keys=sorted(args.keys()))
+
+    try:
+        if name == "ask_user":
+            result = method(**args)
+            log_event(
+                "tool.dispatch.end",
+                tool=name,
+                path="ask_user",
+                elapsed_ms=int((time.perf_counter() - start) * 1000),
+                ok=not isinstance(result, str),
+                error=result if isinstance(result, str) else None,
+            )
+            return result
+
+        confirm_external_access = getattr(toolkit, "confirm_external_access", None)
+        if confirm_external_access is not None:
+            denied = confirm_external_access(name, args)
+            if denied is not None:
+                log_event(
+                    "tool.dispatch.end",
+                    tool=name,
+                    path="denied",
+                    elapsed_ms=int((time.perf_counter() - start) * 1000),
+                    ok=False,
+                    cancelled=bool(denied.get("cancelled")) if isinstance(denied, dict) else False,
+                )
+                return denied
+
+        if name == "run_processing" and hasattr(toolkit, "run_processing_background"):
+            result = toolkit.run_processing_background(
+                executor,
+                args.get("alg_id"),
+                args.get("params") or {},
+            )
+            log_event(
+                "tool.dispatch.end",
+                tool=name,
+                path="processing_task",
+                elapsed_ms=int((time.perf_counter() - start) * 1000),
+                ok=bool(result.get("ok")) if isinstance(result, dict) else None,
+                cancelled=bool(result.get("cancelled")) if isinstance(result, dict) else False,
+            )
+            return result
+
+        can_run_background = getattr(toolkit, "can_run_background", None)
+        if can_run_background is not None and can_run_background(name):
+            result = toolkit.run_background_tool(executor, name, args)
+            log_event(
+                "tool.dispatch.end",
+                tool=name,
+                path="background",
+                elapsed_ms=int((time.perf_counter() - start) * 1000),
+                ok=bool(result.get("ok")) if isinstance(result, dict) else None,
+                cancelled=bool(result.get("cancelled")) if isinstance(result, dict) else False,
+            )
+            return result
+
+        result = executor.run_sync(lambda: method(**args))
+        log_event(
+            "tool.dispatch.end",
+            tool=name,
+            path="main_thread",
+            elapsed_ms=int((time.perf_counter() - start) * 1000),
+            ok=bool(result.get("ok")) if isinstance(result, dict) else None,
+            cancelled=bool(result.get("cancelled")) if isinstance(result, dict) else False,
+        )
+        return result
+    except BaseException as exc:
+        log_event(
+            "tool.dispatch.error",
+            tool=name,
+            elapsed_ms=int((time.perf_counter() - start) * 1000),
+            error_type=type(exc).__name__,
+            error=str(exc),
+            traceback="".join(
+                traceback.format_exception(type(exc), exc, exc.__traceback__, limit=4)
+            ),
+        )
+        raise
 
 
 def anthropic_tool_list():

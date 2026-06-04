@@ -114,6 +114,7 @@ class AnthropicHttpClient:
             "tools": tools,
             "messages": messages,
             "stream": True,
+            "thinking": {"type": "disabled"},
         }).encode("utf-8")
 
         headers = self._headers()

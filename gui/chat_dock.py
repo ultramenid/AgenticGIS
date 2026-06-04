@@ -6,19 +6,20 @@ mode (default) and respects QGIS's own theme via neutral grays.
 """
 
 import html
+import time
 
 from qgis.gui import QgsDockWidget
 from qgis.PyQt.QtCore import Qt, QEvent, QThread, pyqtSignal, QTimer
-from qgis.PyQt.QtGui import QFont
+from qgis.PyQt.QtGui import QFont, QFontMetrics, QTextCursor
 from qgis.PyQt.QtWidgets import (
     QFrame,
     QHBoxLayout,
     QApplication,
     QLabel,
-    QLineEdit,
     QPushButton,
     QScrollArea,
     QSizePolicy,
+    QTextEdit,
     QVBoxLayout,
     QWidget,
 )
@@ -51,6 +52,9 @@ _WARN        = "#d99a3c"   # amber  — tool running
 _SUCCESS     = "#5aa86f"   # green  — tool done / ready dot
 _DANGER      = "#d05a5a"   # red    — error
 _CODE_GREEN  = "#e8e8e8"   # inline-code text -> grayscale (NO green/teal)
+_STREAM_COALESCE_INTERVAL_S = 0.030
+_STREAM_COALESCE_MAX_CHARS = 8192
+_STREAM_RENDER_INTERVAL_S = 0.050
 
 
 class ChatWorker(QThread):
@@ -63,6 +67,9 @@ class ChatWorker(QThread):
         self._message = message
         self._history = history
         self._stop = False
+        self._coalesce_type = None
+        self._coalesce_text = ""
+        self._last_coalesce_flush = time.monotonic()
 
     def stop(self):
         self._stop = True
@@ -70,12 +77,14 @@ class ChatWorker(QThread):
     def run(self):
         try:
             history = self._backend.send(
-                self._message, self._history, self.event.emit, lambda: self._stop
+                self._message, self._history, self._emit_event, lambda: self._stop
             )
+            self._flush_coalesced_event()
             self.finished_history.emit(history)
         except Exception:
             import traceback
             try:
+                self._flush_coalesced_event()
                 self.event.emit(AgentEvent(EventType.ERROR, {"error": traceback.format_exc()}))
             except RuntimeError:
                 # Widget already deleted (QGIS shutting down)
@@ -92,6 +101,41 @@ class ChatWorker(QThread):
             except Exception:
                 pass
 
+    def _emit_event(self, ev):
+        """Emit backend events with source-side backpressure for text floods.
+
+        Qt queues cross-thread signals. If a backend emits thousands of token
+        deltas, queueing each token can make QGIS feel stuck even if each paint
+        is cheap. Coalescing adjacent TEXT/THINKING deltas preserves content and
+        ordering while sharply reducing queued signal count. Non-stream events
+        are flushed through immediately.
+        """
+        if ev.type in (EventType.TEXT, EventType.THINKING):
+            delta = ev.data.get("text", "")
+            if delta:
+                if self._coalesce_type is not None and self._coalesce_type != ev.type:
+                    self._flush_coalesced_event()
+                self._coalesce_type = ev.type
+                self._coalesce_text += delta
+                now = time.monotonic()
+                if (
+                    len(self._coalesce_text) >= _STREAM_COALESCE_MAX_CHARS
+                    or now - self._last_coalesce_flush >= _STREAM_COALESCE_INTERVAL_S
+                ):
+                    self._flush_coalesced_event(now)
+                return
+
+        self._flush_coalesced_event()
+        self.event.emit(ev)
+
+    def _flush_coalesced_event(self, now=None):
+        if not self._coalesce_text or self._coalesce_type is None:
+            return
+        self.event.emit(AgentEvent(self._coalesce_type, {"text": self._coalesce_text}))
+        self._coalesce_type = None
+        self._coalesce_text = ""
+        self._last_coalesce_flush = now if now is not None else time.monotonic()
+
 
 class ChatDock(QgsDockWidget):
     _ask_user_signal = pyqtSignal(str, object, bool)
@@ -104,7 +148,11 @@ class ChatDock(QgsDockWidget):
         self._request_cancel = request_cancel
         self._toolkit = toolkit
         self._history = []
+        self._prompt_history = []
+        self._prompt_history_index = None
+        self._prompt_history_draft = ""
         self._worker = None
+        self._stop_requested = False
         self._streaming = False
         self._pending_tool = None
         self._typing_widget = None
@@ -113,6 +161,10 @@ class ChatDock(QgsDockWidget):
         self._current_text = ""            # accumulated final-answer text
         self._tool_progress_text = ""      # temporary visible text while a tool runs
         self._showing_tool_progress = False
+        self._pending_stream_render = False
+        self._pending_stream_kind = None
+        self._pending_stream_scroll = False
+        self._last_stream_render_at = 0.0
         self._thinking_text = ""           # accumulated thinking/progress text
         self._thinking_started = False     # whether add_thinking_block was called this turn
         self._ask_user_card = None
@@ -124,10 +176,14 @@ class ChatDock(QgsDockWidget):
         self._status_color = _TEXT_3
         self._status_icon = "✓"
         self._status_spinning = False
+        self._last_escape_press_at = 0.0
         self._build_ui()
         self._status_timer = QTimer(self)
         self._status_timer.setInterval(120)
         self._status_timer.timeout.connect(self._tick_status)
+        self._stream_render_timer = QTimer(self)
+        self._stream_render_timer.setSingleShot(True)
+        self._stream_render_timer.timeout.connect(self._flush_stream_render)
         self._set_status("Ready", _SUCCESS, icon="✓")
         self._ask_user_signal.connect(self._show_ask_user, Qt.QueuedConnection)
         if self._toolkit is not None:
@@ -162,6 +218,23 @@ class ChatDock(QgsDockWidget):
         self.status.setTextFormat(Qt.RichText)
         self.status.setStyleSheet("background: transparent; padding-right: 4px;")
         top.addWidget(self.status)
+
+        self._connection_chip = QLabel("Connection")
+        self._connection_chip.setFont(QFont("JetBrains Mono", 10))
+        self._connection_chip.setMaximumWidth(360)
+        self._connection_chip.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Fixed)
+        self._connection_chip.setStyleSheet(f"""
+            QLabel {{
+                color: {_TEXT_3};
+                background: {_SURFACE_2};
+                border: 1px solid {_BORDER};
+                border-radius: 6px;
+                padding: 5px 8px;
+                font-size: 10px;
+            }}
+        """)
+        top.addWidget(self._connection_chip, 0, Qt.AlignVCenter)
+        self._refresh_connection_status()
         top.addStretch(1)
 
         for label, tip in (("Setting", "Settings"), ("Clear", "Clear chat")):
@@ -256,7 +329,13 @@ class ChatDock(QgsDockWidget):
 
         # Input field — action button lives inside the same frame
         input_frame = QFrame()
-        input_frame.setFixedHeight(38)
+        self._input_frame = input_frame
+        self._input_min_h = 28
+        self._input_max_h = 104
+        self._input_frame_min_h = 38
+        self._input_frame_max_h = 118
+        input_frame.setMinimumHeight(self._input_frame_min_h)
+        input_frame.setMaximumHeight(self._input_frame_max_h)
         input_frame.setStyleSheet(f"""
             QFrame {{
                 background-color: {_SURFACE};
@@ -268,17 +347,21 @@ class ChatDock(QgsDockWidget):
         field_row.setContentsMargins(10, 0, 4, 0)
         field_row.setSpacing(0)
 
-        self.input = QLineEdit()
+        self.input = QTextEdit()
         self.input.setPlaceholderText("Message AgenticGIS…")
-        self.input.setFixedHeight(28)
-        self.input.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
-        self.input.setTextMargins(0, 0, 0, 0)
+        self.input.setAcceptRichText(False)
+        self.input.setTabChangesFocus(True)
+        self.input.setLineWrapMode(QTextEdit.WidgetWidth)
+        self.input.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.input.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.input.setFixedHeight(self._input_min_h)
+        self.input.document().setDocumentMargin(0)
         mono_font = QFont("JetBrains Mono")
         mono_font.setStyleHint(QFont.Monospace)
         mono_font.setPointSize(10)
         self.input.setFont(mono_font)
         self.input.setStyleSheet(f"""
-            QLineEdit {{
+            QTextEdit {{
                 font-family: 'JetBrains Mono', 'Fira Code', monospace;
                 font-size: 12px;
                 border: none;
@@ -287,7 +370,19 @@ class ChatDock(QgsDockWidget):
                 padding: 0px;
                 selection-background-color: {_BORDER};
             }}
+            QTextEdit QScrollBar:vertical {{
+                background: transparent;
+                width: 4px;
+                margin: 2px 0 2px 0;
+            }}
+            QTextEdit QScrollBar::handle:vertical {{
+                background: {_BORDER};
+                border-radius: 2px;
+                min-height: 18px;
+            }}
         """)
+        self.input.textChanged.connect(self._resize_input)
+        self._update_input_vertical_inset(self._input_min_h)
         field_row.addWidget(self.input, 1, Qt.AlignVCenter)
 
         # Send button — inside the field frame, right edge
@@ -333,30 +428,51 @@ class ChatDock(QgsDockWidget):
         # Install event filter on the input widget so Enter-to-send works
         self.input.installEventFilter(self)
 
-    def _get_model_name(self) -> str:
-        """Return a short model name string for the chip label."""
-        if self._toolkit is not None:
-            for attr in ("model", "model_name", "_model", "_model_name"):
-                val = getattr(self._toolkit, attr, None)
-                if val and isinstance(val, str):
-                    return val
+    def _connection_status_text(self):
         backend = self._get_backend() if self._get_backend else None
-        if backend is not None:
-            for attr in ("model", "model_name", "_model", "_model_name"):
-                val = getattr(backend, attr, None)
-                if val and isinstance(val, str):
-                    return val
-        return "LLM"
+        if backend is None:
+            return "No active connection"
+        cfg = getattr(backend, "config", None)
+        if cfg is None:
+            return getattr(backend, "label", "Connection") or "Connection"
 
-    def _refresh_model_chip(self):
-        """Update the model chip text (call after backend changes)."""
-        if hasattr(self, "_model_chip"):
-            self._model_chip.setText(self._get_model_name())
+        try:
+            from .. import config as config_mod
+            from ..backends import providers
+
+            mode = cfg.get("connection_mode")
+            if mode == config_mod.MODE_API_KEY:
+                provider_id = cfg.get("provider")
+                provider = providers.get_provider(provider_id)
+                provider_label = provider["label"] if provider else str(provider_id or "Provider")
+                model = cfg.get("model") or (provider.get("default_model") if provider else "")
+                return " · ".join(part for part in ("API key", provider_label, model) if part)
+            if mode == config_mod.MODE_CUSTOM:
+                fmt = (cfg.get("custom_format") or "").lower()
+                wire = "Anthropic" if fmt == "anthropic" else "OpenAI"
+                model = cfg.get("custom_model") or cfg.get("model") or ""
+                return " · ".join(part for part in ("Custom", wire, model) if part)
+            if mode in (config_mod.MODE_SUBSCRIPTION, config_mod.MODE_CLI_TOOL):
+                tool = cfg.get("cli_tool") or "CLI"
+                return f"Subscription · {tool}"
+        except Exception:
+            pass
+        return getattr(backend, "label", "Connection") or "Connection"
+
+    def _refresh_connection_status(self):
+        """Update the top-bar chip with the currently active connection."""
+        if not hasattr(self, "_connection_chip"):
+            return
+        text = self._connection_status_text()
+        fm = QFontMetrics(self._connection_chip.font())
+        shown = fm.elidedText(text, Qt.ElideRight, max(80, self._connection_chip.maximumWidth() - 18))
+        self._connection_chip.setText(shown)
+        self._connection_chip.setToolTip(text)
 
     def showEvent(self, event):
         super().showEvent(event)
         self.input.setFocus(Qt.OtherFocusReason)
-        self._refresh_model_chip()
+        self._refresh_connection_status()
 
     # ------------------------------------------------------------------ #
     def eventFilter(self, obj, event):
@@ -366,12 +482,111 @@ class ChatDock(QgsDockWidget):
             self.transcript_widget.setFixedWidth(event.size().width())
             return False
         if obj is self.input and event.type() == QEvent.KeyPress:
+            if event.key() == Qt.Key_Escape:
+                return self._handle_input_escape()
+            if event.key() in (Qt.Key_Up, Qt.Key_Down) and event.modifiers() == Qt.NoModifier:
+                if self._handle_prompt_history_key(event.key()):
+                    return True
             if event.key() in (Qt.Key_Return, Qt.Key_Enter):
-                if event.modifiers() & Qt.ShiftModifier:
-                    return False  # Shift+Enter inserts newline
+                if self._newline_modifier(event.modifiers()):
+                    self.input.insertPlainText("\n")
+                    self._resize_input()
+                    return True
                 self._on_send()
                 return True
         return super().eventFilter(obj, event)
+
+    def _newline_modifier(self, modifiers):
+        return bool(
+            modifiers & (
+                Qt.ShiftModifier
+                | Qt.AltModifier
+                | Qt.MetaModifier
+                | Qt.ControlModifier
+            )
+        )
+
+    def _remember_prompt(self, message):
+        message = message.strip() if isinstance(message, str) else ""
+        if not message:
+            return
+        if self._prompt_history and self._prompt_history[-1] == message:
+            self._prompt_history_index = None
+            self._prompt_history_draft = ""
+            return
+        self._prompt_history.append(message)
+        if len(self._prompt_history) > 100:
+            self._prompt_history = self._prompt_history[-100:]
+        self._prompt_history_index = None
+        self._prompt_history_draft = ""
+
+    def _handle_prompt_history_key(self, key):
+        if not self._prompt_history:
+            return False
+
+        cursor = self.input.textCursor()
+        block_number = cursor.blockNumber()
+        last_block = max(0, self.input.document().blockCount() - 1)
+        if key == Qt.Key_Up and block_number > 0:
+            return False
+        if key == Qt.Key_Down and block_number < last_block:
+            return False
+
+        if key == Qt.Key_Up:
+            if self._prompt_history_index is None:
+                self._prompt_history_draft = self.input.toPlainText()
+                self._prompt_history_index = len(self._prompt_history) - 1
+            else:
+                self._prompt_history_index = max(0, self._prompt_history_index - 1)
+            self._set_input_text_from_history(self._prompt_history[self._prompt_history_index])
+            return True
+
+        if key == Qt.Key_Down:
+            if self._prompt_history_index is None:
+                return False
+            if self._prompt_history_index >= len(self._prompt_history) - 1:
+                self._prompt_history_index = None
+                self._set_input_text_from_history(self._prompt_history_draft)
+                self._prompt_history_draft = ""
+            else:
+                self._prompt_history_index += 1
+                self._set_input_text_from_history(self._prompt_history[self._prompt_history_index])
+            return True
+
+        return False
+
+    def _set_input_text_from_history(self, text):
+        self.input.setPlainText(text)
+        self.input.moveCursor(QTextCursor.End)
+        self._resize_input()
+
+    def _handle_input_escape(self):
+        if self._worker is None:
+            self._last_escape_press_at = 0.0
+            return False
+        now = time.monotonic()
+        if self._last_escape_press_at > 0.0 and now - self._last_escape_press_at <= 1.2:
+            self._last_escape_press_at = 0.0
+            self._on_stop()
+        else:
+            self._last_escape_press_at = now
+            self._set_status("Esc again to stop", _DANGER, spinning=True)
+        return True
+
+    def _resize_input(self):
+        if not hasattr(self, "input") or not hasattr(self, "_input_frame"):
+            return
+        doc_h = int(self.input.document().size().height()) + 2
+        input_h = max(self._input_min_h, min(self._input_max_h, doc_h))
+        frame_h = max(self._input_frame_min_h, min(self._input_frame_max_h, input_h + 10))
+        self._update_input_vertical_inset(input_h)
+        self.input.setFixedHeight(input_h)
+        self._input_frame.setFixedHeight(frame_h)
+
+    def _update_input_vertical_inset(self, input_h):
+        line_h = self.input.fontMetrics().lineSpacing()
+        top = max(0, int((input_h - line_h) / 2) - 1)
+        self.input.setViewportMargins(0, top, 0, 0)
 
     def _scroll_to_bottom(self):
         try:
@@ -636,8 +851,14 @@ class ChatDock(QgsDockWidget):
         available_w = max(280, ov.width() - 32)
         card_w = min(560, available_w)
         self._ask_card_frame.setFixedWidth(card_w)
-        card_size = self._ask_card_frame.sizeHint()
-        card_h = min(card_size.height(), max(240, ov.height() - 32))
+        card = getattr(self, "_ask_card", None)
+        if card is not None:
+            card.setFixedWidth(card_w)
+            card_size = card.sizeHint()
+        else:
+            card_size = self._ask_card_frame.sizeHint()
+        available_h = max(240, ov.height() - 32)
+        card_h = min(max(card_size.height(), 240), available_h)
         cx = ov.x() + (ov.width() - card_w) // 2
         cy = ov.y() + (ov.height() - card_h) // 2
         self._ask_card_frame.setGeometry(cx, cy, card_w, card_h)
@@ -651,6 +872,12 @@ class ChatDock(QgsDockWidget):
 
     # ------------------------------------------------------------------ #
     def _clear(self):
+        worker_was_active = self._worker is not None
+        # Stop any active worker BEFORE clearing widgets to prevent crashes
+        if worker_was_active:
+            self._stop_requested = True
+            self._worker.stop()
+            # The worker's QThread.finished signal releases self._worker.
         if self._ask_user_card is not None:
             if self._toolkit is not None:
                 self._toolkit._resolve_ask_user({
@@ -674,14 +901,21 @@ class ChatDock(QgsDockWidget):
         self._current_text = ""
         self._tool_progress_text = ""
         self._showing_tool_progress = False
+        self._pending_stream_render = False
+        self._pending_stream_kind = None
+        self._pending_stream_scroll = False
+        self._stream_render_timer.stop()
+        self._last_stream_render_at = 0.0
         self._thinking_text = ""
         self._thinking_started = False
         self._scroll_locked = False
+        if not worker_was_active:
+            self._stop_requested = False
 
     def _on_send(self):
         if self._worker is not None:
             return
-        message = self.input.text().strip()
+        message = self.input.toPlainText().strip()
         if not message:
             return
 
@@ -694,7 +928,9 @@ class ChatDock(QgsDockWidget):
             self._add_user_message(err)
             return
 
+        self._remember_prompt(message)
         self.input.clear()
+        self._resize_input()
         self._add_user_message(message)
         # Reset scroll lock and force-scroll to bottom. The user just hit
         # send, so they want to see the response that follows. We use
@@ -702,11 +938,17 @@ class ChatDock(QgsDockWidget):
         # laid out into the scroll range first.
         self._scroll_locked = False
         self._scroll_to_bottom_after_layout()
+        self._stop_requested = False
         self._streaming = False
         self._pending_tool = None
         self._current_text = ""
         self._tool_progress_text = ""
         self._showing_tool_progress = False
+        self._pending_stream_render = False
+        self._pending_stream_kind = None
+        self._pending_stream_scroll = False
+        self._stream_render_timer.stop()
+        self._last_stream_render_at = 0.0
         self._thinking_text = ""
         self._current_agent_turn = None
         self._current_tool_row = None
@@ -721,11 +963,17 @@ class ChatDock(QgsDockWidget):
 
         self._worker = ChatWorker(backend, message, self._history)
         self._worker.event.connect(self._on_event)
-        self._worker.finished_history.connect(self._on_finished)
+        self._worker.finished_history.connect(
+            lambda history, worker=self._worker: self._on_finished(history, worker)
+        )
+        self._worker.finished.connect(
+            lambda *_, worker=self._worker: self._on_worker_thread_finished(worker)
+        )
         self._worker.start()
 
     def _on_stop(self):
         if self._worker is not None:
+            self._stop_requested = True
             self._worker.stop()
             # Cooperatively cancel any main-thread operation (run_pyqgis,
             # processing.run, create_chart, get_layer_statistics). The worker
@@ -740,10 +988,13 @@ class ChatDock(QgsDockWidget):
                 self._toolkit._resolve_ask_user({
                     "choice": None, "free_text": None, "cancelled": True,
                 })
+            self.stop_btn.setEnabled(False)
             self._set_status("Stopping", _DANGER, spinning=True)
 
     # ------------------------------------------------------------------ #
     def _on_event(self, ev):
+        if self._stop_requested:
+            return
         if ev.type == EventType.TEXT:
             self._hide_typing()
             delta = ev.data.get("text", "")
@@ -755,9 +1006,7 @@ class ChatDock(QgsDockWidget):
                         self._tool_progress_text += "\n"
                     self._tool_progress_text += delta
                     self._showing_tool_progress = True
-                    turn.set_streaming_text(self._tool_progress_text)
-                    if not self._scroll_locked:
-                        self._scroll_to_bottom()
+                    self._schedule_stream_render("tool")
                     return
 
                 # Final-answer text begins after thinking/progress. Collapse
@@ -766,6 +1015,7 @@ class ChatDock(QgsDockWidget):
                     turn.clear_streaming_text()
                     self._tool_progress_text = ""
                     self._showing_tool_progress = False
+                    self._last_stream_render_at = 0.0
                 if self._thinking_started and self._current_agent_turn is not None:
                     try:
                         self._current_agent_turn.finalize_thinking()
@@ -776,14 +1026,10 @@ class ChatDock(QgsDockWidget):
                 if not self._streaming:
                     self._streaming = True
                 self._current_text += delta
-                # Render every token immediately for real-time feel —
-                # the delta-based renderer in AgentTurnBubble is cheap,
-                # so no debounce is needed.
-                turn.set_streaming_text(self._current_text)
-                if not self._scroll_locked:
-                    self._scroll_to_bottom()
+                self._schedule_stream_render("final")
 
         elif ev.type == EventType.TOOL_USE:
+            self._flush_stream_render()
             self._hide_typing()
             turn = self._get_or_create_agent_turn()
             if self._current_text:
@@ -807,6 +1053,7 @@ class ChatDock(QgsDockWidget):
             self._maybe_scroll_to_bottom()
 
         elif ev.type == EventType.TOOL_RESULT:
+            self._flush_stream_render()
             result = ev.data.get("result", "")
             tool_name = ev.data.get("name", "tool")
             # F11: prefer the structured is_error / cancelled flags that
@@ -835,6 +1082,7 @@ class ChatDock(QgsDockWidget):
             self._maybe_scroll_to_bottom()
 
         elif ev.type == EventType.ASK_USER:
+            self._flush_stream_render()
             self._show_ask_user(
                 ev.data.get("question", ""),
                 ev.data.get("options", []),
@@ -842,6 +1090,7 @@ class ChatDock(QgsDockWidget):
             )
 
         elif ev.type == EventType.VISUALIZATION:
+            self._flush_stream_render()
             viz = ev.data.get("type")
             d = ev.data.get("data", {})
             if viz == "chart":
@@ -850,6 +1099,7 @@ class ChatDock(QgsDockWidget):
                 self._add_stats(d)
 
         elif ev.type == EventType.THINKING:
+            self._flush_stream_render()
             self._hide_typing()
             thinking_text = ev.data.get("text", "")
             if thinking_text:
@@ -860,15 +1110,18 @@ class ChatDock(QgsDockWidget):
             self._set_status("Thinking", _TEXT_3, spinning=True)
 
         elif ev.type == EventType.COMPACTION:
+            self._flush_stream_render()
             self._add_compaction_notice()
 
         elif ev.type == EventType.ERROR:
+            self._flush_stream_render()
             self._hide_typing()
             self._finish_streaming()
             msg = html.escape(str(ev.data.get("error", "")))
             self._add_widget(MessageContainer(msg, is_user=False, is_error=True))
 
         elif ev.type == EventType.DONE:
+            self._flush_stream_render()
             self._hide_typing()
             self._finish_streaming()
             self._streaming = False
@@ -889,6 +1142,7 @@ class ChatDock(QgsDockWidget):
         markdown (code blocks, tables, headings) and drop the cursor.
         Tool/progress prose lives in thinking/tool-row buffers instead.
         """
+        self._flush_stream_render()
         if self._current_text:
             turn = self._get_or_create_agent_turn()
             turn.finalize_text(self._current_text)
@@ -906,6 +1160,7 @@ class ChatDock(QgsDockWidget):
         """
         if not text:
             return
+        self._flush_stream_render()
         turn = self._get_or_create_agent_turn()
         self._tool_progress_text = text
         self._showing_tool_progress = True
@@ -913,6 +1168,43 @@ class ChatDock(QgsDockWidget):
         app = QApplication.instance()
         if app is not None:
             app.processEvents()
+
+    def _schedule_stream_render(self, kind: str):
+        """Throttle expensive rich-text rendering during stream floods."""
+        self._pending_stream_render = True
+        self._pending_stream_kind = kind
+        self._pending_stream_scroll = self._pending_stream_scroll or not self._scroll_locked
+
+        now = time.monotonic()
+        elapsed = now - self._last_stream_render_at
+        if self._last_stream_render_at <= 0.0 or elapsed >= _STREAM_RENDER_INTERVAL_S:
+            self._flush_stream_render(now)
+            return
+
+        delay_ms = max(1, int((_STREAM_RENDER_INTERVAL_S - elapsed) * 1000))
+        if not self._stream_render_timer.isActive():
+            self._stream_render_timer.start(delay_ms)
+
+    def _flush_stream_render(self, now=None):
+        """Render the latest accumulated stream state once."""
+        if not self._pending_stream_render:
+            return
+        self._stream_render_timer.stop()
+        kind = self._pending_stream_kind
+        should_scroll = self._pending_stream_scroll and not self._scroll_locked
+        self._pending_stream_render = False
+        self._pending_stream_kind = None
+        self._pending_stream_scroll = False
+
+        turn = self._get_or_create_agent_turn()
+        if kind == "tool":
+            turn.set_streaming_text(self._tool_progress_text)
+        elif kind == "final":
+            turn.set_streaming_text(self._current_text)
+
+        self._last_stream_render_at = now if now is not None else time.monotonic()
+        if should_scroll:
+            self._scroll_to_bottom()
 
     def _append_thinking_text(self, text: str):
         """Append progress/reasoning text into the turn's thinking block."""
@@ -932,7 +1224,9 @@ class ChatDock(QgsDockWidget):
         self._thinking_text += text
         turn.set_thinking_text(self._thinking_text)
 
-    def _on_finished(self, history):
+    def _on_finished(self, history, worker=None):
+        if worker is not None and self._worker is not None and worker is not self._worker:
+            return
         self._history = history if history is not None else self._history
         # NOTE: do NOT call _finish_streaming here — the DONE event handler
         # already finalized the turn and reset _current_agent_turn to None.
@@ -947,4 +1241,13 @@ class ChatDock(QgsDockWidget):
         self._scroll_locked = False
         self._thinking_started = False
         self._set_status("Ready", _SUCCESS, icon="✓")
-        self._worker = None
+        self._stop_requested = False
+
+    def _on_worker_thread_finished(self, worker):
+        for signal_name in ("event", "finished_history", "finished"):
+            try:
+                getattr(worker, signal_name).disconnect()
+            except Exception:
+                pass
+        if worker is self._worker:
+            self._worker = None

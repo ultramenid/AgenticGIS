@@ -21,8 +21,12 @@ running (the worker still waits on its own ``threading.Event``).
 """
 
 import threading
+import time
+import traceback
 
 from qgis.PyQt.QtCore import QObject, QThread, Qt, pyqtSignal
+
+from .dev_logging import log_event
 
 
 class _Job:
@@ -73,6 +77,7 @@ class MainThreadExecutor(QObject):
 
         jid = self._next_id()
         job = _Job(jid, fn)
+        start = time.perf_counter()
         with self._lock:
             # If a prior job is still in-flight, refuse rather than queue — the
             # caller is either retrying (let them time out cleanly) or
@@ -85,6 +90,7 @@ class MainThreadExecutor(QObject):
                 )
             self._current_job_id = jid
         try:
+            log_event("main_thread.queue", job_id=jid, timeout=timeout)
             self._submitted.emit(job)
             # Process the event loop periodically while waiting, so we don't
             # completely block if the main thread is temporarily busy.
@@ -99,6 +105,12 @@ class MainThreadExecutor(QObject):
                         if self._current_job_id == jid:
                             self._current_job_id = None
                     job.cancelled = True
+                    log_event(
+                        "main_thread.timeout",
+                        job_id=jid,
+                        elapsed_ms=int((time.perf_counter() - start) * 1000),
+                        timeout=timeout,
+                    )
                     raise TimeoutError(
                         "AgenticGIS: main-thread operation timed out "
                         f"after {timeout}s (the QGIS UI may be busy)."
@@ -109,9 +121,19 @@ class MainThreadExecutor(QObject):
             # If the job was cancelled during the wait, raise TimeoutError
             # so callers can handle it uniformly.
             if job.cancelled:
+                log_event(
+                    "main_thread.cancelled",
+                    job_id=jid,
+                    elapsed_ms=int((time.perf_counter() - start) * 1000),
+                )
                 raise TimeoutError(
                     f"AgenticGIS: main-thread operation was cancelled."
                 )
+            log_event(
+                "main_thread.result",
+                job_id=jid,
+                elapsed_ms=int((time.perf_counter() - start) * 1000),
+            )
             return job.result
         finally:
             with self._lock:
@@ -124,9 +146,27 @@ class MainThreadExecutor(QObject):
         # the main thread is just slow). Skip the work entirely.
         if job.cancelled:
             return
+        start = time.perf_counter()
+        log_event("main_thread.execute.start", job_id=job.id)
         try:
             job.result = job.fn()
         except BaseException as exc:  # noqa: BLE001 — propagate to caller
             job.error = exc
+            log_event(
+                "main_thread.execute.error",
+                job_id=job.id,
+                elapsed_ms=int((time.perf_counter() - start) * 1000),
+                error_type=type(exc).__name__,
+                error=str(exc),
+                traceback="".join(
+                    traceback.format_exception(type(exc), exc, exc.__traceback__, limit=4)
+                ),
+            )
+        else:
+            log_event(
+                "main_thread.execute.end",
+                job_id=job.id,
+                elapsed_ms=int((time.perf_counter() - start) * 1000),
+            )
         finally:
             job.event.set()

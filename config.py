@@ -23,6 +23,7 @@ DEFAULTS = {
     "provider": "anthropic",
     "model": "claude-opus-4-8",
     "api_key": "",
+    "api_base_url": "",          # override built-in provider base URL in API-key mode
     # Custom endpoint (when provider == "custom")
     "custom_base_url": "",
     "custom_api_key": "",       # separate from api_key (API-key mode)
@@ -31,18 +32,21 @@ DEFAULTS = {
     # Behaviour
     "system_prompt": "",           # empty => built-in default
     "auto_run": True,              # execute generated PyQGIS without confirmation
-    "max_iterations": 25,          # safety cap on the agent tool-use loop
+    "max_iterations": 0,           # 0 or less => unlimited agent tool-use loop
     # F16: when True, run_pyqgis refuses (returns an error) if agent code
     # calls a "dangerous" builtin — os.system, subprocess, shutil.rmtree,
     # ctypes, etc. Users can keep this on and opt out per-call by setting
     # the variable ``ALLOW_DANGEROUS = True`` at the top of their code.
     "confirm_dangerous_calls": False,
+    # User can choose "Always allow" in the external access permission popup.
+    # This permits future file/path/URL/database access without prompting.
+    "external_access_always_allowed": False,
     # Local MCP bridge (used by CLI-tool mode)
     "mcp_host": "127.0.0.1",
     "mcp_port": 0,                 # 0 => pick a free port at runtime
     # Performance
     "main_thread_timeout": 60.0,      # seconds for main-thread operations
-    "processing_timeout": 120.0,      # seconds for long-running processing algorithms
+    "processing_timeout": 0.0,        # 0 or less => unlimited processing task setup wait
     "mcp_poll_interval": 0.5,         # seconds for MCP server poll interval
 }
 

@@ -132,7 +132,48 @@ def _cancel_requested(cancel):
     return False
 
 
-def _calculate_chart_for_layer(layer, field_name, chart_type="bar", cancel=None, pump_events=False):
+def _is_blank_chart_label(value):
+    if value is None:
+        return True
+    try:
+        from qgis.core import NULL
+        if value == NULL:
+            return True
+    except Exception:  # noqa: BLE001
+        pass
+    return str(value).strip() == ""
+
+
+def _chart_row(label, value, raw_label=None):
+    row = {"label": str(label), "value": value}
+    if raw_label is not None and str(raw_label) != str(label):
+        row["raw_label"] = str(raw_label)
+    return row
+
+
+def _clean_chart_colors(colors):
+    clean_colors = []
+    if colors is None:
+        return clean_colors, None
+    for c in colors:
+        if not isinstance(c, str):
+            return None, f"colors must be hex strings, got {c!r}"
+        cs = c.strip()
+        if not (cs.startswith("#") and len(cs) in (4, 7)):
+            return None, f"invalid color {c!r}: use '#rrggbb' or '#rgb'"
+        clean_colors.append(cs)
+    return clean_colors, None
+
+
+def _calculate_chart_for_layer(
+    layer,
+    field_name,
+    chart_type="bar",
+    colors=None,
+    label_field=None,
+    cancel=None,
+    pump_events=False,
+):
     start = time.perf_counter()
     if layer is None:
         return {"ok": False, "error": "No layer provided"}
@@ -142,11 +183,22 @@ def _calculate_chart_for_layer(layer, field_name, chart_type="bar", cancel=None,
     field_idx = layer.fields().indexFromName(field_name)
     if field_idx == -1:
         return {"ok": False, "error": f"Field {field_name!r} not found"}
+    clean_colors, color_error = _clean_chart_colors(colors)
+    if color_error:
+        return {"ok": False, "error": color_error}
+
+    label_idx = -1
+    attr_names = [field_name]
+    if label_field:
+        label_idx = layer.fields().indexFromName(label_field)
+        if label_idx != -1 and label_field != field_name:
+            attr_names.append(label_field)
 
     req = QgsFeatureRequest().setFlags(_no_geometry_flag())
-    req.setSubsetOfAttributes([field_name], layer.fields())
+    req.setSubsetOfAttributes(attr_names, layer.fields())
 
     values = {}
+    display_labels = {}
     scanned = 0
     for i, feature in enumerate(layer.getFeatures(req)):
         if _cancel_requested(cancel):
@@ -156,6 +208,10 @@ def _calculate_chart_for_layer(layer, field_name, chart_type="bar", cancel=None,
         attrs = feature.attributes()
         val = attrs[field_idx] if field_idx < len(attrs) else None
         values[val] = values.get(val, 0) + 1
+        if label_idx != -1 and val not in display_labels:
+            display = attrs[label_idx] if label_idx < len(attrs) else None
+            if not _is_blank_chart_label(display):
+                display_labels[val] = display
         scanned = i + 1
         if i % EVENT_PUMP_INTERVAL == 0:
             if pump_events:
@@ -168,12 +224,19 @@ def _calculate_chart_for_layer(layer, field_name, chart_type="bar", cancel=None,
         "ok": True,
         "chart_type": chart_type,
         "title": f"{field_name} in {layer.name()}",
-        "data": [{"label": str(k), "value": v} for k, v in sorted_items],
+        "data": [
+            _chart_row(display_labels.get(k, k), v, raw_label=k)
+            for k, v in sorted_items
+        ],
         "field": field_name,
         "layer_name": layer.name(),
         "scanned_features": scanned,
         "truncated": scanned >= DEFAULT_FEATURE_SCAN_LIMIT,
     }
+    if label_idx != -1:
+        result["label_field"] = label_field
+    if clean_colors:
+        result["colors"] = clean_colors
     log_event(
         "layer.chart.scan",
         layer=result["layer_name"],
@@ -307,6 +370,10 @@ class QgisToolkit:
         self._ns_template = None  # F10: cached exec namespace
         # F17: dirty flag — set when a tool may have mutated project state.
         self._canvas_dirty = False
+        # Logical-name -> layer_id map of agent-created analysis/result layers.
+        # These are meant to persist; the agent reuses them instead of
+        # recreating and never auto-deletes them.
+        self._analysis_layers = {}
         # F8: hook QGIS's plugins-changed signal so the algorithm list
         # reflects newly-enabled providers (GRASS, SAGA, custom plugins)
         # without a plugin restart.
@@ -528,6 +595,19 @@ class QgisToolkit:
                 if marker in code:
                     return f"run PyQGIS code that may access files, URLs, or sources outside loaded layers ({marker})"
 
+        if tool_name == "web_fetch":
+            url = args.get("url") or ""
+            if isinstance(url, str) and url.lower().startswith(("http://", "https://")):
+                return f"fetch external URL: {url}"
+
+        if tool_name == "gee_dataset_info":
+            ds = args.get("dataset_id") or ""
+            if isinstance(ds, str) and ds.strip():
+                return (
+                    "fetch Earth Engine dataset metadata from the public STAC "
+                    f"catalog for '{ds.strip()}'"
+                )
+
         return None
 
     def confirm_external_access(self, tool_name, args):
@@ -540,6 +620,9 @@ class QgisToolkit:
         reason = self._external_access_reason(tool_name, args)
         if not reason:
             return None
+        if self.config and self.config.get("external_access_always_allowed", False):
+            log_event("external_access.allowed", tool=tool_name, reason=reason, permanent=True)
+            return None
 
         answer = self.ask_user(
             f"Allow AgenticGIS to {reason}?",
@@ -547,6 +630,10 @@ class QgisToolkit:
                 {
                     "label": "Allow once",
                     "description": "Permit this operation, then ask again next time.",
+                },
+                {
+                    "label": "Always allow",
+                    "description": "Permit external access now and remember this choice.",
                 },
                 {
                     "label": "Deny",
@@ -561,6 +648,11 @@ class QgisToolkit:
         choice = (answer or {}).get("choice")
         if choice == "Allow once":
             log_event("external_access.allowed", tool=tool_name, reason=reason)
+            return None
+        if choice == "Always allow":
+            if self.config:
+                self.config.set("external_access_always_allowed", True)
+            log_event("external_access.allowed", tool=tool_name, reason=reason, permanent=True)
             return None
         log_event("external_access.denied", tool=tool_name, reason=reason, choice=choice)
         return {
@@ -686,6 +778,8 @@ class QgisToolkit:
                     layer,
                     args.get("field_name"),
                     args.get("chart_type", "bar"),
+                    colors=args.get("colors"),
+                    label_field=args.get("label_field"),
                     cancel=task,
                     pump_events=False,
                 )
@@ -1321,10 +1415,98 @@ class QgisToolkit:
         return result
 
     # ------------------------------------------------------------------ #
+    # Canvas / extent helpers                                            #
+    # ------------------------------------------------------------------ #
+    def _layer_extent_in_crs(self, layer, dest_crs):
+        """Return the layer's extent reprojected into ``dest_crs``.
+
+        Returns ``None`` when the layer has no usable extent (empty/invalid)
+        or the transform fails.
+        """
+        try:
+            from qgis.core import QgsCoordinateTransform
+
+            extent = layer.extent()
+            if extent is None or extent.isEmpty():
+                return None
+            src = layer.crs()
+            if src.isValid() and dest_crs.isValid() and src != dest_crs:
+                xform = QgsCoordinateTransform(src, dest_crs, QgsProject.instance())
+                extent = xform.transformBoundingBox(extent)
+            if extent is None or extent.isEmpty():
+                return None
+            return extent
+        except Exception:
+            return None
+
+    def _zoom_to_layer(self, layer):
+        """Center and fit the map canvas on ``layer``. Returns True on success."""
+        try:
+            canvas = self.iface.mapCanvas() if self.iface is not None else None
+            if canvas is None or layer is None:
+                return False
+            canvas_crs = canvas.mapSettings().destinationCrs()
+            extent = self._layer_extent_in_crs(layer, canvas_crs)
+            if extent is None:
+                return False
+            extent.scale(1.05)  # small margin so features aren't flush to the edge
+            canvas.setExtent(extent)
+            return True
+        except Exception:
+            return False
+
+    def _resolve_single_layer(self, layer_id=None, layer_name=None):
+        """Resolve one layer from an id or an unambiguous name.
+
+        Returns ``(layer, error_dict)``; exactly one is non-None.
+        """
+        project = QgsProject.instance()
+        layer_id = layer_id.strip() if isinstance(layer_id, str) else layer_id
+        layer_name = layer_name.strip() if isinstance(layer_name, str) else layer_name
+        if layer_id:
+            layer = project.mapLayer(layer_id)
+            if layer is None:
+                return None, {"ok": False, "error": f"Layer not found: {layer_id}"}
+            return layer, None
+        if layer_name:
+            matches = [
+                lyr
+                for lyr in project.mapLayers().values()
+                if lyr.name() == layer_name
+            ]
+            if not matches:
+                return None, {"ok": False, "error": f"Layer not found: {layer_name}"}
+            if len(matches) > 1:
+                return None, {
+                    "ok": False,
+                    "error": "Multiple layers match that name; pass a specific layer_id.",
+                    "matches": [self._layer_removal_payload(m) for m in matches],
+                }
+            return matches[0], None
+        return None, {"ok": False, "error": "Provide a layer_id or layer_name."}
+
+    def zoom_to_layer(self, layer_id=None, layer_name=None):
+        """Fit the map canvas to a layer's extent."""
+        layer, err = self._resolve_single_layer(layer_id, layer_name)
+        if err is not None:
+            return err
+        zoomed = self._zoom_to_layer(layer)
+        result = {"ok": True, "layer_id": layer.id(), "zoomed": zoomed}
+        if not zoomed:
+            result["note"] = "Layer has no usable extent to zoom to."
+        return result
+
+    # ------------------------------------------------------------------ #
     # Project mutation helpers                                           #
     # ------------------------------------------------------------------ #
-    def add_layer(self, uri, name=None, provider="ogr"):
+    def add_layer(self, uri, name=None, provider="ogr", zoom=False, is_analysis=False):
         name = name or uri.split("/")[-1]
+        # Reuse an existing analysis layer with the same logical name instead
+        # of stacking duplicates on the canvas.
+        if is_analysis:
+            existing_id = self._analysis_layers.get(name)
+            if existing_id and QgsProject.instance().mapLayer(existing_id) is not None:
+                QgsProject.instance().removeMapLayer(existing_id)
         if provider in ("gdal", "raster"):
             from qgis.core import QgsRasterLayer
             layer = QgsRasterLayer(uri, name)
@@ -1333,14 +1515,844 @@ class QgisToolkit:
         if not layer.isValid():
             return {"ok": False, "error": f"Layer is not valid: {uri!r}"}
         QgsProject.instance().addMapLayer(layer)
+        if is_analysis:
+            try:
+                layer.setCustomProperty("agenticgis/analysis", True)
+            except Exception:
+                pass
+            self._analysis_layers[name] = layer.id()
+        zoomed = self._zoom_to_layer(layer) if zoom else False
+        return {
+            "ok": True,
+            "layer_id": layer.id(),
+            "name": layer.name(),
+            "zoomed": zoomed,
+            "is_analysis": bool(is_analysis),
+        }
+
+    # ------------------------------------------------------------------ #
+    # Google Earth Engine (ee_plugin) integration                        #
+    # ------------------------------------------------------------------ #
+    def gee_status(self, **_kwargs):
+        """Report whether the GEE QGIS plugin is installed and authenticated."""
+        result = {
+            "ok": True,
+            "plugin_installed": False,
+            "ee_available": False,
+            "initialized": False,
+            "authenticated": False,
+            "message": "",
+        }
+        try:
+            import qgis.utils as qutils
+
+            if "ee_plugin" in (getattr(qutils, "plugins", {}) or {}):
+                result["plugin_installed"] = True
+        except Exception:
+            pass
+        if not result["plugin_installed"]:
+            try:
+                import importlib.util
+
+                if importlib.util.find_spec("ee_plugin") is not None:
+                    result["plugin_installed"] = True
+            except Exception:
+                pass
+        try:
+            import ee
+        except Exception:
+            result["message"] = (
+                "Earth Engine API (ee) is not importable in this QGIS Python. "
+                "Install the 'Google Earth Engine' plugin from the QGIS Plugin "
+                "Manager (Plugins > Manage and Install Plugins), then restart QGIS."
+            )
+            return result
+        result["ee_available"] = True
+        try:
+            ee.Initialize()
+            result["initialized"] = True
+            try:
+                _ = ee.Number(1).getInfo()
+                result["authenticated"] = True
+                result["message"] = "Earth Engine is installed, authenticated, and ready."
+            except Exception as exc:  # noqa: BLE001
+                result["message"] = f"Initialized, but a test call failed: {exc}"
+        except Exception as exc:  # noqa: BLE001
+            result["message"] = (
+                "Earth Engine is not authenticated/initialized. In the QGIS Python "
+                "console run: import ee; ee.Authenticate(); "
+                "ee.Initialize(project='YOUR_CLOUD_PROJECT'). "
+                f"Detail: {type(exc).__name__}: {exc}"
+            )
+        return result
+
+    # STAC catalog file layout:
+    #   catalog/<FIRST_SEGMENT>/<ID_WITH_SLASHES_AS_UNDERSCORES>.json
+    _EE_STAC_BASE = "https://storage.googleapis.com/earthengine-stac/catalog"
+
+    def gee_dataset_info(self, dataset_id, **_kwargs):
+        """Fetch CURRENT band/property metadata for an Earth Engine dataset.
+
+        Reads the public Earth Engine STAC catalog (plain JSON, no Earth
+        Engine auth or ee import required), so the model can confirm the
+        dataset's real band names, properties, date range, and status as it
+        exists today — rather than relying on a memorized, possibly outdated
+        snapshot. Call this BEFORE writing gee_add_layer code.
+
+        Returns band_names, bands (with scale/offset/gsd), properties
+        (per-image/feature schema), date_range, type, and a `deprecated`
+        flag so the model can avoid retired datasets.
+        """
+        if not isinstance(dataset_id, str) or not dataset_id.strip():
+            return {
+                "ok": False,
+                "error": (
+                    "dataset_id must be a non-empty Earth Engine id, e.g. "
+                    "'COPERNICUS/S2_SR_HARMONIZED'."
+                ),
+            }
+        ds = dataset_id.strip().strip("/")
+        first = ds.split("/")[0]
+        fname = ds.replace("/", "_")
+        url = f"{self._EE_STAC_BASE}/{first}/{fname}.json"
+
+        import urllib.error
+        import urllib.request
+        import json as _json
+
+        start = time.perf_counter()
+        req = urllib.request.Request(
+            url, method="GET", headers={"User-Agent": "AgenticGIS"}
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=20) as resp:
+                raw = resp.read(2_000_000)
+        except urllib.error.HTTPError as exc:
+            log_event("toolkit.gee_dataset_info.error", id=ds, status=exc.code)
+            if exc.code == 404:
+                # Not in the public catalog — try it as a user / cloud-project
+                # asset via the authenticated Earth Engine API.
+                fallback = self._gee_asset_info_via_ee(ds)
+                if fallback is not None:
+                    return fallback
+                return {
+                    "ok": False,
+                    "error": (
+                        f"No Earth Engine dataset found with id '{dataset_id}'. "
+                        "If this is a public dataset, check the exact id in the "
+                        "Earth Engine Data Catalog (ids are case-sensitive, e.g. "
+                        "'COPERNICUS/S2_SR_HARMONIZED'). If it is your own asset "
+                        "(e.g. 'projects/<project>/assets/<name>'), make sure "
+                        "Earth Engine is authenticated (run gee_status) and the "
+                        "asset is readable by your account."
+                    ),
+                    "url": url,
+                }
+            return {
+                "ok": False,
+                "error": f"HTTP {exc.code} fetching dataset metadata.",
+                "url": url,
+            }
+        except Exception as exc:  # noqa: BLE001
+            log_event("toolkit.gee_dataset_info.error", id=ds, error=str(exc))
+            return {
+                "ok": False,
+                "error": f"Failed to fetch dataset metadata: {type(exc).__name__}: {exc}",
+                "url": url,
+            }
+        try:
+            d = _json.loads(raw.decode("utf-8"))
+        except Exception as exc:  # noqa: BLE001
+            return {
+                "ok": False,
+                "error": f"Could not parse dataset metadata: {exc}",
+                "url": url,
+            }
+
+        summaries = d.get("summaries", {}) or {}
+        bands = []
+        for b in summaries.get("eo:bands", []) or []:
+            desc = b.get("description") or ""
+            bands.append(
+                {
+                    "name": b.get("name"),
+                    "description": desc[:200],
+                    "gsd": b.get("gsd"),
+                    "center_wavelength": b.get("center_wavelength"),
+                    "scale": b.get("gee:scale"),
+                    "offset": b.get("gee:offset"),
+                }
+            )
+        schema = []
+        for s in (summaries.get("gee:schema", []) or [])[:60]:
+            sdesc = s.get("description") or ""
+            schema.append(
+                {
+                    "name": s.get("name"),
+                    "type": s.get("type"),
+                    "description": sdesc[:160],
+                }
+            )
+        temporal = (d.get("extent", {}) or {}).get("temporal", {}) or {}
+        interval = temporal.get("interval") or []
+        date_range = interval[0] if interval else None
+        status = d.get("gee:status")
+        deprecated = bool(d.get("deprecated")) or status == "deprecated"
+
+        log_event(
+            "toolkit.gee_dataset_info.end",
+            id=ds,
+            bands=len(bands),
+            elapsed_ms=int((time.perf_counter() - start) * 1000),
+        )
+        return {
+            "ok": True,
+            "source": "catalog",
+            "id": d.get("id", ds),
+            "title": d.get("title"),
+            "type": d.get("gee:type"),
+            "status": status,
+            "deprecated": deprecated,
+            "date_range": date_range,
+            "interval": d.get("gee:interval"),
+            "band_names": [b["name"] for b in bands],
+            "bands": bands[:80],
+            "properties": schema,
+            "url": url,
+            "catalog_page": (
+                "https://developers.google.com/earth-engine/datasets/catalog/"
+                + fname
+            ),
+        }
+
+    def _gee_asset_info_via_ee(self, asset_id):
+        """Resolve a user / cloud-project asset's metadata via the authenticated
+        Earth Engine API.
+
+        Returns a gee_dataset_info-shaped dict (with source='asset'), or None
+        when Earth Engine is unavailable, not initialized, or the asset is not
+        readable — so the caller can fall back to a public-catalog "not found"
+        message. Unlike the catalog path, ``properties`` here is the asset's
+        concrete key→value metadata (a dict), not a schema definition.
+        """
+        try:
+            import ee
+        except Exception:
+            return None
+        try:
+            ee.Initialize()
+        except Exception:
+            pass  # may already be initialized; a real failure surfaces below
+        try:
+            asset = ee.data.getAsset(asset_id)
+        except Exception as exc:  # noqa: BLE001
+            log_event("toolkit.gee_dataset_info.asset_miss", id=asset_id, error=str(exc))
+            return None
+        if not isinstance(asset, dict):
+            return None
+
+        type_map = {
+            "IMAGE": "image",
+            "IMAGE_COLLECTION": "image_collection",
+            "TABLE": "table",
+            "TABLE_COLLECTION": "table_collection",
+            "FOLDER": "folder",
+        }
+        raw_type = (asset.get("type") or "").upper()
+        asset_type = type_map.get(raw_type, raw_type.lower() or None)
+
+        bands = []
+        for b in asset.get("bands") or []:
+            dt = b.get("dataType") or {}
+            bands.append(
+                {"name": b.get("id"), "data_type": dt.get("precision") or dt.get("type")}
+            )
+        # Collection assets carry no band list at the top level; sample the
+        # first image's band names with one bounded getInfo call.
+        if not bands and asset_type == "image_collection":
+            try:
+                names = ee.ImageCollection(asset_id).first().bandNames().getInfo()
+                bands = [{"name": n} for n in (names or [])]
+            except Exception:
+                pass
+
+        props = asset.get("properties") or {}
+        if not isinstance(props, dict):
+            props = {}
+
+        start_t = asset.get("startTime")
+        end_t = asset.get("endTime")
+        date_range = [start_t, end_t] if (start_t or end_t) else None
+
+        log_event(
+            "toolkit.gee_dataset_info.asset_hit", id=asset_id, bands=len(bands)
+        )
+        return {
+            "ok": True,
+            "source": "asset",
+            "id": asset.get("id") or asset.get("name") or asset_id,
+            "title": asset.get("title") or props.get("title"),
+            "type": asset_type,
+            "status": "ready",
+            "deprecated": False,
+            "date_range": date_range,
+            "band_names": [b["name"] for b in bands if b.get("name")],
+            "bands": bands[:80],
+            "properties": props,
+            "note": (
+                "User/cloud-project asset, resolved via the authenticated Earth "
+                "Engine API (not the public catalog). `properties` are this "
+                "asset's actual metadata values."
+            ),
+        }
+
+    def _ee_bbox_from_layer(self, ee, layer):
+        """Build an ee.Geometry.Rectangle (EPSG:4326) from a layer's extent."""
+        from qgis.core import QgsCoordinateReferenceSystem
+
+        extent = self._layer_extent_in_crs(
+            layer, QgsCoordinateReferenceSystem("EPSG:4326")
+        )
+        if extent is None:
+            return None
+        return ee.Geometry.Rectangle(
+            [
+                extent.xMinimum(),
+                extent.yMinimum(),
+                extent.xMaximum(),
+                extent.yMaximum(),
+            ]
+        )
+
+    @staticmethod
+    def _geom_vertex_count(geom):
+        try:
+            cg = geom.constGet()
+            return cg.nCoordinates() if cg is not None else 0
+        except Exception:
+            return 0
+
+    def _safe_feature_attrs(self, feat, fields):
+        out = {}
+        for field in fields:
+            name = field.name()
+            try:
+                val = feat[name]
+            except Exception:
+                continue
+            if val is None or isinstance(val, (int, float, str, bool)):
+                out[name] = val
+            else:
+                # Dates, QVariant nulls, etc. -> JSON-safe string.
+                out[name] = str(val)
+        return out
+
+    def _simplify_geoms(self, geoms, max_vertices):
+        """Simplify (geom, attrs) pairs until total vertices <= max_vertices.
+
+        Returns (simplified_pairs, total_vertices, succeeded).
+        """
+        import math
+
+        from qgis.core import QgsRectangle
+
+        bbox = None
+        for geom, _ in geoms:
+            b = geom.boundingBox()
+            if bbox is None:
+                bbox = QgsRectangle(b)
+            else:
+                bbox.combineExtentWith(b)
+        if bbox is None or bbox.isEmpty():
+            total = sum(self._geom_vertex_count(g) for g, _ in geoms)
+            return geoms, total, total <= max_vertices
+        diag = math.hypot(bbox.width(), bbox.height())
+        tol = (diag / 5000.0) if diag > 0 else 1e-4
+        simplified, total = geoms, sum(self._geom_vertex_count(g) for g, _ in geoms)
+        for _ in range(24):
+            if total <= max_vertices:
+                return simplified, total, True
+            simplified = []
+            total = 0
+            for geom, attrs in geoms:
+                sg = geom.simplify(tol)
+                if sg is None or sg.isEmpty():
+                    sg = geom
+                total += self._geom_vertex_count(sg)
+                simplified.append((sg, attrs))
+            tol *= 2
+        return simplified, total, total <= max_vertices
+
+    def _ee_inputs_from_layer(
+        self,
+        ee,
+        layer_id,
+        geometry_mode="auto",
+        max_vertices=5000,
+        max_features=2000,
+    ):
+        """Turn a QGIS layer into Earth Engine inputs.
+
+        Returns a dict with one of:
+        - {"error": str}                          unrecoverable
+        - {"needs_decision": True, "reason": ...} too big; caller asks the user
+        - {"region": ee.Geometry, "features": ee.FeatureCollection|None,
+           "mode_used": str, "zoom_layer": QgsMapLayer,
+           "vertex_count": int, "feature_count": int}
+        """
+        import json
+
+        from qgis.core import (
+            QgsCoordinateReferenceSystem,
+            QgsCoordinateTransform,
+            QgsGeometry,
+            QgsMapLayer,
+        )
+
+        project = QgsProject.instance()
+        layer = project.mapLayer(layer_id)
+        if layer is None:
+            return {"error": f"region_layer_id not found: {layer_id}"}
+
+        def _bbox_result():
+            rect = self._ee_bbox_from_layer(ee, layer)
+            if rect is None:
+                return {"error": "Layer has no usable extent for a region."}
+            return {
+                "region": rect,
+                "features": None,
+                "mode_used": "bbox",
+                "zoom_layer": layer,
+                "vertex_count": 4,
+                "feature_count": 0,
+            }
+
+        # Non-vector layers (rasters): only a bounding box is meaningful.
+        if layer.type() != QgsMapLayer.VectorLayer or geometry_mode == "bbox":
+            return _bbox_result()
+
+        feat_count = layer.featureCount()
+        abs_features = max(max_features * 5, 10000)
+        if geometry_mode == "auto" and feat_count > max_features:
+            return {
+                "needs_decision": True,
+                "reason": "too_many_features",
+                "feature_count": feat_count,
+                "max_features": max_features,
+            }
+        if feat_count > abs_features:
+            return {
+                "error": (
+                    f"Layer has {feat_count} features — too many to send to Earth "
+                    "Engine as exact geometry. Use geometry_mode='bbox' or a "
+                    "smaller layer."
+                )
+            }
+
+        dest = QgsCoordinateReferenceSystem("EPSG:4326")
+        src = layer.crs()
+        xform = None
+        if src.isValid() and dest.isValid() and src != dest:
+            xform = QgsCoordinateTransform(src, dest, project)
+
+        geoms = []
+        total_v = 0
+        fields = layer.fields()
+        for feat in layer.getFeatures():
+            geom = feat.geometry()
+            if geom is None or geom.isEmpty():
+                continue
+            if xform is not None:
+                geom = QgsGeometry(geom)
+                try:
+                    geom.transform(xform)
+                except Exception:
+                    continue
+            total_v += self._geom_vertex_count(geom)
+            geoms.append((geom, self._safe_feature_attrs(feat, fields)))
+            if geometry_mode == "auto" and total_v > max_vertices:
+                return {
+                    "needs_decision": True,
+                    "reason": "geometry_too_large",
+                    "vertex_count_at_least": total_v,
+                    "max_vertices": max_vertices,
+                    "feature_count": feat_count,
+                }
+
+        if not geoms:
+            return _bbox_result()
+
+        mode_used = "exact"
+        if geometry_mode == "simplify" and total_v > max_vertices:
+            geoms, total_v, ok = self._simplify_geoms(geoms, max_vertices)
+            mode_used = "simplified"
+            if not ok:
+                return {
+                    "needs_decision": True,
+                    "reason": "geometry_too_large_after_simplify",
+                    "vertex_count_at_least": total_v,
+                    "max_vertices": max_vertices,
+                }
+
+        abs_vertices = max(max_vertices * 10, 50000)
+        if total_v > abs_vertices:
+            return {
+                "error": (
+                    f"Geometry has ~{total_v} vertices — too many for inline Earth "
+                    "Engine. Use geometry_mode='bbox' or 'simplify'."
+                )
+            }
+
+        ee_features = []
+        for geom, attrs in geoms:
+            try:
+                gj = json.loads(geom.asJson())
+                ee_features.append(ee.Feature(ee.Geometry(gj), attrs))
+            except Exception:
+                continue
+        if not ee_features:
+            return _bbox_result()
+        fc = ee.FeatureCollection(ee_features)
+        return {
+            "region": fc.geometry(),
+            "features": fc,
+            "mode_used": mode_used,
+            "zoom_layer": layer,
+            "vertex_count": total_v,
+            "feature_count": len(ee_features),
+        }
+
+    def gee_add_layer(
+        self,
+        code,
+        vis_params=None,
+        name="GEE layer",
+        region_layer_id=None,
+        zoom=True,
+        geometry_mode="auto",
+        max_vertices=5000,
+        max_features=2000,
+    ):
+        """Evaluate an Earth Engine expression and add the result to the canvas.
+
+        ``code`` runs with ``ee``, ``Map`` (ee_plugin), ``iface``, an optional
+        ``region`` (ee.Geometry derived from ``region_layer_id``), and
+        ``features`` (an ee.FeatureCollection of that layer's features, or
+        None) in scope, and must assign the ee object to ``result``.
+
+        ``geometry_mode`` controls how ``region_layer_id`` is converted:
+        ``auto`` uses the true geometry but returns ``needs_decision`` when the
+        layer is too large (so the caller can ask the user); ``exact`` forces
+        the true geometry (subject to hard ceilings); ``simplify`` reduces
+        vertices to fit; ``bbox`` uses the bounding box only.
+        """
+        try:
+            import ee
+        except Exception as exc:  # noqa: BLE001
+            return {
+                "ok": False,
+                "error": f"Earth Engine API not available: {exc}. Run gee_status first.",
+            }
+        try:
+            from ee_plugin import Map as EEMap
+        except Exception as exc:  # noqa: BLE001
+            return {
+                "ok": False,
+                "error": (
+                    "Google Earth Engine QGIS plugin (ee_plugin) is not installed: "
+                    f"{exc}. Install it from the QGIS Plugin Manager."
+                ),
+            }
+        try:
+            ee.Initialize()
+        except Exception:
+            pass  # may already be initialized; a real failure surfaces below
+        region, features, region_layer, mode_used = (None, None, None, None)
+        if region_layer_id:
+            try:
+                info = self._ee_inputs_from_layer(
+                    ee, region_layer_id, geometry_mode, max_vertices, max_features
+                )
+            except Exception as exc:  # noqa: BLE001
+                return {"ok": False, "error": f"Failed to build region: {exc}"}
+            if "error" in info:
+                return {"ok": False, "error": info["error"]}
+            if info.get("needs_decision"):
+                return self._gee_decision_payload(info)
+            region = info.get("region")
+            features = info.get("features")
+            region_layer = info.get("zoom_layer")
+            mode_used = info.get("mode_used")
+        ns = {
+            "ee": ee,
+            "Map": EEMap,
+            "iface": self.iface,
+            "region": region,
+            "features": features,
+            "result": None,
+        }
+        try:
+            exec(compile(code, "<gee_add_layer>", "exec"), ns)  # noqa: S102
+        except Exception as exc:  # noqa: BLE001
+            return {
+                "ok": False,
+                "error": f"Earth Engine code error: {type(exc).__name__}: {exc}",
+            }
+        obj = ns.get("result")
+        if obj is None:
+            return {
+                "ok": False,
+                "error": "Earth Engine code must assign the ee object to `result`.",
+            }
+        try:
+            EEMap.addLayer(obj, vis_params or {}, name)
+        except Exception as exc:  # noqa: BLE001
+            return {
+                "ok": False,
+                "error": f"Map.addLayer failed: {type(exc).__name__}: {exc}",
+            }
         self._canvas_dirty = True
-        return {"ok": True, "layer_id": layer.id(), "name": layer.name()}
+        # Find the layer ee_plugin just created (matched by name).
+        layer_id = None
+        for lyr in QgsProject.instance().mapLayers().values():
+            if lyr.name() == name:
+                layer_id = lyr.id()
+        zoomed = False
+        if zoom and region_layer is not None:
+            zoomed = self._zoom_to_layer(region_layer)
+        return {
+            "ok": True,
+            "name": name,
+            "layer_id": layer_id,
+            "zoomed": zoomed,
+            "geometry_mode": mode_used,
+        }
+
+    @staticmethod
+    def _gee_decision_payload(info):
+        """Turn an _ee_inputs_from_layer needs_decision into a tool result that
+        tells the model to ask the user how to handle an oversized layer."""
+        reason = info.get("reason")
+        if reason == "too_many_features":
+            detail = (
+                f"The layer has {info.get('feature_count')} features — more than "
+                f"the {info.get('max_features')} allowed for exact Earth Engine "
+                "geometry."
+            )
+        elif reason == "geometry_too_large_after_simplify":
+            detail = (
+                "Even after simplification the geometry stays above "
+                f"{info.get('max_vertices')} vertices."
+            )
+        else:  # geometry_too_large
+            detail = (
+                "The layer geometry exceeds "
+                f"{info.get('max_vertices')} vertices — too detailed to send "
+                "inline to Earth Engine."
+            )
+        return {
+            "ok": False,
+            "needs_decision": True,
+            "reason": reason,
+            "message": (
+                detail
+                + " Ask the user how to proceed, then call gee_add_layer again "
+                "with geometry_mode set to 'bbox' (bounding box, fastest), "
+                "'simplify' (reduce detail), or 'exact' (use full detail; may be "
+                "slow or rejected). You can also raise max_vertices/max_features."
+            ),
+            "options": ["bbox", "simplify", "exact"],
+            "feature_count": info.get("feature_count"),
+            "vertex_count_at_least": info.get("vertex_count_at_least"),
+            "max_vertices": info.get("max_vertices"),
+            "max_features": info.get("max_features"),
+        }
+
+    def _layer_removal_payload(self, layer):
+        return {"id": layer.id(), "name": layer.name()}
+
+    def remove_layer(self, layer_id=None, layer_name=None):
+        """Unload one map layer from the current project.
+
+        This removes the layer reference from QGIS only. It never deletes the
+        source dataset from disk, a database, or a remote service.
+        """
+        layer_id = layer_id.strip() if isinstance(layer_id, str) else layer_id
+        layer_name = layer_name.strip() if isinstance(layer_name, str) else layer_name
+        if bool(layer_id) == bool(layer_name):
+            return {
+                "ok": False,
+                "error": "Provide exactly one of layer_id or layer_name.",
+            }
+
+        project = QgsProject.instance()
+        if layer_id:
+            layer = project.mapLayer(layer_id)
+            if layer is None:
+                return {"ok": False, "error": f"Layer not found: {layer_id}"}
+        else:
+            exact = [
+                layer
+                for layer in project.mapLayers().values()
+                if layer.name() == layer_name
+            ]
+            matches = exact
+            if not matches:
+                lowered = layer_name.lower()
+                matches = [
+                    layer
+                    for layer in project.mapLayers().values()
+                    if layer.name().lower() == lowered
+                ]
+            if not matches:
+                return {"ok": False, "error": f"Layer not found: {layer_name}"}
+            if len(matches) > 1:
+                return {
+                    "ok": False,
+                    "error": (
+                        "Multiple layers match that name. Call remove_layer "
+                        "again with a specific layer_id."
+                    ),
+                    "matches": [self._layer_removal_payload(layer) for layer in matches],
+                }
+            layer = matches[0]
+
+        removed = self._layer_removal_payload(layer)
+        project.removeMapLayer(layer.id())
+        self._canvas_dirty = True
+        return {
+            "ok": True,
+            "removed_count": 1,
+            "removed": [removed],
+            "remaining_count": len(project.mapLayers()),
+        }
+
+    def clear_layers(self, confirm=False):
+        """Unload all map layers from the current project.
+
+        Requires confirm=True so the model cannot clear the canvas by accident.
+        Source datasets are not deleted.
+        """
+        if confirm is not True:
+            return {
+                "ok": False,
+                "error": "clear_layers requires confirm=true because it removes all loaded project layers.",
+            }
+
+        project = QgsProject.instance()
+        layers = list(project.mapLayers().values())
+        removed = [self._layer_removal_payload(layer) for layer in layers]
+        for layer in layers:
+            project.removeMapLayer(layer.id())
+        self._canvas_dirty = True
+        return {
+            "ok": True,
+            "removed_count": len(removed),
+            "removed": removed,
+            "remaining_count": len(project.mapLayers()),
+        }
 
     def save_project(self):
         ok = QgsProject.instance().write()
         return {"ok": bool(ok), "path": QgsProject.instance().fileName() or None}
 
-    def create_chart(self, layer_id, field_name, chart_type="bar", colors=None):
+    def web_fetch(self, url, max_length=500000, verify_ssl=True):
+        """Fetch a public URL via HTTP GET using the stdlib (urllib).
+
+        Requires external access permission via the existing guardrail.
+        Returns status, content-type, and the body (with JSON parsed when
+        the response claims to be JSON).
+
+        Set ``verify_ssl=False`` for servers with incomplete/self-signed
+        certificate chains."""
+        if not isinstance(url, str) or not url.strip():
+            return {"ok": False, "error": "url must be a non-empty string"}
+        if not url.lower().startswith(("http://", "https://")):
+            return {"ok": False, "error": "Only http:// and https:// URLs are supported"}
+        try:
+            max_length = int(max_length)
+        except (TypeError, ValueError):
+            max_length = 500000
+        max_length = max(1, min(max_length, 1_000_000))
+        verify_ssl = False if verify_ssl is False else True
+
+        import urllib.request
+        import json as _json
+        import ssl
+
+        start = time.perf_counter()
+        req = urllib.request.Request(url, method="GET")
+        ssl_context = ssl._create_unverified_context() if not verify_ssl else None
+        try:
+            with urllib.request.urlopen(req, timeout=30, context=ssl_context) as resp:
+                status = resp.getcode()
+                headers = dict(resp.headers)
+                content_type = headers.get("Content-Type", "")
+                body = resp.read(max_length + 1)
+                truncated = len(body) > max_length
+                if truncated:
+                    body = body[:max_length]
+                try:
+                    text = body.decode("utf-8")
+                except UnicodeDecodeError:
+                    try:
+                        text = body.decode("latin-1")
+                    except UnicodeDecodeError:
+                        text = body.decode("utf-8", errors="replace")
+                result = {
+                    "ok": True,
+                    "status": status,
+                    "url": url,
+                    "content_type": content_type,
+                    "length": len(body),
+                    "truncated": truncated,
+                    "body": text,
+                }
+                if "json" in content_type.lower():
+                    try:
+                        result["json"] = _json.loads(text)
+                    except ValueError:
+                        pass
+                log_event(
+                    "toolkit.web_fetch.end",
+                    url=url[:200],
+                    status=status,
+                    elapsed_ms=int((time.perf_counter() - start) * 1000),
+                    truncated=truncated,
+                )
+                return result
+        except urllib.error.HTTPError as exc:
+            log_event(
+                "toolkit.web_fetch.error",
+                url=url[:200],
+                status=exc.code,
+                elapsed_ms=int((time.perf_counter() - start) * 1000),
+                error=exc.reason,
+            )
+            return {"ok": False, "error": f"HTTP {exc.code}: {exc.reason}", "status": exc.code}
+        except urllib.error.URLError as exc:
+            reason = str(exc.reason)
+            hint = ""
+            if verify_ssl and ("SSL" in reason or "CERTIFICATE" in reason or "VERIFY" in reason):
+                hint = " (Hint: set verify_ssl=false if the server has an incomplete certificate chain.)"
+            log_event(
+                "toolkit.web_fetch.error",
+                url=url[:200],
+                elapsed_ms=int((time.perf_counter() - start) * 1000),
+                error=reason,
+            )
+            return {"ok": False, "error": f"URL error: {reason}{hint}"}
+        except Exception as exc:  # noqa: BLE001
+            log_event(
+                "toolkit.web_fetch.error",
+                url=url[:200],
+                elapsed_ms=int((time.perf_counter() - start) * 1000),
+                error_type=type(exc).__name__,
+                error=str(exc),
+            )
+            return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+
+    def create_chart(self, layer_id, field_name, chart_type="bar", colors=None, label_field=None):
         """Generate chart data from a vector layer field.
 
         Returns structured data for the chat dock to render as a chart.
@@ -1348,20 +2360,17 @@ class QgisToolkit:
         Optional ``colors`` is a list of hex strings applied to the
         data points in display order. The chart widget cycles the
         list if it has fewer entries than data points, and falls back
-        to its default grayscale palette when None or empty.
+        to its default A-to-B gradient when None or empty.
+
+        Optional ``label_field`` supplies readable display labels for
+        grouped/code values without changing the grouping field.
         """
         # Validate colors up front so the user gets a clear error
         # rather than a silent fallback. We accept both '#rrggbb' and
         # '#RGB' forms; case-insensitive.
-        clean_colors = []
-        if colors is not None:
-            for c in colors:
-                if not isinstance(c, str):
-                    return {"ok": False, "error": f"colors must be hex strings, got {c!r}"}
-                cs = c.strip()
-                if not (cs.startswith("#") and len(cs) in (4, 7)):
-                    return {"ok": False, "error": f"invalid color {c!r}: use '#rrggbb' or '#rgb'"}
-                clean_colors.append(cs)
+        clean_colors, color_error = _clean_chart_colors(colors)
+        if color_error:
+            return {"ok": False, "error": color_error}
         layer = QgsProject.instance().mapLayer(layer_id)
         if layer is None:
             return {"ok": False, "error": f"No layer with id {layer_id!r}"}
@@ -1372,14 +2381,21 @@ class QgisToolkit:
         field_idx = layer.fields().indexFromName(field_name)
         if field_idx == -1:
             return {"ok": False, "error": f"Field {field_name!r} not found"}
+        label_idx = -1
+        attr_names = [field_name]
+        if label_field:
+            label_idx = layer.fields().indexFromName(label_field)
+            if label_idx != -1 and label_field != field_name:
+                attr_names.append(label_field)
 
         # F9: pull only the one field, no geometry — cuts allocation for big layers.
         from qgis.core import QgsFeatureRequest
         req = QgsFeatureRequest().setFlags(_no_geometry_flag())
-        req.setSubsetOfAttributes([field_name], layer.fields())
+        req.setSubsetOfAttributes(attr_names, layer.fields())
         event, owner = self._cancel.register()
         try:
             values = {}
+            display_labels = {}
             feature_iter = layer.getFeatures(req)
             scanned = 0
             for i, feature in enumerate(feature_iter):
@@ -1392,6 +2408,10 @@ class QgisToolkit:
                 if val not in values:
                     values[val] = 0
                 values[val] += 1
+                if label_idx != -1 and val not in display_labels:
+                    display = attrs[label_idx] if label_idx < len(attrs) else None
+                    if not _is_blank_chart_label(display):
+                        display_labels[val] = display
                 scanned = i + 1
                 # Yield to the event loop every 100 features to prevent UI freeze
                 if i % EVENT_PUMP_INTERVAL == 0:
@@ -1402,7 +2422,10 @@ class QgisToolkit:
 
         # Sort by count
         sorted_items = sorted(values.items(), key=lambda x: x[1], reverse=True)[:20]  # top 20
-        data = [{"label": str(k), "value": v} for k, v in sorted_items]
+        data = [
+            _chart_row(display_labels.get(k, k), v, raw_label=k)
+            for k, v in sorted_items
+        ]
 
         result = {
             "ok": True,
@@ -1414,6 +2437,8 @@ class QgisToolkit:
             "scanned_features": scanned,
             "truncated": scanned >= DEFAULT_FEATURE_SCAN_LIMIT,
         }
+        if label_idx != -1:
+            result["label_field"] = label_field
         if clean_colors:
             result["colors"] = clean_colors
         return result
