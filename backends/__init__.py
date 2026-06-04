@@ -13,12 +13,12 @@ def build_backend(config, toolkit, executor, server_provider=None):
     from . import providers
 
     mode = config.get("connection_mode")
-    if mode == config_mod.MODE_CLI_TOOL:
+    if mode in (config_mod.MODE_CLI_TOOL, config_mod.MODE_SUBSCRIPTION):
         from .cli_backend import CliToolBackend
 
         return CliToolBackend(config, server_provider)
 
-    # API-key and subscription (custom) modes are format-aware:
+    # API-key and custom endpoint modes are format-aware:
     # pick the Anthropic or OpenAI-compatible in-process loop.
     pid = config.get("provider")
     p = providers.get_provider(pid)

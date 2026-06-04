@@ -1,4 +1,4 @@
-"""Drive an installed, already-logged-in agent CLI (Claude Code / OpenCode).
+"""Drive an installed, already-logged-in agent CLI.
 
 The plugin hosts a local MCP server (see ``server.mcp_server``); this backend
 spawns the CLI in headless mode pointed at that server, so the CLI's own agent
@@ -23,45 +23,294 @@ Reliability hardening
 
 import json
 import os
+import platform
 import select
+import shlex
 import shutil
 import subprocess
 import threading
 
 from .base import AgentBackend, AgentEvent, EventType
 
-# Fallback locations discovered on this machine, used if PATH lookup fails.
-_KNOWN_PATHS = {
-    "claude": [
-        "/Applications/cmux.app/Contents/Resources/bin/claude",
-        os.path.expanduser("~/.claude/local/claude"),
-    ],
-    "opencode": [
-        os.path.expanduser("~/.opencode/bin/opencode"),
-    ],
-    "codex": [
-        os.path.expanduser("~/.codex/bin/codex"),
-        "/opt/homebrew/bin/codex",
-        "/usr/local/bin/codex",
-    ],
-    "gemini": [
-        os.path.expanduser("~/.gemini/bin/gemini"),
-        "/opt/homebrew/bin/gemini",
-        "/usr/local/bin/gemini",
-    ],
-}
+
+CLI_AGENT_CATALOG = (
+    {
+        "id": "claude",
+        "label": "Claude Code",
+        "commands": ("claude",),
+        "credential_style": "Claude subscription or Anthropic credentials",
+        "warning": "Provider policy may treat third-party automation differently.",
+    },
+    {
+        "id": "codex",
+        "label": "Codex CLI",
+        "commands": ("codex",),
+        "credential_style": "OpenAI API key or ChatGPT account in Codex",
+    },
+    {
+        "id": "cursor",
+        "label": "Cursor Agent",
+        "commands": ("cursor-agent", "cursor"),
+        "credential_style": "Cursor account or configured provider keys",
+    },
+    {
+        "id": "gemini",
+        "label": "Gemini CLI",
+        "commands": ("gemini",),
+        "credential_style": "Google account or Gemini API key",
+    },
+    {
+        "id": "copilot",
+        "label": "GitHub Copilot CLI",
+        "commands": ("gh", "copilot"),
+        "credential_style": "GitHub Copilot subscription",
+    },
+    {
+        "id": "opencode",
+        "label": "OpenCode",
+        "commands": ("opencode",),
+        "credential_style": "Provider keys in OpenCode config",
+    },
+    {
+        "id": "qwen",
+        "label": "Qwen Code",
+        "commands": ("qwen",),
+        "credential_style": "DashScope or Qwen API key",
+    },
+    {
+        "id": "grok",
+        "label": "Grok",
+        "commands": ("grok",),
+        "credential_style": "xAI account or key",
+    },
+    {
+        "id": "hermes",
+        "label": "Hermes",
+        "commands": ("hermes",),
+        "credential_style": "Configured provider keys",
+    },
+    {
+        "id": "kimi",
+        "label": "Kimi CLI",
+        "commands": ("kimi",),
+        "credential_style": "Moonshot/Kimi API key",
+    },
+    {
+        "id": "devin",
+        "label": "Devin for Terminal",
+        "commands": ("devin",),
+        "credential_style": "Devin account",
+    },
+    {
+        "id": "deepseek_tui",
+        "label": "DeepSeek TUI",
+        "commands": ("deepseek", "deepseek-tui"),
+        "credential_style": "DeepSeek API key",
+    },
+    {
+        "id": "pi",
+        "label": "Pi",
+        "commands": ("pi",),
+        "credential_style": "Pi account",
+    },
+    {
+        "id": "mistral_vibe",
+        "label": "Mistral Vibe CLI",
+        "commands": ("mistral-vibe", "vibe"),
+        "credential_style": "Mistral API key",
+    },
+    {
+        "id": "kiro",
+        "label": "Kiro CLI",
+        "commands": ("kiro",),
+        "credential_style": "AWS credentials",
+    },
+    {
+        "id": "kilo",
+        "label": "Kilo",
+        "commands": ("kilo",),
+        "credential_style": "Configured provider keys",
+    },
+    {
+        "id": "qoder",
+        "label": "Qoder CLI",
+        "commands": ("qoder",),
+        "credential_style": "Qoder account or provider keys",
+    },
+)
+
+_AGENT_BY_ID = {agent["id"]: agent for agent in CLI_AGENT_CATALOG}
+
+
+def agent_by_id(agent_id):
+    """Return a CLI agent catalog entry by id, or None."""
+    return _AGENT_BY_ID.get(agent_id)
+
+
+def _is_usable_file(path):
+    return bool(path and os.path.exists(path) and os.access(path, os.X_OK))
+
+
+def _looks_like_agent_binary(path):
+    """Filter out launcher stubs that exist but immediately report missing tools."""
+    try:
+        result = subprocess.run(
+            [path, "--version"], capture_output=True, text=True, timeout=4,
+        )
+    except Exception:
+        return True
+    output = f"{result.stdout or ''}\n{result.stderr or ''}".lower()
+    if result.returncode == 127 and "not found in path" in output:
+        return False
+    return True
+
+
+def _unique_paths(paths):
+    seen = set()
+    for path in paths:
+        if not path:
+            continue
+        expanded = os.path.expanduser(os.path.expandvars(path))
+        key = os.path.normcase(os.path.abspath(expanded))
+        if key in seen:
+            continue
+        seen.add(key)
+        yield expanded
+
+
+def _windows_program_dirs():
+    yielded = False
+    for key in ("LOCALAPPDATA", "APPDATA", "ProgramFiles", "ProgramFiles(x86)", "ProgramData"):
+        value = os.environ.get(key)
+        if value:
+            yielded = True
+            yield value
+    userprofile = os.environ.get("USERPROFILE")
+    if userprofile:
+        yielded = True
+        yield os.path.join(userprofile, ".local", "bin")
+    if not yielded:
+        yield "~/.local/bin"
+        yield "~/AppData/Roaming/npm"
+        yield "~/AppData/Local/Programs"
+
+
+def _command_file_names(command, system=None):
+    system = system or platform.system()
+    if system == "Windows":
+        if command.lower().endswith((".exe", ".cmd", ".bat")):
+            return (command,)
+        return (f"{command}.exe", f"{command}.cmd", f"{command}.bat", command)
+    return (command,)
+
+
+def _candidate_paths(tool, command, system=None):
+    """Known install locations when QGIS launches without the user's shell PATH."""
+    system = system or platform.system()
+    names = _command_file_names(command, system)
+    paths = []
+
+    if system == "Windows":
+        for root in _windows_program_dirs():
+            for name in names:
+                paths.extend([
+                    os.path.join(root, name),
+                    os.path.join(root, "npm", name),
+                    os.path.join(root, "bin", name),
+                    os.path.join(root, "Programs", name),
+                    os.path.join(root, "Programs", tool, name),
+                    os.path.join(root, tool, name),
+                    os.path.join(root, "Claude", name),
+                    os.path.join(root, "ClaudeCode", name),
+                    os.path.join(root, "Anthropic", "Claude Code", name),
+                ])
+        return list(_unique_paths(paths))
+
+    home_roots = [
+        "~/.local/bin",
+        f"~/.{tool}/bin",
+        f"~/.{tool}/local",
+        "~/.npm-global/bin",
+        "~/node_modules/.bin",
+    ]
+    package_roots = [
+        "/opt/homebrew/bin",
+        "/usr/local/bin",
+        "/usr/bin",
+        "/snap/bin",
+    ]
+    if system == "Darwin":
+        package_roots.extend([
+            "/Applications/Claude.app/Contents/MacOS",
+            "/Applications/Claude Code.app/Contents/MacOS",
+        ])
+
+    for root in home_roots + package_roots:
+        for name in names:
+            paths.append(os.path.join(root, name))
+
+    if tool == "claude":
+        for name in names:
+            paths.extend([
+                os.path.join("~/.claude/local", name),
+                os.path.join("~/.local/share/claude", name),
+            ])
+    elif tool == "opencode":
+        for name in names:
+            paths.append(os.path.join("~/.opencode/bin", name))
+    elif tool == "gemini":
+        for name in names:
+            paths.append(os.path.join("~/.gemini/bin", name))
+    elif tool == "codex":
+        for name in names:
+            paths.append(os.path.join("~/.codex/bin", name))
+    elif tool == "pi":
+        for name in names:
+            paths.extend([
+                os.path.join("~/.pi/bin", name),
+                os.path.join("~/.local/share/pi", name),
+                os.path.join("/opt/homebrew/bin", name),
+                os.path.join("/opt/homebrew/Cellar/node", "*", "bin", name),
+            ])
+
+    return list(_unique_paths(paths))
 
 
 def _resolve_binary(tool, explicit_path):
-    if explicit_path and os.path.exists(explicit_path):
+    if explicit_path and _is_usable_file(explicit_path):
         return explicit_path
-    found = shutil.which(tool)
-    if found:
-        return found
-    for candidate in _KNOWN_PATHS.get(tool, []):
-        if os.path.exists(candidate):
-            return candidate
+    agent = agent_by_id(tool)
+    command_names = agent.get("commands", (tool,)) if agent else (tool,)
+    for command in command_names:
+        found = shutil.which(command)
+        if found and _looks_like_agent_binary(found):
+            return found
+        for candidate in _candidate_paths(tool, command):
+            if "*" in candidate:
+                import glob
+                expanded = sorted(glob.glob(candidate), reverse=True)
+            else:
+                expanded = [candidate]
+            for path in expanded:
+                if _is_usable_file(path) and _looks_like_agent_binary(path):
+                    return path
     return None
+
+
+def scan_cli_agents(path_overrides=None):
+    """Return catalog rows with detected path/install status."""
+    path_overrides = path_overrides or {}
+    rows = []
+    for index, agent in enumerate(CLI_AGENT_CATALOG):
+        row = dict(agent)
+        path = _resolve_binary(agent["id"], path_overrides.get(agent["id"], ""))
+        row["path"] = path or ""
+        row["real_path"] = os.path.realpath(path) if path else ""
+        row["installed"] = bool(path)
+        row["_catalog_index"] = index
+        rows.append(row)
+    rows.sort(key=lambda row: (not row["installed"], row["_catalog_index"]))
+    return rows
 
 
 class CliToolBackend(AgentBackend):
@@ -69,6 +318,10 @@ class CliToolBackend(AgentBackend):
         self.config = config
         self.tool = config.get("cli_tool")
         self.binary = _resolve_binary(self.tool, config.get("cli_path"))
+        try:
+            self.extra_args = shlex.split(config.get("cli_args") or "")
+        except ValueError:
+            self.extra_args = []
         # Zero-arg callable returning the running MCP server's base URL.
         self._server_provider = server_provider
         # synchronise mutations of _proc and _session_id across the
@@ -79,7 +332,9 @@ class CliToolBackend(AgentBackend):
 
     @property
     def label(self):
-        return f"CLI ({self.tool})"
+        agent = agent_by_id(self.tool)
+        label = agent["label"] if agent else self.tool
+        return f"CLI Agent ({label})"
 
     def validate(self):
         if self.binary is None:
@@ -103,26 +358,81 @@ class CliToolBackend(AgentBackend):
 
     def _check_login_cmd(self):
         """Return the command to check authentication status."""
-        if self.tool in ("claude", "opencode", "codex", "gemini"):
+        if self.tool == "claude":
+            return [self.binary, "auth", "status"]
+        if self.tool == "codex":
+            return [self.binary, "login", "status"]
+        if self.tool in ("opencode", "gemini"):
             return [self.binary, "status"]
-        return [self.binary, "status"]
+        return None
+
+    def _env_auth_status(self):
+        """Cheap readiness checks for CLIs that rely on provider env vars."""
+        keys_by_tool = {
+            "pi": (
+                "ANTHROPIC_API_KEY", "ANTHROPIC_OAUTH_TOKEN", "OPENAI_API_KEY",
+                "GEMINI_API_KEY", "DEEPSEEK_API_KEY", "XAI_API_KEY",
+                "OPENROUTER_API_KEY", "KIMI_API_KEY", "MISTRAL_API_KEY",
+            ),
+        }
+        keys = keys_by_tool.get(self.tool, ())
+        configured = [key for key in keys if os.environ.get(key)]
+        if configured:
+            return "ready", f"Env key configured: {configured[0]}"
+        if keys:
+            return "unsupported", "Auth check unavailable. Run the CLI directly to verify login or API keys."
+        return None
+
+    def auth_status(self):
+        """Return (state, detail) for the selected CLI's auth readiness.
+
+        ``state`` is one of: ``ready``, ``login_required``, ``unsupported``,
+        or ``missing``.
+        """
+        if not self.binary:
+            return "missing", "Binary not found"
+        env_status = self._env_auth_status()
+        if env_status:
+            return env_status
+        cmd = self._check_login_cmd()
+        if not cmd:
+            return "unsupported", "Auth check unavailable for this CLI."
+        try:
+            result = subprocess.run(
+                cmd,
+                capture_output=True, text=True, timeout=8,
+            )
+        except Exception as exc:  # noqa: BLE001
+            return "unsupported", str(exc)
+
+        output = (result.stdout or result.stderr or "").strip()
+        detail = output.splitlines()[0] if output else ""
+        if self.tool == "claude" and output.startswith("{"):
+            try:
+                payload = json.loads(output)
+                if payload.get("loggedIn") is True:
+                    auth_method = payload.get("authMethod") or "logged in"
+                    provider = payload.get("apiProvider") or ""
+                    detail = " · ".join(part for part in (auth_method, provider) if part)
+                elif payload.get("loggedIn") is False:
+                    detail = "Not logged in"
+            except Exception:
+                pass
+        if result.returncode == 0:
+            return "ready", detail or "Logged in"
+        if result.returncode in (1, 2) and detail:
+            return "login_required", detail
+        return "unsupported", detail or "No auth status command available"
 
     def check_login(self):
         """Return True if the CLI reports an active session."""
-        if not self.binary:
-            return False
-        try:
-            result = subprocess.run(
-                self._check_login_cmd(),
-                capture_output=True, text=True, timeout=8,
-            )
-            return result.returncode == 0 and bool(result.stdout.strip())
-        except Exception:
-            return False
+        return self.auth_status()[0] == "ready"
 
     def _login_cmd(self):
         """Return the command to open a browser login flow."""
-        if self.tool in ("claude", "opencode", "codex", "gemini"):
+        if self.tool == "claude":
+            return [self.binary, "auth", "login"]
+        if self.tool in ("opencode", "codex", "gemini"):
             return [self.binary, "login"]
         return [self.binary, "login"]
 
@@ -139,6 +449,33 @@ class CliToolBackend(AgentBackend):
             return True
         except Exception:
             return False
+
+    def test_cli(self):
+        """Run a lightweight smoke check for settings UI diagnostics."""
+        if not self.binary:
+            return False, "Binary not found"
+        commands = [
+            [self.binary, "--version"],
+            [self.binary, "version"],
+            [self.binary, "--help"],
+        ]
+        if self.tool == "copilot" and os.path.basename(self.binary) == "gh":
+            commands.insert(0, [self.binary, "copilot", "--help"])
+        last_err = ""
+        for cmd in commands:
+            try:
+                result = subprocess.run(
+                    cmd, capture_output=True, text=True, timeout=8,
+                )
+            except Exception as exc:  # noqa: BLE001
+                last_err = str(exc)
+                continue
+            output = (result.stdout or result.stderr or "").strip()
+            if result.returncode == 0:
+                return True, (output.splitlines()[0] if output else "OK")
+            if output:
+                last_err = output.splitlines()[0]
+        return False, last_err or "CLI did not respond successfully"
 
     # ------------------------------------------------------------------ #
     def _mcp_config_json(self, base_url):
@@ -190,9 +527,9 @@ class CliToolBackend(AgentBackend):
             ]
             if self._session_id:
                 cmd += ["--resume", self._session_id]
-            return cmd
+            return cmd + self.extra_args
         if self.tool == "opencode":
-            return [self.binary, "run", message]
+            return [self.binary, "run", message] + self.extra_args
         if self.tool == "codex":
             # Codex CLI (beta) — headless mode with MCP config
             cmd = [
@@ -202,12 +539,12 @@ class CliToolBackend(AgentBackend):
             ]
             if self._session_id:
                 cmd += ["--resume", self._session_id]
-            return cmd
+            return cmd + self.extra_args
         if self.tool == "gemini":
             # Gemini CLI — stream JSON output
-            return [self.binary, "run", message, "--format", "json"]
+            return [self.binary, "run", message, "--format", "json"] + self.extra_args
         # Fallback: run with message as the only argument
-        return [self.binary, message]
+        return [self.binary, message] + self.extra_args
 
     def send(self, message, history, emit, should_stop):
         err = self.validate()
@@ -338,6 +675,16 @@ class CliToolBackend(AgentBackend):
         except Exception:
             return ""
 
+    @staticmethod
+    def _close_process_pipes(proc):
+        for stream in (getattr(proc, "stdout", None), getattr(proc, "stderr", None)):
+            if stream is None:
+                continue
+            try:
+                stream.close()
+            except Exception:
+                pass
+
     def _finalize_process(self, proc):
         """Reap the child, escalating to SIGKILL if it refuses to die."""
         # bounded kill. Try terminate (SIGTERM), wait 5s, then kill.
@@ -356,6 +703,7 @@ class CliToolBackend(AgentBackend):
                 proc.wait(timeout=2)
             except Exception:
                 pass
+        self._close_process_pipes(proc)
         with self._lock:
             if self._proc is proc:
                 self._proc = None

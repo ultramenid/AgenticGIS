@@ -12,14 +12,15 @@ _GROUP = "AgenticGIS"
 MODE_CLI_TOOL = "cli_tool"          # use an installed, already-logged-in agent CLI
 MODE_API_KEY = "api_key"            # talk to the provider API directly with a key
 MODE_CUSTOM = "custom"              # any OpenAI-compatible or Anthropic-compatible endpoint
-MODE_SUBSCRIPTION = "subscription"  # OAuth / bearer-token session via ANTHROPIC_AUTH_TOKEN (no API key needed)
+MODE_SUBSCRIPTION = "subscription"  # legacy alias for older CLI-agent settings
 
 DEFAULTS = {
     "connection_mode": MODE_API_KEY,
     # CLI-tool mode
-    "cli_tool": "claude",          # "claude" | "opencode"
+    "cli_tool": "claude",
     "cli_path": "",                # explicit binary path; empty => auto-detect on PATH
-    # API / subscription mode
+    "cli_args": "",                # optional extra CLI flags for advanced users
+    # API-key mode
     "provider": "anthropic",
     "model": "claude-opus-4-8",
     "api_key": "",

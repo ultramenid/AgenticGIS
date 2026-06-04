@@ -3,10 +3,10 @@
 Three connection modes:
   1. API key       — pick a built-in provider or custom endpoint.
   2. Custom endpoint — any OpenAI- or Anthropic-compatible server.
-  3. Subscription   — use an installed CLI agent (Claude Code, OpenCode, …).
+  3. CLI Agent     — delegate to an installed local agent CLI.
 """
 
-from qgis.PyQt.QtCore import Qt, QThread, QTimer, pyqtSignal
+from qgis.PyQt.QtCore import Qt, QThread, pyqtSignal
 from qgis.PyQt.QtGui import QColor, QFont
 from qgis.PyQt.QtWidgets import (
     QComboBox,
@@ -30,6 +30,7 @@ from qgis.PyQt.QtWidgets import (
 )
 
 from .. import config as config_mod
+from ..backends.cli_backend import CLI_AGENT_CATALOG
 from ..backends import providers
 
 # ── Design tokens (matches ask_user_card.py) ──────────────────────────────────
@@ -52,13 +53,7 @@ _DANGER      = "#e05c5c"
 _MODE_LABELS = [
     ("API key", config_mod.MODE_API_KEY),
     ("Custom endpoint", config_mod.MODE_CUSTOM),
-    ("Subscription", config_mod.MODE_SUBSCRIPTION),
-]
-_CLI_AGENTS = [
-    ("claude", "Claude Code"),
-    ("opencode", "OpenCode"),
-    ("codex", "OpenAI Codex CLI"),
-    ("gemini", "Google Gemini CLI"),
+    ("CLI Agent", config_mod.MODE_CLI_TOOL),
 ]
 _FORMAT_LABELS = [
     ("OpenAI-compatible", "openai"),
@@ -111,6 +106,23 @@ _COMBO_SS = (
     f"  background: {_INPUT_BG}; color: {_TEXT};"
     f"  border: 1px solid {_BORDER};"
     f"  selection-background-color: {_BORDER}; outline: none;"
+    f"}}"
+)
+
+_LIST_SS = (
+    f"QListWidget {{"
+    f"  background: {_INPUT_BG}; color: {_TEXT};"
+    f"  border: 1px solid {_BORDER_SOFT}; border-radius: 6px;"
+    f"  outline: none; padding: 4px;"
+    f"}}"
+    f"QListWidget::item {{"
+    f"  padding: 7px 8px; border-radius: 4px;"
+    f"}}"
+    f"QListWidget::item:selected {{"
+    f"  background: {_BORDER}; color: {_TEXT};"
+    f"}}"
+    f"QListWidget::item:hover {{"
+    f"  background: {_SURFACE_HOV};"
     f"}}"
 )
 
@@ -660,33 +672,9 @@ class SettingsDialog(QDialog):
         self.stack.setStyleSheet("background: transparent; border: none;")
         self.stack.addWidget(self._api_key_panel())
         self.stack.addWidget(self._custom_panel())
-        self.stack.addWidget(self._subscription_panel())
+        self.stack.addWidget(self._cli_agent_panel())
         cb.addWidget(self.stack)
         body.addWidget(conn)
-
-        # ─ Advanced card (collapsible) ─
-        adv = _CollapsibleCard("Advanced", initially_expanded=False)
-        ab = adv.body()
-
-        form3 = QFormLayout()
-        form3.setSpacing(10)
-        form3.setContentsMargins(0, 0, 0, 0)
-        form3.setLabelAlignment(Qt.AlignLeft | Qt.AlignVCenter)
-
-        self.timeout_edit = _inp(QLineEdit())
-        self.timeout_edit.setPlaceholderText("60")
-        form3.addRow(_lbl("Main-thread timeout (s):"), self.timeout_edit)
-
-        self.proc_timeout_edit = _inp(QLineEdit())
-        self.proc_timeout_edit.setPlaceholderText("120")
-        form3.addRow(_lbl("Processing timeout (s):"), self.proc_timeout_edit)
-
-        self.poll_interval_edit = _inp(QLineEdit())
-        self.poll_interval_edit.setPlaceholderText("0.5")
-        form3.addRow(_lbl("MCP poll interval (s):"), self.poll_interval_edit)
-
-        ab.addLayout(form3)
-        body.addWidget(adv)
 
         body.addStretch(1)
 
@@ -726,13 +714,18 @@ class SettingsDialog(QDialog):
         self._update_connection_tab_labels()
 
     def _current_mode(self):
-        index = self.connection_tabs.currentIndex()
-        if index < 0 or index >= len(_MODE_LABELS):
-            index = 0
-        return _MODE_LABELS[index][1]
+        return getattr(self, "_pending_connection_mode", self.config.get("connection_mode"))
+
+    def _set_active_connection_mode(self, mode):
+        if mode == config_mod.MODE_SUBSCRIPTION:
+            mode = config_mod.MODE_CLI_TOOL
+        self._pending_connection_mode = mode
+        self._update_connection_tab_labels()
 
     def _active_connection_index(self):
-        mode = self.config.get("connection_mode")
+        mode = self._current_mode()
+        if mode == config_mod.MODE_SUBSCRIPTION:
+            mode = config_mod.MODE_CLI_TOOL
         return next((i for i, (_, value) in enumerate(_MODE_LABELS) if value == mode), 0)
 
     def _update_connection_tab_labels(self):
@@ -779,13 +772,13 @@ class SettingsDialog(QDialog):
             ),
         )
 
-        agent_label = self.cli_agent_combo.currentText() if hasattr(self, "cli_agent_combo") else ""
+        agent_label = self.cli_agent_name.text() if hasattr(self, "cli_agent_name") else ""
         cli_path = self.cli_path_edit.text().strip() if hasattr(self, "cli_path_edit") else ""
-        sub_text = "Subscription"
-        self.connection_tabs.setTabText(2, active_label(2, sub_text))
+        cli_text = "CLI Agent"
+        self.connection_tabs.setTabText(2, active_label(2, cli_text))
         self.connection_tabs.setTabToolTip(
             2,
-            "\n".join(part for part in (active_label(2, sub_text), agent_label, cli_path) if part),
+            "\n".join(part for part in (active_label(2, cli_text), agent_label, cli_path) if part),
         )
 
     @staticmethod
@@ -819,13 +812,18 @@ class SettingsDialog(QDialog):
         group.setVisible(False)
         return group
 
-    def _test_row(self, btn_attr, status_attr, mode):
+    def _test_row(self, btn_attr, status_attr, mode, use_btn_attr=None):
         row = QHBoxLayout()
         row.setSpacing(8)
         btn = _ghost_btn("Test connection")
         btn.clicked.connect(lambda: self._test_connection(mode))
         setattr(self, btn_attr, btn)
         row.addWidget(btn, 0)
+        if use_btn_attr:
+            use_btn = _ghost_btn("Use")
+            use_btn.clicked.connect(lambda _checked=False, m=mode: self._use_connection_mode(m))
+            setattr(self, use_btn_attr, use_btn)
+            row.addWidget(use_btn, 0)
         status = _lbl("", color=_TEXT_3, size=9)
         status.setWordWrap(True)
         setattr(self, status_attr, status)
@@ -865,7 +863,10 @@ class SettingsDialog(QDialog):
         self.provider_combo.currentIndexChanged.connect(self._on_provider_changed)
 
         col.addLayout(
-            self._test_row("api_test_btn", "api_status", config_mod.MODE_API_KEY)
+            self._test_row(
+                "api_test_btn", "api_status", config_mod.MODE_API_KEY,
+                use_btn_attr="api_use_btn",
+            )
         )
         self.api_model_group = self._model_group("model_picker")
         col.addWidget(self.api_model_group)
@@ -906,50 +907,112 @@ class SettingsDialog(QDialog):
         col.addWidget(form_w)
 
         col.addLayout(
-            self._test_row("custom_test_btn", "custom_status", config_mod.MODE_CUSTOM)
+            self._test_row(
+                "custom_test_btn", "custom_status", config_mod.MODE_CUSTOM,
+                use_btn_attr="custom_use_btn",
+            )
         )
         self.custom_model_group = self._model_group("custom_model_picker")
         col.addWidget(self.custom_model_group)
         return w
 
-    def _subscription_panel(self):
+    def _cli_agent_panel(self):
         w = QWidget()
         w.setStyleSheet("background: transparent;")
-        form = self._panel_form(w)
+        col = QVBoxLayout(w)
+        col.setContentsMargins(0, 4, 0, 4)
+        col.setSpacing(10)
 
-        self.cli_agent_combo = _cmb(QComboBox())
-        for slug, label in _CLI_AGENTS:
-            self.cli_agent_combo.addItem(label, slug)
-        self.cli_agent_combo.currentIndexChanged.connect(self._on_cli_agent_changed)
-        self.cli_agent_combo.currentIndexChanged.connect(self._update_connection_tab_labels)
-        form.addRow(_lbl("Agent:"), self.cli_agent_combo)
+        scan_row = QHBoxLayout()
+        scan_row.setSpacing(8)
+        self.cli_scan_btn = _ghost_btn("Scan")
+        self.cli_scan_btn.clicked.connect(self._scan_cli_agents)
+        scan_row.addWidget(self.cli_scan_btn, 0)
+        self.cli_rescan_btn = _ghost_btn("Rescan")
+        self.cli_rescan_btn.clicked.connect(self._scan_cli_agents)
+        scan_row.addWidget(self.cli_rescan_btn, 0)
+        self.cli_scan_status = _lbl("", color=_TEXT_3, size=9)
+        scan_row.addWidget(self.cli_scan_status, 1)
+        col.addLayout(scan_row)
 
-        login_row = QHBoxLayout()
-        login_row.setSpacing(6)
-        self.login_status = _lbl("Checking…", color=_TEXT_3)
-        login_row.addWidget(self.login_status, 1)
-        self.login_browser_btn = _ghost_btn("Login with Browser")
-        self.login_browser_btn.clicked.connect(self._login_browser)
-        login_row.addWidget(self.login_browser_btn)
-        form.addRow(_lbl("Login:"), login_row)
+        self.cli_agent_list = QListWidget()
+        self.cli_agent_list.setStyleSheet(_LIST_SS)
+        self.cli_agent_list.setMinimumHeight(190)
+        self.cli_agent_list.currentItemChanged.connect(self._on_cli_agent_selected)
+        col.addWidget(self.cli_agent_list)
+
+        details = QWidget()
+        details.setStyleSheet("background: transparent;")
+        form = self._panel_form(details)
+
+        self.cli_agent_name = _lbl("Select an agent", color=_TEXT, size=10)
+        form.addRow(_lbl("Selected:"), self.cli_agent_name)
+
+        self.cli_agent_credentials = _lbl("", color=_TEXT_3, size=9)
+        self.cli_agent_credentials.setWordWrap(True)
+        form.addRow(_lbl("Credentials:"), self.cli_agent_credentials)
+
+        self.cli_agent_warning = _lbl("", color=_WARN, size=9)
+        self.cli_agent_warning.setWordWrap(True)
+        self.cli_agent_warning.setVisible(False)
+        form.addRow(self.cli_agent_warning)
+
+        self.cli_auth_status = _lbl("Auth not checked", color=_TEXT_3, size=9)
+        self.cli_auth_status.setWordWrap(True)
+        form.addRow(_lbl("Auth:"), self.cli_auth_status)
 
         path_row = QHBoxLayout()
         path_row.setSpacing(6)
+        self._cli_path_is_override = False
+        self._syncing_cli_path = False
         self.cli_path_edit = _inp(QLineEdit())
         self.cli_path_edit.setPlaceholderText("Auto-detect on PATH (leave empty)")
-        self.cli_path_edit.editingFinished.connect(self._update_login_status)
+        self.cli_path_edit.editingFinished.connect(self._scan_cli_agents)
+        self.cli_path_edit.textEdited.connect(self._mark_cli_path_override)
         self.cli_path_edit.textChanged.connect(self._update_connection_tab_labels)
         path_row.addWidget(self.cli_path_edit, 1)
         browse_cli = _ghost_btn("Browse…")
         browse_cli.clicked.connect(self._browse_cli)
         path_row.addWidget(browse_cli)
-        form.addRow(_lbl("Binary path:"), path_row)
+        form.addRow(_lbl("Command path:"), path_row)
 
-        self.sub_status = _lbl("Uses the agent's existing login.", color=_TEXT_3, size=9, italic=True)
+        self.cli_resolved_path = _lbl("", color=_TEXT_3, size=9)
+        self.cli_resolved_path.setWordWrap(True)
+        self.cli_resolved_path.setVisible(False)
+        form.addRow(_lbl("Resolved:"), self.cli_resolved_path)
+
+        test_row = QHBoxLayout()
+        test_row.setSpacing(8)
+        self.cli_test_btn = _ghost_btn("Test binary")
+        self.cli_test_btn.clicked.connect(self._test_cli_agent)
+        test_row.addWidget(self.cli_test_btn, 0)
+        self.cli_auth_btn = _ghost_btn("Check auth")
+        self.cli_auth_btn.clicked.connect(self._check_cli_auth)
+        test_row.addWidget(self.cli_auth_btn, 0)
+        self.cli_use_btn = _ghost_btn("Use")
+        self.cli_use_btn.clicked.connect(self._use_cli_agent)
+        test_row.addWidget(self.cli_use_btn, 0)
+        self.cli_test_status = _lbl("", color=_TEXT_3, size=9)
+        self.cli_test_status.setWordWrap(True)
+        test_row.addWidget(self.cli_test_status, 1)
+        form.addRow(_lbl("Agent:"), test_row)
+
+        self.sub_status = _lbl(
+            "Delegates to the selected local CLI. AgenticGIS never reads OAuth tokens.",
+            color=_TEXT_3, size=9, italic=True,
+        )
         form.addRow(self.sub_status)
+        col.addWidget(details)
         return w
 
     # ── slots ─────────────────────────────────────────────────────────────────
+    def _use_connection_mode(self, mode):
+        self._set_active_connection_mode(mode)
+        if mode == config_mod.MODE_API_KEY:
+            self._set_status(self.api_status, "Using API key connection", _SUCCESS)
+        elif mode == config_mod.MODE_CUSTOM:
+            self._set_status(self.custom_status, "Using custom endpoint", _SUCCESS)
+
     def _on_provider_changed(self, index):
         pid = self.provider_combo.itemData(index)
         p = providers.get_provider(pid)
@@ -1069,76 +1132,192 @@ class SettingsDialog(QDialog):
     def _browse_cli(self):
         path, _ = QFileDialog.getOpenFileName(self, "Select agent CLI binary")
         if path:
+            self._cli_path_is_override = True
             self.cli_path_edit.setText(path)
-            self._update_login_status()
+            self._scan_cli_agents()
 
-    def _on_cli_agent_changed(self, _index):
-        self._update_login_status()
+    def _mark_cli_path_override(self, _text):
+        if getattr(self, "_syncing_cli_path", False):
+            return
+        self._cli_path_is_override = True
 
-    def _update_login_status(self):
-        from ..backends.cli_backend import _resolve_binary, CliToolBackend
+    def _selected_cli_agent_id(self):
+        item = self.cli_agent_list.currentItem() if hasattr(self, "cli_agent_list") else None
+        if item:
+            return item.data(Qt.UserRole)
+        return self.config.get("cli_tool") or "claude"
 
-        tool = self.cli_agent_combo.currentData()
-        path = self.cli_path_edit.text().strip()
-        binary = _resolve_binary(tool, path)
+    def _cli_path_overrides(self):
+        selected = self._selected_cli_agent_id()
+        path = self.cli_path_edit.text().strip() if hasattr(self, "cli_path_edit") else ""
+        if selected and path and getattr(self, "_cli_path_is_override", False):
+            return {selected: path}
+        return {}
 
-        if not binary:
-            self.login_status.setText("Binary not found")
-            self.login_status.setStyleSheet(f"color: {_DANGER}; background: transparent;")
-            self.login_browser_btn.setEnabled(False)
+    def _cli_scan_row(self, agent_id):
+        for row in getattr(self, "_cli_scan_rows", []):
+            if row.get("id") == agent_id:
+                return row
+        return None
+
+    def _select_cli_agent(self, agent_id):
+        for i in range(self.cli_agent_list.count()):
+            item = self.cli_agent_list.item(i)
+            if item.data(Qt.UserRole) == agent_id:
+                self.cli_agent_list.setCurrentRow(i)
+                return
+        if self.cli_agent_list.count():
+            self.cli_agent_list.setCurrentRow(0)
+
+    def _scan_cli_agents(self):
+        from ..backends.cli_backend import scan_cli_agents
+
+        selected = self._selected_cli_agent_id()
+        self._cli_scan_rows = scan_cli_agents(self._cli_path_overrides())
+        self._cli_scan_performed = True
+        self._fill_cli_agent_list(selected, scanned=True)
+
+    def _fill_cli_agent_list(self, selected, scanned):
+        self.cli_agent_list.blockSignals(True)
+        self.cli_agent_list.clear()
+        found = 0
+        for row in self._cli_scan_rows:
+            found += 1 if row.get("installed") else 0
+            status = "found" if row.get("installed") else ("missing" if scanned else "not scanned")
+            item = QListWidgetItem(f"{row['label']}  ·  {status}")
+            item.setData(Qt.UserRole, row["id"])
+            item.setForeground(QColor(_TEXT if row.get("installed") or not scanned else _TEXT_3))
+            self.cli_agent_list.addItem(item)
+        self.cli_agent_list.blockSignals(False)
+        self._select_cli_agent(selected)
+        if scanned:
+            self.cli_scan_status.setText(f"{found} of {len(self._cli_scan_rows)} agents found")
+        else:
+            self.cli_scan_status.setText("Open this tab or click Scan to detect installed CLIs.")
+        self.cli_scan_status.setStyleSheet(f"color: {_TEXT_3}; background: transparent;")
+        self._update_cli_agent_detail()
+
+    def _seed_cli_agents(self):
+        selected = self.config.get("cli_tool") or "claude"
+        self._cli_scan_performed = False
+        self._cli_scan_rows = [
+            dict(agent, path="", real_path="", installed=False, _catalog_index=index)
+            for index, agent in enumerate(CLI_AGENT_CATALOG)
+        ]
+        self._fill_cli_agent_list(selected, scanned=False)
+
+    def _on_cli_agent_selected(self, _current, _previous=None):
+        self.cli_test_status.setText("")
+        self.cli_auth_status.setText("Auth not checked")
+        self.cli_auth_status.setStyleSheet(f"color: {_TEXT_3}; background: transparent;")
+        self._cli_path_is_override = False
+        self._update_cli_agent_detail()
+        self._update_connection_tab_labels()
+
+    def _update_cli_agent_detail(self):
+        agent_id = self._selected_cli_agent_id()
+        row = self._cli_scan_row(agent_id)
+        if not row:
+            row = next((dict(agent) for agent in CLI_AGENT_CATALOG if agent["id"] == agent_id), None)
+        if not row:
             return
 
-        self.login_browser_btn.setEnabled(True)
-        self.login_status.setText("Checking…")
-        self.login_status.setStyleSheet(f"color: {_TEXT_3}; background: transparent;")
+        self.cli_agent_name.setText(row["label"])
+        self.cli_agent_credentials.setText(row.get("credential_style", ""))
+        warning = row.get("warning", "")
+        self.cli_agent_warning.setText(warning)
+        self.cli_agent_warning.setVisible(bool(warning))
 
-        backend = CliToolBackend(self.config, lambda: None)
-        backend.tool = tool
-        backend.binary = binary
+        scanned = getattr(self, "_cli_scan_performed", False)
+        detected = row.get("path", "") if scanned else ""
+        real_path = row.get("real_path", "")
+        self._syncing_cli_path = True
         try:
-            logged_in = backend.check_login()
-        except Exception:
-            logged_in = False
+            if not self._cli_path_is_override:
+                self.cli_path_edit.setText(detected)
+            self.cli_path_edit.setPlaceholderText("Auto-detect on PATH (leave empty)")
+        finally:
+            self._syncing_cli_path = False
 
-        if logged_in:
-            self.login_status.setText("Logged in")
-            self.login_status.setStyleSheet(f"color: {_SUCCESS}; background: transparent;")
-        else:
-            self.login_status.setText("Not logged in")
-            self.login_status.setStyleSheet(f"color: {_DANGER}; background: transparent;")
+        show_resolved = bool(real_path and detected and real_path != detected)
+        self.cli_resolved_path.setText(real_path if show_resolved else "")
+        self.cli_resolved_path.setVisible(show_resolved)
 
-    def _login_browser(self):
+        installed = bool(row.get("installed")) if scanned else False
+        has_path = bool(self.cli_path_edit.text().strip())
+        self.cli_test_btn.setEnabled(installed or has_path)
+        self.cli_auth_btn.setEnabled(installed or has_path)
+        self.cli_use_btn.setEnabled(True)
+
+    def _selected_cli_backend(self):
         from ..backends.cli_backend import _resolve_binary, CliToolBackend
 
-        tool = self.cli_agent_combo.currentData()
-        path = self.cli_path_edit.text().strip()
-        binary = _resolve_binary(tool, path)
+        agent_id = self._selected_cli_agent_id()
+        path = self.cli_path_edit.text().strip() if self._cli_path_is_override else ""
+        binary = _resolve_binary(agent_id, path)
         if not binary:
-            QMessageBox.warning(
-                self, "Binary not found",
-                f"Could not find the '{tool}' binary.\n"
-                "Set its path or make sure it is on PATH.",
-            )
+            return None
+        backend = CliToolBackend(self.config, lambda: None)
+        backend.tool = agent_id
+        backend.binary = binary
+        return backend
+
+    def _test_cli_agent(self):
+        backend = self._selected_cli_backend()
+        if backend is None:
+            self.cli_test_status.setText("Binary not found")
+            self.cli_test_status.setStyleSheet(f"color: {_DANGER}; background: transparent;")
             return
 
-        backend = CliToolBackend(self.config, lambda: None)
-        backend.tool = tool
-        backend.binary = binary
+        self.cli_test_status.setText("Testing…")
+        self.cli_test_status.setStyleSheet(f"color: {_TEXT_3}; background: transparent;")
+        ok, detail = backend.test_cli()
+        color = _SUCCESS if ok else _DANGER
+        prefix = "OK" if ok else "Failed"
+        self.cli_test_status.setText(f"{prefix} · {detail}")
+        self.cli_test_status.setStyleSheet(f"color: {color}; background: transparent;")
 
-        ok = backend.login_browser()
-        if ok:
-            QMessageBox.information(
-                self, "Browser login started",
-                "A browser window should have opened.\n"
-                "Complete the authentication, then check the status here.",
-            )
-            QTimer.singleShot(4000, self._update_login_status)
+    def _check_cli_auth(self):
+        backend = self._selected_cli_backend()
+        if backend is None:
+            self.cli_auth_status.setText("Binary not found")
+            self.cli_auth_status.setStyleSheet(f"color: {_DANGER}; background: transparent;")
+            return
+
+        self.cli_auth_status.setText("Checking…")
+        self.cli_auth_status.setStyleSheet(f"color: {_TEXT_3}; background: transparent;")
+        state, detail = backend.auth_status()
+        if state == "ready":
+            color = _SUCCESS
+            text = f"Ready · {detail}"
+        elif state == "login_required":
+            color = _WARN
+            text = f"Login required · {detail}"
+        elif state == "missing":
+            color = _DANGER
+            text = detail
         else:
-            QMessageBox.warning(self, "Login failed", "Could not start the browser login flow.")
+            color = _TEXT_3
+            text = f"Auth check unavailable · {detail}"
+        self.cli_auth_status.setText(text)
+        self.cli_auth_status.setStyleSheet(f"color: {color}; background: transparent;")
+
+    def _use_cli_agent(self):
+        self.connection_tabs.setCurrentIndex(2)
+        self._set_active_connection_mode(config_mod.MODE_CLI_TOOL)
+        agent_id = self._selected_cli_agent_id()
+        row = self._cli_scan_row(agent_id)
+        label = row.get("label", agent_id) if row else agent_id
+        self.cli_test_status.setText(f"Using {label}")
+        self.cli_test_status.setStyleSheet(f"color: {_SUCCESS}; background: transparent;")
+        self._update_connection_tab_labels()
 
     # ── load / save ───────────────────────────────────────────────────────────
     def _load(self):
         mode = self.config.get("connection_mode")
+        if mode == config_mod.MODE_SUBSCRIPTION:
+            mode = config_mod.MODE_CLI_TOOL
+        self._pending_connection_mode = mode
         index = next((i for i, (_, m) in enumerate(_MODE_LABELS) if m == mode), 0)
         self.connection_tabs.setCurrentIndex(index)
         self.stack.setCurrentIndex(index)
@@ -1158,11 +1337,15 @@ class SettingsDialog(QDialog):
         fidx = next((i for i, (_, v) in enumerate(_FORMAT_LABELS) if v == cfmt), 0)
         self.custom_format_combo.setCurrentIndex(fidx)
 
-        cli = self.config.get("cli_tool")
-        cidx = next((i for i, (s, _) in enumerate(_CLI_AGENTS) if s == cli), 0)
-        self.cli_agent_combo.setCurrentIndex(cidx)
-        self.cli_path_edit.setText(self.config.get("cli_path") or "")
-        self._update_login_status()
+        saved_cli_path = self.config.get("cli_path") or ""
+        self._cli_path_is_override = bool(saved_cli_path)
+        self._syncing_cli_path = True
+        try:
+            self.cli_path_edit.setText(saved_cli_path)
+        finally:
+            self._syncing_cli_path = False
+        self._seed_cli_agents()
+        self._select_cli_agent(self.config.get("cli_tool") or "claude")
 
         # Pre-fill saved models. If one already exists the user has connected
         # before, so reveal the dropdown without forcing a re-test (Test
@@ -1185,12 +1368,6 @@ class SettingsDialog(QDialog):
                 self.custom_status, "Test connection to refresh the model list.", _TEXT_3
             )
 
-        to_val = self.config.get("main_thread_timeout")
-        self.timeout_edit.setText("" if to_val is None else str(to_val))
-        pt_val = self.config.get("processing_timeout")
-        self.proc_timeout_edit.setText("" if pt_val is None else str(pt_val))
-        pi_val = self.config.get("mcp_poll_interval")
-        self.poll_interval_edit.setText("" if pi_val is None else str(pi_val))
         self._update_connection_tab_labels()
 
     def _save_and_accept(self):
@@ -1229,24 +1406,11 @@ class SettingsDialog(QDialog):
             self.config.set("custom_format", self.custom_format_combo.currentData())
             self.config.set("custom_model", custom_model)
             self.config.set("model", custom_model)
-        elif mode == config_mod.MODE_SUBSCRIPTION:
-            self.config.set("cli_tool", self.cli_agent_combo.currentData())
-            self.config.set("cli_path", self.cli_path_edit.text().strip())
-
-        try:
-            self.config.set("main_thread_timeout",
-                            float(self.timeout_edit.text().strip() or 60))
-        except ValueError:
-            self.config.set("main_thread_timeout", 60.0)
-        try:
-            self.config.set("processing_timeout",
-                            float(self.proc_timeout_edit.text().strip() or 0))
-        except ValueError:
-            self.config.set("processing_timeout", 0.0)
-        try:
-            self.config.set("mcp_poll_interval",
-                            float(self.poll_interval_edit.text().strip() or 0.5))
-        except ValueError:
-            self.config.set("mcp_poll_interval", 0.5)
+        elif mode == config_mod.MODE_CLI_TOOL:
+            self.config.set("cli_tool", self._selected_cli_agent_id())
+            self.config.set(
+                "cli_path",
+                self.cli_path_edit.text().strip() if self._cli_path_is_override else "",
+            )
 
         self.accept()

@@ -38,6 +38,7 @@ QGIS session
  ├─ Backend (pluggable)
  │    • API key    → Anthropic / OpenAI / Groq / Gemini / DeepSeek / Ollama / …
  │    • Custom URL → any OpenAI- or Anthropic-compatible endpoint
+ │    • CLI Agent  → installed local agent CLIs such as Codex, Gemini, OpenCode
  └─ Tools (every call runs on the QGIS main thread)
       run_pyqgis         arbitrary PyQGIS — layers, canvas, plugins, console
       run_processing     GDAL / GRASS / SAGA / native algorithms
@@ -58,13 +59,47 @@ there is nothing to install and it works on any QGIS Python.
    env var (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GROQ_API_KEY`, …).
 2. **Custom endpoint** — any OpenAI-compatible or Anthropic-compatible base URL
    (self-hosted, proxy, or another provider).
+3. **CLI Agent** — delegate to an installed local agent CLI. AgenticGIS scans
+   for supported CLIs, lets you test the selected agent, and never reads or
+   copies CLI-owned OAuth tokens.
+
+### CLI Agent guide
+
+CLI Agent mode is for users who already run a local agent CLI and want
+AgenticGIS to delegate QGIS work to that tool. The CLI keeps ownership of its
+own login, provider config, limits, and credentials.
+
+1. Install and log in to the CLI outside QGIS.
+2. In AgenticGIS, open **Settings → CLI Agent**.
+3. Click **Scan** or **Rescan** to detect installed CLIs.
+4. Select an agent and click **Test binary** to confirm the command runs.
+5. Click **Check auth** if that CLI exposes a safe status command. Some CLIs
+   do not; in that case verify login directly in the CLI.
+6. Click **Use**, then **Save**.
+
+Supported CLI catalog:
+
+`Claude Code`, `Codex CLI`, `Cursor Agent`, `Gemini CLI`, `GitHub Copilot CLI`,
+`OpenCode`, `Qwen Code`, `Grok`, `Hermes`, `Kimi CLI`, `Devin for Terminal`,
+`DeepSeek TUI`, `Pi`, `Mistral Vibe CLI`, `Kiro CLI`, `Kilo`, `Qoder CLI`.
+
+Notes:
+
+- AgenticGIS does not read CLI credential files or copy OAuth tokens.
+- CLI scanning is manual so Settings opens quickly.
+- Detected command paths are shown in the UI; if a command is a symlink, the
+  resolved binary path is shown too.
+- If auto-detection misses your CLI, use **Browse** to select the command
+  manually.
+- For Claude Code, auth checks use `claude auth status`; AgenticGIS does not
+  run the interactive `claude status` command.
 
 ## Requirements
 
 - **QGIS 3.22+** — that's the whole hard requirement. The plugin itself needs
   no Python packages (stdlib only).
-- **An LLM connection** — one of the connection modes above (an API key or
-  custom endpoint).
+- **An LLM connection** — one of the connection modes above (API key, custom
+  endpoint, or local CLI agent).
 - **Remote sensing (optional)** — to use the Google Earth Engine features you
   must have the **Google Earth Engine** QGIS plugin (`ee_plugin`) installed
   **and already authenticated**:
