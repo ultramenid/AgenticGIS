@@ -288,3 +288,74 @@ class OpenCodeAdapter(CliAdapter):
                 session_id=sid,
             )
         return None
+
+
+class CursorAdapter(CliAdapter):
+    """Cursor Agent — ``-p`` with ``--output-format json``."""
+
+    id = "cursor"
+    label = "Cursor Agent"
+    commands = ("cursor-agent", "cursor")
+    credential_style = "Cursor account or configured provider keys"
+
+    def build_command(self, *, binary, prompt, extra_args, runtime_dir):
+        base = os.path.basename(binary or "")
+        if base.startswith("cursor") and not base.startswith("cursor-agent"):
+            return [
+                binary, "agent", "-p", prompt, *extra_args,
+                "--output-format", "json",
+            ]
+        return [
+            binary, "-p", prompt, *extra_args,
+            "--output-format", "json",
+        ]
+
+
+class GeminiAdapter(CliAdapter):
+    """Gemini CLI — ``-p`` with ``--output-format json``."""
+
+    id = "gemini"
+    label = "Gemini CLI"
+    commands = ("gemini",)
+    credential_style = "Google account or Gemini API key"
+
+    auth_status_args = ("status",)
+    login_args = ("login",)
+
+    def build_command(self, *, binary, prompt, extra_args, runtime_dir):
+        return [
+            binary, "-p", prompt, *extra_args,
+            "--output-format", "json",
+            "--approval-mode", "default",
+            "--extensions", "none",
+        ]
+
+
+class QwenAdapter(CliAdapter):
+    """Qwen Code — ``--prompt`` with ``--output-format stream-json``."""
+
+    id = "qwen"
+    label = "Qwen Code"
+    commands = ("qwen",)
+    credential_style = "DashScope or Qwen API key"
+
+    def build_command(self, *, binary, prompt, extra_args, runtime_dir):
+        return [
+            binary, "--prompt", prompt, *extra_args,
+            "--output-format", "stream-json",
+        ]
+
+
+class KimiAdapter(CliAdapter):
+    """Kimi CLI — ``-p`` with ``--output-format stream-json``."""
+
+    id = "kimi"
+    label = "Kimi CLI"
+    commands = ("kimi",)
+    credential_style = "Moonshot/Kimi API key"
+
+    def build_command(self, *, binary, prompt, extra_args, runtime_dir):
+        return [
+            binary, "-p", prompt, *extra_args,
+            "--output-format", "stream-json",
+        ]
