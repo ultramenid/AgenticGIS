@@ -422,7 +422,7 @@ class ChatDock(QgsDockWidget):
         self.input.setPlaceholderText("Message AgenticGIS…")
         self.input.setAcceptRichText(False)
         self.input.setTabChangesFocus(True)
-        self.input.setLineWrapMode(QTextEdit.WidgetWidth)
+        self.input.setLineWrapMode(QTextEdit.LineWrapMode.WidgetWidth)
         self.input.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         self.input.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.input.setFixedHeight(self._input_min_h)
@@ -518,12 +518,12 @@ class ChatDock(QgsDockWidget):
 
     # ------------------------------------------------------------------ #
     def eventFilter(self, obj, event):
-        if obj is self.scroll.viewport() and event.type() == QEvent.Resize:
+        if obj is self.scroll.viewport() and event.type() == QEvent.Type.Resize:
             # Keep transcript widget exactly as wide as the viewport so no
             # child widget can cause horizontal overflow or sideways scrolling.
             self.transcript_widget.setFixedWidth(event.size().width())
             return False
-        if obj is self.input and event.type() == QEvent.KeyPress:
+        if obj is self.input and event.type() == QEvent.Type.KeyPress:
             if event.key() == Qt.Key.Key_Escape:
                 return self._handle_input_escape()
             if event.key() in (Qt.Key.Key_Up, Qt.Key.Key_Down) and event.modifiers() == Qt.KeyboardModifier.NoModifier:
@@ -599,7 +599,7 @@ class ChatDock(QgsDockWidget):
 
     def _set_input_text_from_history(self, text):
         self.input.setPlainText(text)
-        self.input.moveCursor(QTextCursor.End)
+        self.input.moveCursor(QTextCursor.MoveOperation.End)
         self._resize_input()
 
     def _handle_input_escape(self):
@@ -1206,7 +1206,7 @@ class ChatDock(QgsDockWidget):
     def _confirm_delete_session(self, session):
         dialog = self._build_delete_session_dialog(session)
         try:
-            return dialog.exec() == QDialog.Accepted
+            return dialog.exec() == QDialog.DialogCode.Accepted
         finally:
             dialog.deleteLater()
 
@@ -1260,7 +1260,7 @@ class ChatDock(QgsDockWidget):
 
     def _prompt_session_name(self, title, current=""):
         dialog, field = self._build_session_name_dialog(title, current)
-        if dialog.exec() != QDialog.Accepted:
+        if dialog.exec() != QDialog.DialogCode.Accepted:
             return None
         text = field.text()
         return (text or DEFAULT_SESSION_NAME).strip() or DEFAULT_SESSION_NAME

@@ -620,8 +620,8 @@ class MessageBubble(QFrame):
         self._entrance_anim.setDuration(160)
         self._entrance_anim.setStartValue(0.0)
         self._entrance_anim.setEndValue(1.0)
-        self._entrance_anim.setEasingCurve(QEasingCurve.OutCubic)
-        self._entrance_anim.start(QPropertyAnimation.DeleteWhenStopped)
+        self._entrance_anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+        self._entrance_anim.start(QAbstractAnimation.DeletionPolicy.DeleteWhenStopped)
 
     def hasHeightForWidth(self):
         return True

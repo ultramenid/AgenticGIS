@@ -76,7 +76,7 @@ class ChartWidget(QFrame):
 
     def paintEvent(self, event):
         painter = QPainter(self)
-        painter.setRenderHint(QPainter.Antialiasing)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
 
         try:
             painter.fillRect(self.rect(), QColor(_INPUT_BG))
@@ -194,7 +194,7 @@ class ChartWidget(QFrame):
 
         box = QRect(int(x), int(y), int(w), h)
         painter.save()
-        painter.setRenderHint(QPainter.Antialiasing)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         painter.setPen(QPen(QColor("#383838"), 1))
         painter.setBrush(QBrush(QColor("#202020")))
         painter.drawRoundedRect(box, 6, 6)
