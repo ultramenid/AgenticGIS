@@ -235,7 +235,7 @@ class CodeBlockWidget(QWidget):
         menu.setStyleSheet(_MENU_STYLE)
         copy_action = menu.addAction("Copy code")
         copy_action.triggered.connect(self._copy_code)
-        menu.exec_(self.editor.mapToGlobal(pos))
+        menu.exec(self.editor.mapToGlobal(pos))
 
     def set_code(self, code):
         self.code = code

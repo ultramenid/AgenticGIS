@@ -1008,7 +1008,7 @@ class ChatDock(QgsDockWidget):
     def _show_session_menu(self):
         pos = self._session_btn.mapToGlobal(self._session_btn.rect().bottomRight())
         pos.setX(pos.x() - self._session_menu.sizeHint().width())
-        self._session_menu.exec_(pos)
+        self._session_menu.exec(pos)
 
     def _show_startup_session_picker(self):
         dialog = QDialog(self)

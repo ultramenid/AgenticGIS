@@ -159,7 +159,7 @@ def _show_code_context_menu(parent, label, pos, text: str):
     if not blocks and not text:
         return
     menu = _build_code_context_menu(parent, blocks, copy_message=text)
-    menu.exec_(label.mapToGlobal(pos))
+    menu.exec(label.mapToGlobal(pos))
 
 
 def _table_cells(line: str) -> list:
