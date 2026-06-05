@@ -17,6 +17,7 @@ htmlcov/
 .claude/
 .vscode/
 .idea/
+.poolside/
 
 # OS
 .DS_Store
