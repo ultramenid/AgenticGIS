@@ -59,15 +59,16 @@ there is nothing to install and it works on any QGIS Python.
    env var (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GROQ_API_KEY`, …).
 2. **Custom endpoint** — any OpenAI-compatible or Anthropic-compatible base URL
    (self-hosted, proxy, or another provider).
-3. **CLI Agent** — delegate to an installed local agent CLI. AgenticGIS scans
-   for supported CLIs, lets you test the selected agent, and never reads or
-   copies CLI-owned OAuth tokens.
+3. **CLI Agent** — use an installed local agent CLI as the model connection.
+   AgenticGIS scans for supported CLIs, lets you test the selected agent, runs
+   QGIS tools itself, and never reads or copies CLI-owned OAuth tokens.
 
 ### CLI Agent guide
 
 CLI Agent mode is for users who already run a local agent CLI and want
-AgenticGIS to delegate QGIS work to that tool. The CLI keeps ownership of its
-own login, provider config, limits, and credentials.
+AgenticGIS to use that CLI as the LLM connection. The CLI keeps ownership of
+its own login, provider config, limits, and credentials; AgenticGIS keeps QGIS
+tool execution inside the plugin process.
 
 1. Install and log in to the CLI outside QGIS.
 2. In AgenticGIS, open **Settings → CLI Agent**.
@@ -235,3 +236,14 @@ backup. Two guardrails apply:
 
 Layer-removal tools only unload layers from the project — they never delete
 source files.
+
+## Roadmap
+
+Features planned for future releases:
+
+- **Custom skills** — user-defined tool bundles that extend the agent's
+  capabilities beyond the built-in set.
+- **MCP server connectivity** — connect to external Model Context Protocol
+  servers for additional tools and data sources.
+- **And more** — ongoing improvements to performance, stability, and
+  you decide.
