@@ -92,7 +92,8 @@ class ApiBackend(AgentBackend):
         for _ in agent_iteration_steps(max_iters):
             if should_stop():
                 emit(AgentEvent(EventType.THINKING, {"text": "Stopped."}))
-                break
+                emit(AgentEvent(EventType.DONE))
+                return messages
 
             if should_compact(messages, model or ""):
                 messages = self._compact_history(messages, emit, should_stop)
@@ -128,11 +129,13 @@ class ApiBackend(AgentBackend):
             tool_results = []
             for tu in tool_uses:
                 if should_stop():
+                    emit(AgentEvent(EventType.DONE))
                     return messages
                 payload, is_error, is_cancelled, _result = _dispatch_one_tool(
                     self.toolkit, self.executor, tu["name"], tu["input"], emit, should_stop
                 )
                 if should_stop() or is_cancelled:
+                    emit(AgentEvent(EventType.DONE))
                     return messages
                 tool_results.append(
                     {

@@ -275,7 +275,8 @@ class OpenAIBackend(AgentBackend):
         for _ in agent_iteration_steps(max_iters):
             if should_stop():
                 emit(AgentEvent(EventType.THINKING, {"text": "Stopped."}))
-                break
+                emit(AgentEvent(EventType.DONE))
+                return messages
 
             if should_compact(messages, model or ""):
                 messages = self._compact_history(messages, emit, should_stop)
@@ -330,6 +331,7 @@ class OpenAIBackend(AgentBackend):
             # Dispatch tools and build tool result messages
             for tc in tool_calls:
                 if should_stop():
+                    emit(AgentEvent(EventType.DONE))
                     return messages
                 name = tc["function"]["name"]
                 args = json.loads(tc["function"]["arguments"])
@@ -337,6 +339,7 @@ class OpenAIBackend(AgentBackend):
                     self.toolkit, self.executor, name, args, emit, should_stop
                 )
                 if should_stop() or is_cancelled:
+                    emit(AgentEvent(EventType.DONE))
                     return messages
                 messages.append(
                     OpenAIHttpClient.build_tool_result_message(tc["id"], payload)
