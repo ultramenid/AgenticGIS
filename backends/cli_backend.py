@@ -37,6 +37,7 @@ from .base import AgentBackend, AgentEvent, EventType, _dispatch_one_tool
 from ..core import tools as tools_mod
 from .base import agent_iteration_steps
 from .openai_backend import DEFAULT_SYSTEM_PROMPT as AGENTICGIS_SYSTEM_PROMPT
+from .adapters import get_adapter
 
 
 CLI_AGENT_CATALOG = (
@@ -1625,12 +1626,12 @@ class CliToolBackend(AgentBackend):
     # Streaming I/O — single-threaded select() loop, robust JSONL parser #
     # ------------------------------------------------------------------ #
 
-    def _drain_process(self, proc, emit, should_stop):
-        """Read both pipes via ``select`` and emit parsed events.
+    def _collect_into_stream(self, proc, stream, should_stop):
+        """Read both pipes via ``select`` and feed lines into ``stream``.
 
         Replacing the two reader threads eliminates a deadlock class where
-        one pipe's kernel buffer (64 kB on macOS) fills before the other is
-        drained — the writer blocks, the reader thread blocks on
+        one pipe's kernel buffer (64 kB on macOS) fills before the other
+        is drained — the writer blocks, the reader thread blocks on
         ``readline``, and nothing moves. ``select`` notifies us whenever
         *any* pipe is readable.
         """
@@ -1639,15 +1640,14 @@ class CliToolBackend(AgentBackend):
         out_buf = b""
         err_acc = []
         poller_stopped = False
-        # Mutable cell for the CLI's session id (captured by _emit_line).
-        sid_holder = [self._session_id]
 
         while True:
             if should_stop():
                 poller_stopped = True
                 break
             if proc.poll() is not None:
-                out_buf = self._read_into(out_buf, stdout, emit, sid_holder) if stdout else out_buf
+                if stdout:
+                    out_buf = self._read_into_stream(out_buf, stdout, stream)
                 if stderr:
                     err_acc.append(self._read_all(stderr, None))
                 break
@@ -1655,27 +1655,25 @@ class CliToolBackend(AgentBackend):
                 rlist, _, _ = select.select([stdout, stderr], [], [], 0.2)
             except (OSError, ValueError):
                 break
-            for stream in rlist:
-                if stream is stdout:
-                    out_buf = self._read_into(out_buf, stdout, emit, sid_holder)
-                elif stream is stderr:
+            for stream_obj in rlist:
+                if stream_obj is stdout:
+                    out_buf = self._read_into_stream(out_buf, stdout, stream)
+                elif stream_obj is stderr:
                     err_acc.append(self._read_all(stderr, None))
 
         if poller_stopped:
             self._terminate_process_group(proc, kill=True)
 
         # Persist the session id for the next turn's --resume.
-        if sid_holder[0]:
-            self._session_id = sid_holder[0]
+        if stream.session_id:
+            self._session_id = stream.session_id
 
         # If stdout was closed before we drained, pick up any leftover
-        # partial line — Claude has been observed to omit a trailing
-        # newline on the final record.
+        # partial line.
         if out_buf.strip():
-            _emit_line(out_buf.decode("utf-8", "replace").rstrip("\r"),
-                       emit, sid_holder)
-            if sid_holder[0]:
-                self._session_id = sid_holder[0]
+            stream.feed_line(out_buf)
+            if stream.session_id:
+                self._session_id = stream.session_id
 
         if err_acc and not poller_stopped:
             try:
@@ -1685,16 +1683,45 @@ class CliToolBackend(AgentBackend):
             if rc not in (0, None):
                 joined = "\n".join(s for s in err_acc if s).strip()
                 if joined:
-                    emit(AgentEvent(EventType.ERROR, {"error": joined[:2000]}))
+                    stream.emit(AgentEvent(EventType.ERROR, {"error": joined[:2000]}))
+
+    def _run_stream(self, adapter, prompt, emit, should_stop):
+        """Build the CLI command, spawn the subprocess, run the
+        select()-driven reader, and return the populated NormalizingStream."""
+        cmd = adapter.build_command(
+            binary=self.binary,
+            prompt=prompt,
+            extra_args=self.extra_args,
+            runtime_dir=self._runtime_cwd(),
+        )
+        env = self._runtime_env()
+        cwd = self._runtime_cwd()
+        try:
+            with self._lock:
+                self._proc = subprocess.Popen(
+                    _subprocess_cmd(cmd),
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                    bufsize=0,
+                    env=env,
+                    cwd=cwd,
+                    start_new_session=True, close_fds=True,
+                    creationflags=_creation_flags(),
+                )
+        except Exception as exc:
+            emit(AgentEvent(EventType.ERROR, {"error": f"Failed to launch {self.tool}: {exc}"}))
+            stream = NormalizingStream(adapter, emit)
+            return stream
+        try:
+            stream = NormalizingStream(adapter, emit)
+            self._collect_into_stream(self._proc, stream, should_stop)
+        finally:
+            self._finalize_process(self._proc)
+        return stream
 
     @staticmethod
-    def _read_into(buf, stream, emit, sid_holder=None):
-        """Read whatever bytes are immediately available and parse whole
-        newline-terminated JSONL lines. Returns the (possibly partial)
-        trailing buffer.
-        """
+    def _read_into_stream(buf, stream_obj, normalizer):
         try:
-            chunk = stream.read(4096)
+            chunk = stream_obj.read(4096)
         except (OSError, ValueError):
             return buf
         if not chunk:
@@ -1704,9 +1731,8 @@ class CliToolBackend(AgentBackend):
         buf += chunk
         while b"\n" in buf:
             line, buf = buf.split(b"\n", 1)
-            text = line.decode("utf-8", "replace").rstrip("\r")
-            if text:
-                _emit_line(text, emit, sid_holder)
+            if line:
+                normalizer.feed_line(line)
         return buf
 
     @staticmethod
