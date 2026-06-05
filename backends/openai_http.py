@@ -171,7 +171,8 @@ class OpenAIHttpClient:
                     event = json.loads(data_text)
                 except json.JSONDecodeError:
                     continue
-                choice = event.get("choices", [{}])[0]
+                choices = event.get("choices") or [{}]
+                choice = choices[0]
                 delta = choice.get("delta", {})
                 if choice.get("finish_reason"):
                     finish_reason = choice["finish_reason"]

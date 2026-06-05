@@ -104,6 +104,47 @@ class TestOpenAIHttpClientCustomEndpoint(unittest.TestCase):
         self.assertEqual(len(blocks), 1)
         self.assertEqual(blocks[0], {"type": "text", "text": "Hello world"})
 
+    def test_empty_choices_list_does_not_crash(self):
+        """Some custom endpoints emit chunks with ``choices: []`` (e.g.
+        keep-alive pings or intermediate routing events).  The default
+        ``event.get("choices", [{}])`` is **not** enough — when the key
+        exists with an empty list the default is ignored and ``[0]`` on
+        the empty list raises *IndexError*.
+        """
+        lines = [
+            "data: " + json.dumps({"choices": []}) + "\n",
+            "data: " + json.dumps({
+                "choices": [{
+                    "delta": {"content": "Hello"},
+                    "finish_reason": None,
+                }]
+            }) + "\n",
+            "data: " + json.dumps({
+                "choices": [{
+                    "delta": {},
+                    "finish_reason": "stop",
+                }]
+            }) + "\n",
+            "data: [DONE]\n",
+        ]
+
+        client = OpenAIHttpClient(api_key="fake", base_url="http://localhost:9999")
+        texts = []
+
+        with self._patch_urlopen(lines):
+            blocks, finish_reason = client.stream_message(
+                model="test-model",
+                max_tokens=100,
+                system="",
+                tools=[],
+                messages=[],
+                on_text=texts.append,
+                should_stop=lambda: False,
+            )
+
+        self.assertEqual("".join(texts), "Hello")
+        self.assertEqual(finish_reason, "stop")
+
     def test_tool_calls_present_then_none_then_present(self):
         """A tool call may start, be interrupted by a ``null`` delta, then
         resume.  The client must collect the resumed tool call correctly.
