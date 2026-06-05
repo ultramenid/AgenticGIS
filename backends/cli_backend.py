@@ -215,6 +215,17 @@ def _opencode_config_json():
         "plugin": [],
         "skills": {"paths": [], "urls": []},
         "mcp": {},
+        "permission": {
+            "bash": "deny",
+            "edit": "deny",
+            "glob": "deny",
+            "grep": "deny",
+            "read": "deny",
+            "write": "deny",
+            "webfetch": "deny",
+            "task": "deny",
+            "skill": "deny",
+        },
     })
 
 
@@ -1095,16 +1106,27 @@ class CliToolBackend(AgentBackend):
         """Extract assistant text from common CLI JSONL/event wrappers."""
         if not output:
             return ""
+        tool_calls = []
+        seen_tool_calls = set()
         final_texts = []
         texts = []
         raw_non_json = []
         for event in self._json_objects_from_text(output):
+            call = self._tool_call_from_event(event)
+            if call:
+                key = json.dumps(call, sort_keys=True, default=str)
+                if key not in seen_tool_calls:
+                    seen_tool_calls.add(key)
+                    tool_calls.append(call)
+                continue
             extracted = self._text_from_event(event)
             if extracted and (not texts or texts[-1] != extracted):
                 if self._is_final_text_event(event):
                     final_texts.append(extracted)
                 else:
                     texts.append(extracted)
+        if tool_calls:
+            return json.dumps({"type": "tool_calls", "calls": tool_calls}, default=str)
         if final_texts:
             return final_texts[-1].strip()
         if texts:
@@ -1120,17 +1142,57 @@ class CliToolBackend(AgentBackend):
             except Exception:
                 raw_non_json.append(line)
                 continue
+            call = self._tool_call_from_event(event)
+            if call:
+                key = json.dumps(call, sort_keys=True, default=str)
+                if key not in seen_tool_calls:
+                    seen_tool_calls.add(key)
+                    tool_calls.append(call)
+                continue
             extracted = self._text_from_event(event)
             if extracted and (not texts or texts[-1] != extracted):
                 if self._is_final_text_event(event):
                     final_texts.append(extracted)
                 else:
                     texts.append(extracted)
+        if tool_calls:
+            return json.dumps({"type": "tool_calls", "calls": tool_calls}, default=str)
         if final_texts:
             return final_texts[-1].strip()
         if texts:
             return "\n".join(texts).strip()
         return "\n".join(raw_non_json).strip() or output.strip()
+
+    @staticmethod
+    def _tool_call_from_event(event):
+        """Convert opencode unavailable-tool events into AgenticGIS tool calls."""
+        if not isinstance(event, dict) or event.get("type") != "tool_use":
+            return None
+        part = event.get("part") or {}
+        if not isinstance(part, dict):
+            return None
+        state = part.get("state") or {}
+        if not isinstance(state, dict):
+            return None
+        raw_input = state.get("input") or {}
+        if not isinstance(raw_input, dict):
+            raw_input = {}
+
+        tool_name = raw_input.get("tool") or part.get("tool")
+        if tool_name == "invalid":
+            tool_name = raw_input.get("name")
+        if tool_name not in tools_mod.TOOL_BY_NAME:
+            return None
+
+        args = (
+            raw_input.get("arguments")
+            or raw_input.get("input")
+            or raw_input.get("args")
+            or {}
+        )
+        if not isinstance(args, dict):
+            args = {}
+        return {"name": tool_name, "arguments": args}
 
     @staticmethod
     def _is_final_text_event(event):
@@ -1142,6 +1204,19 @@ class CliToolBackend(AgentBackend):
         if etype.endswith(".completed") or etype.endswith("_completed"):
             return True
         return bool(event.get("final") or event.get("is_final"))
+
+    @staticmethod
+    def _is_non_text_event_type(etype):
+        return etype in {
+            "system",
+            "step-start",
+            "step_start",
+            "step-finish",
+            "step_finish",
+            "tool",
+            "tool-use",
+            "tool_use",
+        }
 
     @staticmethod
     def _looks_like_startup_noise(text):
@@ -1178,13 +1253,25 @@ class CliToolBackend(AgentBackend):
             return ""
         if "hookSpecificOutput" in event:
             return ""
+        etype = str(event.get("type") or event.get("event") or "").lower()
         if event.get("type") == "assistant":
             parts = []
             for block in event.get("message", {}).get("content", []):
                 if isinstance(block, dict) and block.get("type") == "text":
                     parts.append(block.get("text", ""))
             return "".join(parts).strip()
-        if event.get("type") in ("system", "step-start", "step-finish", "tool"):
+        part = event.get("part")
+        if isinstance(part, dict):
+            if part.get("type") == "text":
+                return str(part.get("text") or "").strip()
+            if self._is_non_text_event_type(etype) or self._is_non_text_event_type(
+                str(part.get("type") or "").lower()
+            ):
+                return ""
+            nested = self._text_from_event(part)
+            if nested:
+                return nested
+        if self._is_non_text_event_type(etype):
             return ""
         for key in ("text", "message", "content", "output", "result", "response"):
             value = event.get(key)
