@@ -1572,52 +1572,40 @@ class CliToolBackend(AgentBackend):
             emit(AgentEvent(EventType.ERROR, {"error": err}))
             return history
 
+        from .adapters import get_adapter
+        from ..core import tools as tools_mod
+
         messages = list(history or [])
         messages.append({"role": "user", "content": message})
         max_iters = self.config.get("max_iterations")
+        adapter = get_adapter(self.tool)
 
         for _ in agent_iteration_steps(max_iters):
             if should_stop():
                 emit(AgentEvent(EventType.THINKING, {"text": "Stopped."}))
                 return messages
 
-            response_text, error = self._run_model_proxy(messages, should_stop)
-            if error:
-                emit(AgentEvent(EventType.ERROR, {"error": error[:2000]}))
-                return messages
-            parsed = self._parse_proxy_response(response_text)
+            prompt = self._conversation_prompt(messages)
+            stream = self._run_stream(adapter, prompt, emit, should_stop)
 
-            if parsed["type"] == "final":
-                text = parsed.get("text", "")
-                if text:
-                    emit(AgentEvent(EventType.TEXT, {"text": text}))
-                messages.append({"role": "assistant", "content": text})
-                emit(AgentEvent(EventType.DONE))
-                return messages
-
-            calls = parsed.get("calls") or []
-            messages.append({"role": "assistant", "content": json.dumps(parsed, default=str)})
-            if not calls:
-                emit(AgentEvent(EventType.ERROR, {"error": "CLI returned an empty tool call."}))
-                return messages
-
-            for call in calls:
-                if should_stop():
-                    return messages
+            if stream.pending_tool_call is not None:
+                call = stream.pending_tool_call
                 name = call.get("name")
-                args = call.get("arguments", call.get("input", {}))
-                if not isinstance(args, dict):
-                    args = {}
-                payload, is_error, is_cancelled, _result = _dispatch_one_tool(
-                    self.toolkit, self.executor, name, args, emit, should_stop
-                )
-                if should_stop() or is_cancelled:
-                    return messages
-                messages.append({
-                    "role": "tool",
-                    "name": name,
-                    "content": payload,
-                })
+                args = call.get("arguments", {}) or {}
+                if name in tools_mod.TOOL_BY_NAME:
+                    payload, is_error, is_cancelled, _result = _dispatch_one_tool(
+                        self.toolkit, self.executor, name, args, emit, should_stop,
+                    )
+                    if should_stop() or is_cancelled:
+                        return messages
+                    messages.append({"role": "tool", "name": name, "content": payload})
+                    continue
+                # Non-AgenticGIS tool (e.g. Codex command_execution surfaced
+                # for UI display only). End the turn with the assistant's text.
+            if stream.final_text is not None:
+                messages.append({"role": "assistant", "content": stream.final_text})
+            emit(AgentEvent(EventType.DONE))
+            return messages
 
         emit(AgentEvent(EventType.ERROR, {"error": "CLI proxy reached the maximum tool iterations."}))
         return messages
