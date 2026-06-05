@@ -444,3 +444,49 @@ class CopilotAdapter(CliAdapter):
         if os.path.basename(binary or "") == "gh":
             return [[binary, "copilot", "--help"]]
         return []
+
+
+class DefaultAdapter(CliAdapter):
+    """Generic fallback for catalog entries without bespoke parsing.
+
+    Uses ``binary -p <prompt>`` for invocation and walks the well-known
+    top-level text keys for event parsing — same fallback shape that
+    ``_emit_line`` had at the end of the legacy code.
+    """
+
+    def parse_event(self, raw):
+        for key in ("text", "response", "content", "output", "result", "message"):
+            val = raw.get(key)
+            if isinstance(val, str) and val.strip():
+                return NormalizedEvent(text=val.strip(), is_final=True)
+        return None
+
+
+# Order matches CLI_AGENT_CATALOG in cli_backend.py. Catalog entries
+# that previously fell through to _build_default_command and the generic
+# _emit_line fallback now explicitly use DefaultAdapter.
+ADAPTERS: dict = {
+    "claude": ClaudeAdapter(),
+    "codex": CodexAdapter(),
+    "opencode": OpenCodeAdapter(),
+    "cursor": CursorAdapter(),
+    "gemini": GeminiAdapter(),
+    "qwen": QwenAdapter(),
+    "kimi": KimiAdapter(),
+    "devin": DevinAdapter(),
+    "kiro": KiroAdapter(),
+    "pi": PiAdapter(),
+    "copilot": CopilotAdapter(),
+    # Generic fallbacks (one instance is fine — stateless).
+    "grok": DefaultAdapter(),
+    "hermes": DefaultAdapter(),
+    "deepseek_tui": DefaultAdapter(),
+    "mistral_vibe": DefaultAdapter(),
+    "kilo": DefaultAdapter(),
+    "qoder": DefaultAdapter(),
+}
+
+
+def get_adapter(tool_id: str) -> CliAdapter:
+    """Return the registered adapter for ``tool_id``, or DefaultAdapter."""
+    return ADAPTERS.get(tool_id) or DefaultAdapter()
