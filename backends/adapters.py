@@ -269,13 +269,13 @@ class OpenCodeAdapter(CliAdapter):
         part = raw.get("part") or {}
         if not isinstance(part, dict):
             return None
+        sid = raw.get("session_id") or raw.get("sessionID") or ""
         ptype = part.get("type")
         if ptype == "text":
-            return NormalizedEvent(text=str(part.get("text") or "").strip())
+            return NormalizedEvent(text=str(part.get("text") or "").strip(), session_id=sid)
         if ptype == "tool":
             tool_name = part.get("tool", "")
             state = part.get("state") or {}
-            sid = raw.get("session_id") or raw.get("sessionID") or ""
             if tool_name == "invalid":
                 tool_name = (state.get("input") or {}).get("name", "")
             if not tool_name:
