@@ -135,7 +135,8 @@ class ClaudeAdapter(CliAdapter):
     auth_status_args = ("auth", "status")
     login_args = ("auth", "login")
 
-    def _auth_detail(self, output: str, default: str) -> str:
+    @staticmethod
+    def _auth_detail(output: str, default: str) -> str:
         if not output.startswith("{"):
             return default
         try:
@@ -150,7 +151,7 @@ class ClaudeAdapter(CliAdapter):
             return "Not logged in"
         return default
 
-    auth_detail_parser = staticmethod(_auth_detail)
+    auth_detail_parser = _auth_detail
 
     def build_command(self, *, binary, prompt, extra_args, runtime_dir):
         return [
