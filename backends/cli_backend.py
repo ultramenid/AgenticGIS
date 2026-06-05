@@ -574,9 +574,13 @@ def _windows_package_manager_bin_dirs():
     sub-path joining needed).  Checked in order: env-var-customised paths
     first, then well-known defaults.
     """
-    localappdata = os.environ.get("LOCALAPPDATA") or ""
-    appdata = os.environ.get("APPDATA") or ""
     userprofile = os.environ.get("USERPROFILE") or ""
+    localappdata = os.environ.get("LOCALAPPDATA") or (
+        os.path.join(userprofile, "AppData", "Local") if userprofile else ""
+    )
+    appdata = os.environ.get("APPDATA") or (
+        os.path.join(userprofile, "AppData", "Roaming") if userprofile else ""
+    )
     programfiles = os.environ.get("ProgramFiles") or ""
     programdata = os.environ.get("ProgramData") or ""
 
@@ -730,6 +734,11 @@ def _candidate_paths(tool, command, system=None):
                     os.path.join(root, "ClaudeCode", name),
                     os.path.join(root, "Anthropic", "Claude Code", name),
                 ])
+
+        # 4. Per-tool known install roots, e.g. ~/.codex/bin/codex.cmd.
+        for root in _EXTRA_CANDIDATE_ROOTS.get(tool, ()):
+            for name in names:
+                paths.append(os.path.join(root, name))
         return list(_unique_paths(paths))
 
     # 1. Package-manager shim/bin dirs (Volta, nvm, fnm, asdf, mise, pnpm, Yarn…)
