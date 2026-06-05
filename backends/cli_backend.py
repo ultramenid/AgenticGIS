@@ -206,6 +206,25 @@ def _subprocess_cmd(cmd):
     return list(cmd)
 
 
+def _creation_flags():
+    """Return ``creationflags`` that suppress the console window on Windows.
+
+    Without ``CREATE_NO_WINDOW`` (Win32 0x08000000), Windows briefly
+    allocates a console for every spawned CLI binary (codex.exe,
+    gemini.cmd, gh.exe, ...) and shows it as a flashing terminal popup,
+    even when ``stdout``/``stderr`` are captured. Returning 0 on
+    non-Windows keeps the default behaviour (which on POSIX does not
+    open a visible window).
+
+    The constant is referenced as ``subprocess.CREATE_NO_WINDOW`` on
+    Python 3.7+; the literal is used here as a fallback for type-checkers
+    that don't see the attribute.
+    """
+    if platform.system() == "Windows":
+        return getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
+    return 0
+
+
 def _decode_process_output(data):
     if not data:
         return ""
@@ -224,7 +243,9 @@ def _looks_like_agent_binary(path):
     """Filter out launcher stubs that exist but immediately report missing tools."""
     try:
         result = subprocess.run(
-            _subprocess_cmd([path, "--version"]), capture_output=True, timeout=4,
+            _subprocess_cmd([path, "--version"]),
+            capture_output=True, timeout=4,
+            creationflags=_creation_flags(),
         )
     except Exception:
         return True
@@ -308,7 +329,15 @@ def _runtime_json_file(name, content):
 
 
 def _build_default_command(backend, prompt):
-    return [backend.binary, prompt] + backend.extra_args
+    return [backend.binary, "-p", prompt, *backend.extra_args]
+
+
+def _build_kimi_command(backend, prompt):
+    return [
+        backend.binary, "-p", prompt,
+        *backend.extra_args,
+        "--output-format", "stream-json",
+    ]
 
 
 def _build_claude_command(backend, prompt):
@@ -546,6 +575,9 @@ _CLI_AGENT_PROFILES = {
         "env": _opencode_env,
     },
     "qwen": {"build_command": _build_qwen_command},
+    "kimi": {
+        "build_command": _build_kimi_command,
+    },
     "devin": {"build_command": _build_devin_command},
     "kiro": {"build_command": _build_kiro_command},
     "pi": {"build_command": _build_pi_command},
@@ -943,6 +975,81 @@ def scan_cli_agents(path_overrides=None):
     return rows
 
 
+class NormalizingStream:
+    """Reads raw JSONL lines from a CLI subprocess and emits AgentEvents.
+
+    The single bridge between a CLI's wire format and the AgentEvent
+    emit pipeline. ``send()`` reads ``final_text`` and
+    ``pending_tool_call`` from the stream after ``_collect_into_stream``
+    returns to drive the agent tool loop.
+    """
+
+    _STARTUP_NOISE_MARKERS = (
+        "hookSpecificOutput",
+        "SessionStart",
+        "<context_window_protection>",
+        "<EXTREMELY_IMPORTANT>",
+        "context-mode",
+        "superpowers",
+    )
+
+    def __init__(self, adapter, emit):
+        self.adapter = adapter
+        self.emit = emit
+        self.session_id = ""
+        self.final_text = None
+        self.pending_tool_call = None
+
+    @classmethod
+    def _is_startup_noise(cls, raw_bytes: bytes, raw_obj) -> bool:
+        if isinstance(raw_obj, dict) and "hookSpecificOutput" in raw_obj:
+            return True
+        for marker in cls._STARTUP_NOISE_MARKERS:
+            if marker in raw_bytes.decode("utf-8", "replace"):
+                return True
+        return False
+
+    def feed_line(self, raw_bytes: bytes) -> None:
+        try:
+            decoded = raw_bytes.decode("utf-8", "replace")
+            raw = json.loads(decoded)
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            return
+        if not isinstance(raw, dict):
+            return
+        if self._is_startup_noise(raw_bytes, raw):
+            return
+        norm = self.adapter.parse_event(raw)
+        if norm is None:
+            sid = raw.get("session_id") or raw.get("sessionID") or ""
+            if sid:
+                self.session_id = sid
+            return
+        if norm.session_id:
+            self.session_id = norm.session_id
+        if norm.is_error:
+            err_text = norm.text[:2000] if norm.text else ""
+            self.emit(AgentEvent(EventType.ERROR, {"error": err_text}))
+            return
+        if norm.text:
+            self.emit(AgentEvent(EventType.TEXT, {"text": norm.text}))
+        for call in norm.tool_calls:
+            if self.pending_tool_call is None:
+                self.pending_tool_call = call
+            self.emit(AgentEvent(EventType.TOOL_USE, {
+                "name": call["name"],
+                "input": call.get("arguments", {}),
+            }))
+            if "output" in call:
+                self.emit(AgentEvent(EventType.TOOL_RESULT, {
+                    "name": call["name"],
+                    "result": str(call["output"])[:4000],
+                    "is_error": bool(call.get("is_error", False)),
+                }))
+        if norm.is_final:
+            self.final_text = norm.text or self.final_text
+
+
 class CliToolBackend(AgentBackend):
     def __init__(self, config, toolkit=None, executor=None, server_provider=None):
         self.config = config
@@ -1028,6 +1135,7 @@ class CliToolBackend(AgentBackend):
             result = subprocess.run(
                 _subprocess_cmd(cmd),
                 capture_output=True, timeout=8,
+                creationflags=_creation_flags(),
             )
         except Exception as exc:  # noqa: BLE001
             return "unsupported", str(exc)
@@ -1061,6 +1169,7 @@ class CliToolBackend(AgentBackend):
                 _subprocess_cmd(self._login_cmd()),
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
+                creationflags=_creation_flags(),
             )
             return True
         except Exception:
@@ -1083,6 +1192,7 @@ class CliToolBackend(AgentBackend):
             try:
                 result = subprocess.run(
                     _subprocess_cmd(cmd), capture_output=True, timeout=8,
+                    creationflags=_creation_flags(),
                 )
             except Exception as exc:  # noqa: BLE001
                 last_err = str(exc)
@@ -1172,6 +1282,7 @@ class CliToolBackend(AgentBackend):
                     env=env,
                     cwd=cwd,
                     start_new_session=True, close_fds=True,
+                    creationflags=_creation_flags(),
                 )
         except Exception as exc:
             return "", f"Failed to launch {self.tool}: {exc}", False
