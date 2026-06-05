@@ -65,6 +65,55 @@ class CliAdapter:
     def parse_event(self, raw: dict) -> Optional[NormalizedEvent]:
         return None
 
+    def parse_protocol_text(self, text: str) -> Optional[NormalizedEvent]:
+        """Parse the AgenticGIS tool_calls protocol embedded in text.
+
+        The system prompt instructs the CLI to emit a single JSON object
+        of the form ``{"type":"tool_calls","calls":[{...}, ...]}`` when
+        it needs to call one or more AgenticGIS tools, and to use plain
+        text/markdown for final answers. When the LLM follows the
+        protocol, the JSON often appears inside the assistant's text
+        payload (e.g. as the ``text`` field of a Claude stream event).
+        Without this method, ``NormalizingStream`` would emit the raw
+        JSON as a TEXT chat message and the user would see the protocol
+        in their bubble.
+
+        Subclasses normally inherit this implementation. Override only
+        if a CLI has its own wire-level tool call format that should win
+        over the AgenticGIS protocol (the native format will already
+        have been handled by ``parse_event`` before this is called).
+        """
+        if not text:
+            return None
+        stripped = text.strip()
+        if not stripped.startswith("{"):
+            return None
+        try:
+            payload = json.loads(stripped)
+        except (json.JSONDecodeError, ValueError):
+            return None
+        if not isinstance(payload, dict):
+            return None
+        if payload.get("type") != "tool_calls":
+            return None
+        calls = payload.get("calls")
+        if not isinstance(calls, list) or not calls:
+            return None
+        tool_calls = []
+        for c in calls:
+            if not isinstance(c, dict):
+                continue
+            name = c.get("name")
+            if not isinstance(name, str) or not name:
+                continue
+            arguments = c.get("arguments", {}) or {}
+            if not isinstance(arguments, dict):
+                arguments = {}
+            tool_calls.append({"name": name, "arguments": arguments})
+        if not tool_calls:
+            return None
+        return NormalizedEvent(tool_calls=tool_calls, is_final=True)
+
     def env(self) -> dict:
         return {}
 

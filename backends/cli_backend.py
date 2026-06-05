@@ -808,7 +808,14 @@ class NormalizingStream:
             self.emit(AgentEvent(EventType.ERROR, {"error": err_text}))
             return
         if norm.text:
-            self.emit(AgentEvent(EventType.TEXT, {"text": norm.text}))
+            # If the assistant's text is actually the AgenticGIS
+            # tool_calls protocol JSON, convert it to a tool call
+            # rather than emitting the raw JSON as a chat message.
+            protocol_event = self.adapter.parse_protocol_text(norm.text)
+            if protocol_event is not None:
+                norm = protocol_event
+            else:
+                self.emit(AgentEvent(EventType.TEXT, {"text": norm.text}))
         for call in norm.tool_calls:
             if self.pending_tool_call is None:
                 self.pending_tool_call = call
