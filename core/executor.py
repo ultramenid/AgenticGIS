@@ -24,9 +24,10 @@ import threading
 import time
 import traceback
 
-from qgis.PyQt.QtCore import QObject, QThread, Qt, pyqtSignal
+from qgis.PyQt.QtCore import QObject, QThread, pyqtSignal
 
 from .dev_logging import log_event
+from .qt_compat import QUEUED_CONNECTION
 
 
 class _Job:
@@ -53,7 +54,7 @@ class MainThreadExecutor(QObject):
         self._lock = threading.Lock()
         self._job_seq = 0
         self._current_job_id = None
-        self._submitted.connect(self._execute, Qt.QueuedConnection)
+        self._submitted.connect(self._execute, QUEUED_CONNECTION)
 
     def _next_id(self):
         with self._lock:

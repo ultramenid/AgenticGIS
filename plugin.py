@@ -53,15 +53,14 @@ class AgenticGisPlugin:
     # ------------------------------------------------------------------ #
     def _ensure_dock(self):
         if self._dock is None:
-            from qgis.PyQt.QtCore import Qt
-
+            from .core.qt_compat import RIGHT_DOCK_WIDGET_AREA
             from .gui.chat_dock import ChatDock
 
             self._dock = ChatDock(self._get_backend, self._open_settings,
                                   self.request_cancel,
                                   toolkit=self.toolkit,
                                   parent=self.iface.mainWindow())
-            self.iface.addDockWidget(Qt.RightDockWidgetArea, self._dock)
+            self.iface.addDockWidget(RIGHT_DOCK_WIDGET_AREA, self._dock)
             self._dock.visibilityChanged.connect(
                 lambda visible: self._action.setChecked(visible)
             )

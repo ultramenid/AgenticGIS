@@ -31,6 +31,7 @@ from qgis.PyQt.QtWidgets import (
 )
 
 from ..backends.base import AgentEvent, EventType
+from ..core.qt_compat import QUEUED_CONNECTION
 from ..core.session_store import DEFAULT_SESSION_NAME, SessionStore
 from .agent_turn_bubble import AgentTurnBubble, _SPINNER_FRAMES
 from .chart_widget import ChartWidget
@@ -238,7 +239,7 @@ class ChatDock(QgsDockWidget):
         self._stream_render_timer.setSingleShot(True)
         self._stream_render_timer.timeout.connect(self._flush_stream_render)
         self._set_status("Ready", _SUCCESS, icon="✓")
-        self._ask_user_signal.connect(self._show_ask_user, Qt.QueuedConnection)
+        self._ask_user_signal.connect(self._show_ask_user, QUEUED_CONNECTION)
         if self._toolkit is not None:
             self._toolkit.set_ask_user_emitter(
                 self._emit_ask_user_threadsafe
