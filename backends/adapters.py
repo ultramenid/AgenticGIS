@@ -121,3 +121,68 @@ def _devin_config_json() -> str:
             "claude": False,
         },
     })
+
+
+class ClaudeAdapter(CliAdapter):
+    """Claude Code — ``stream-json`` over ``-p``."""
+
+    id = "claude"
+    label = "Claude Code"
+    commands = ("claude",)
+    credential_style = "Claude subscription or Anthropic credentials"
+    warning = "Provider policy may treat third-party automation differently."
+
+    auth_status_args = ("auth", "status")
+    login_args = ("auth", "login")
+
+    def _auth_detail(self, output: str, default: str) -> str:
+        if not output.startswith("{"):
+            return default
+        try:
+            payload = json.loads(output)
+        except Exception:
+            return default
+        if payload.get("loggedIn") is True:
+            auth_method = payload.get("authMethod") or "logged in"
+            provider = payload.get("apiProvider") or ""
+            return " · ".join(part for part in (auth_method, provider) if part)
+        if payload.get("loggedIn") is False:
+            return "Not logged in"
+        return default
+
+    auth_detail_parser = staticmethod(_auth_detail)
+
+    def build_command(self, *, binary, prompt, extra_args, runtime_dir):
+        return [
+            binary, "-p", prompt, *extra_args,
+            "--output-format", "stream-json", "--verbose",
+            "--setting-sources", "local", "--settings", "{}",
+            "--disable-slash-commands",
+            "--plugin-dir", _empty_runtime_dir("claude-empty-plugins"),
+            "--no-session-persistence",
+        ]
+
+    def parse_event(self, raw):
+        etype = raw.get("type")
+        sid = raw.get("session_id") or raw.get("sessionID") or ""
+        if etype == "assistant":
+            parts = [
+                b.get("text", "")
+                for b in raw.get("message", {}).get("content", [])
+                if isinstance(b, dict) and b.get("type") == "text"
+            ]
+            return NormalizedEvent(text="".join(parts), session_id=sid)
+        if etype == "user":
+            for b in raw.get("message", {}).get("content", []):
+                if isinstance(b, dict) and b.get("type") == "tool_result":
+                    return NormalizedEvent(
+                        tool_calls=[{
+                            "name": "tool",
+                            "arguments": {},
+                            "output": b.get("content", ""),
+                            "is_error": bool(b.get("is_error", False)),
+                        }],
+                        session_id=sid,
+                    )
+            return None
+        return None
