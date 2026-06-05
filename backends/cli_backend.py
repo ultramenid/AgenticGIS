@@ -33,17 +33,30 @@ import subprocess
 import tempfile
 import threading
 
-from .base import AgentBackend, AgentEvent, EventType, _dispatch_one_tool
 from ..core import tools as tools_mod
-from .base import agent_iteration_steps
-from .openai_backend import DEFAULT_SYSTEM_PROMPT as AGENTICGIS_SYSTEM_PROMPT
 from .adapters import (
-    ClaudeAdapter, CodexAdapter, CursorAdapter, GeminiAdapter,
-    OpenCodeAdapter, QwenAdapter, KimiAdapter, DevinAdapter,
-    KiroAdapter, PiAdapter, CopilotAdapter, DefaultAdapter,
+    ClaudeAdapter,
+    CodexAdapter,
+    CopilotAdapter,
+    CursorAdapter,
+    DefaultAdapter,
+    DevinAdapter,
+    GeminiAdapter,
+    KimiAdapter,
+    KiroAdapter,
+    OpenCodeAdapter,
+    PiAdapter,
+    QwenAdapter,
     get_adapter,
 )
-
+from .base import (
+    AgentBackend,
+    AgentEvent,
+    EventType,
+    _dispatch_one_tool,
+    agent_iteration_steps,
+)
+from .openai_backend import DEFAULT_SYSTEM_PROMPT as AGENTICGIS_SYSTEM_PROMPT
 
 CLI_AGENT_CATALOG = (
     {
@@ -170,6 +183,7 @@ CLI_AGENT_CATALOG = (
 
 _AGENT_BY_ID = {agent["id"]: agent for agent in CLI_AGENT_CATALOG}
 
+
 def agent_by_id(agent_id):
     """Return a CLI agent catalog entry by id, or None."""
     return _AGENT_BY_ID.get(agent_id)
@@ -267,7 +281,8 @@ def _looks_like_agent_binary(path):
     try:
         result = subprocess.run(
             _subprocess_cmd([path, "--version"]),
-            capture_output=True, timeout=4,
+            capture_output=True,
+            timeout=4,
             creationflags=_creation_flags(),
         )
     except Exception:
@@ -335,7 +350,7 @@ _RUNTIME_PATH_HINTS = (
     # System package managers
     "/opt/homebrew/bin",
     "/opt/homebrew/Cellar/node/*/bin",
-    "/opt/local/bin",        # MacPorts
+    "/opt/local/bin",  # MacPorts
     "/usr/local/bin",
     "/usr/bin",
     "/bin",
@@ -345,9 +360,15 @@ _RUNTIME_PATH_HINTS = (
 
 _ENV_AUTH_KEYS = {
     "pi": (
-        "ANTHROPIC_API_KEY", "ANTHROPIC_OAUTH_TOKEN", "OPENAI_API_KEY",
-        "GEMINI_API_KEY", "DEEPSEEK_API_KEY", "XAI_API_KEY",
-        "OPENROUTER_API_KEY", "KIMI_API_KEY", "MISTRAL_API_KEY",
+        "ANTHROPIC_API_KEY",
+        "ANTHROPIC_OAUTH_TOKEN",
+        "OPENAI_API_KEY",
+        "GEMINI_API_KEY",
+        "DEEPSEEK_API_KEY",
+        "XAI_API_KEY",
+        "OPENROUTER_API_KEY",
+        "KIMI_API_KEY",
+        "MISTRAL_API_KEY",
     ),
 }
 
@@ -376,6 +397,7 @@ def _existing_dirs(paths):
         expanded = _expand_candidate_path(path)
         if "*" in expanded:
             import glob
+
             candidates = glob.glob(expanded)
         else:
             candidates = [expanded]
@@ -420,7 +442,13 @@ def _scrub_child_env(env):
 
 def _windows_program_dirs():
     yielded = False
-    for key in ("LOCALAPPDATA", "APPDATA", "ProgramFiles", "ProgramFiles(x86)", "ProgramData"):
+    for key in (
+        "LOCALAPPDATA",
+        "APPDATA",
+        "ProgramFiles",
+        "ProgramFiles(x86)",
+        "ProgramData",
+    ):
         value = os.environ.get(key)
         if value:
             yielded = True
@@ -454,7 +482,9 @@ def _windows_package_manager_bin_dirs():
     programfiles = os.environ.get("ProgramFiles") or ""
     programdata = os.environ.get("ProgramData") or ""
 
-    npm_prefix = os.environ.get("NPM_CONFIG_PREFIX") or os.environ.get("npm_config_prefix") or ""
+    npm_prefix = (
+        os.environ.get("NPM_CONFIG_PREFIX") or os.environ.get("npm_config_prefix") or ""
+    )
     if npm_prefix:
         # Windows npm global shims live directly in the prefix. Some custom
         # prefixes still use a bin subdir, so check both.
@@ -483,11 +513,33 @@ def _windows_package_manager_bin_dirs():
             os.path.join(userprofile, ".npm-packages"),
             os.path.join(userprofile, ".npm-packages", "bin"),
             os.path.join(userprofile, ".local", "share", "mise", "shims"),
-            os.path.join(userprofile, ".local", "share", "mise", "installs", "npm-openai-codex", "*", "bin"),
-            os.path.join(userprofile, ".local", "share", "mise", "installs", "node", "*", "bin"),
+            os.path.join(
+                userprofile,
+                ".local",
+                "share",
+                "mise",
+                "installs",
+                "npm-openai-codex",
+                "*",
+                "bin",
+            ),
+            os.path.join(
+                userprofile, ".local", "share", "mise", "installs", "node", "*", "bin"
+            ),
             os.path.join(userprofile, ".nvm", "versions", "node", "*", "bin"),
-            os.path.join(userprofile, ".local", "share", "fnm", "node-versions", "*", "installation", "bin"),
-            os.path.join(userprofile, ".fnm", "node-versions", "*", "installation", "bin"),
+            os.path.join(
+                userprofile,
+                ".local",
+                "share",
+                "fnm",
+                "node-versions",
+                "*",
+                "installation",
+                "bin",
+            ),
+            os.path.join(
+                userprofile, ".fnm", "node-versions", "*", "installation", "bin"
+            ),
         ):
             yield path
 
@@ -648,24 +700,29 @@ def _candidate_paths(tool, command, system=None):
         nvm_home = os.environ.get("NVM_HOME")
         if nvm_home:
             import glob as _glob
-            for ver_dir in sorted(_glob.glob(os.path.join(nvm_home, "v*")), reverse=True):
+
+            for ver_dir in sorted(
+                _glob.glob(os.path.join(nvm_home, "v*")), reverse=True
+            ):
                 for name in names:
                     paths.append(os.path.join(ver_dir, name))
 
         # 3. Broader program-root dirs with common sub-path patterns.
         for root in _windows_program_dirs():
             for name in names:
-                paths.extend([
-                    os.path.join(root, name),
-                    os.path.join(root, "npm", name),
-                    os.path.join(root, "bin", name),
-                    os.path.join(root, "Programs", name),
-                    os.path.join(root, "Programs", tool, name),
-                    os.path.join(root, tool, name),
-                    os.path.join(root, "Claude", name),
-                    os.path.join(root, "ClaudeCode", name),
-                    os.path.join(root, "Anthropic", "Claude Code", name),
-                ])
+                paths.extend(
+                    [
+                        os.path.join(root, name),
+                        os.path.join(root, "npm", name),
+                        os.path.join(root, "bin", name),
+                        os.path.join(root, "Programs", name),
+                        os.path.join(root, "Programs", tool, name),
+                        os.path.join(root, tool, name),
+                        os.path.join(root, "Claude", name),
+                        os.path.join(root, "ClaudeCode", name),
+                        os.path.join(root, "Anthropic", "Claude Code", name),
+                    ]
+                )
 
         # 4. Per-tool known install roots, e.g. ~/.codex/bin/codex.cmd.
         for root in _EXTRA_CANDIDATE_ROOTS.get(tool, ()):
@@ -693,14 +750,16 @@ def _candidate_paths(tool, command, system=None):
         "/usr/local/bin",
         "/usr/bin",
         "/snap/bin",
-        "/opt/local/bin",    # MacPorts
+        "/opt/local/bin",  # MacPorts
     ]
     if system == "Darwin":
-        package_roots.extend([
-            "/opt/homebrew/Cellar/node/*/bin",
-            "/Applications/Claude.app/Contents/MacOS",
-            "/Applications/Claude Code.app/Contents/MacOS",
-        ])
+        package_roots.extend(
+            [
+                "/opt/homebrew/Cellar/node/*/bin",
+                "/Applications/Claude.app/Contents/MacOS",
+                "/Applications/Claude Code.app/Contents/MacOS",
+            ]
+        )
 
     for root in home_roots + package_roots:
         for name in names:
@@ -726,6 +785,7 @@ def _resolve_binary(tool, explicit_path):
         for candidate in _candidate_paths(tool, command):
             if "*" in candidate:
                 import glob
+
                 expanded = sorted(glob.glob(candidate), reverse=True)
             else:
                 expanded = [candidate]
@@ -797,10 +857,15 @@ class NormalizingStream:
                     for call in protocol.tool_calls:
                         if self.pending_tool_call is None:
                             self.pending_tool_call = call
-                        self.emit(AgentEvent(EventType.TOOL_USE, {
-                            "name": call["name"],
-                            "input": call.get("arguments", {}),
-                        }))
+                        self.emit(
+                            AgentEvent(
+                                EventType.TOOL_USE,
+                                {
+                                    "name": call["name"],
+                                    "input": call.get("arguments", {}),
+                                },
+                            )
+                        )
                     if protocol.is_final:
                         self.final_text = protocol.text or self.final_text
                 else:
@@ -835,16 +900,26 @@ class NormalizingStream:
         for call in norm.tool_calls:
             if self.pending_tool_call is None:
                 self.pending_tool_call = call
-            self.emit(AgentEvent(EventType.TOOL_USE, {
-                "name": call["name"],
-                "input": call.get("arguments", {}),
-            }))
+            self.emit(
+                AgentEvent(
+                    EventType.TOOL_USE,
+                    {
+                        "name": call["name"],
+                        "input": call.get("arguments", {}),
+                    },
+                )
+            )
             if "output" in call:
-                self.emit(AgentEvent(EventType.TOOL_RESULT, {
-                    "name": call["name"],
-                    "result": str(call["output"])[:4000],
-                    "is_error": bool(call.get("is_error", False)),
-                }))
+                self.emit(
+                    AgentEvent(
+                        EventType.TOOL_RESULT,
+                        {
+                            "name": call["name"],
+                            "result": str(call["output"])[:4000],
+                            "is_error": bool(call.get("is_error", False)),
+                        },
+                    )
+                )
         if norm.is_final:
             self.final_text = norm.text or self.final_text
 
@@ -877,8 +952,10 @@ class CliToolBackend(AgentBackend):
 
     def validate(self):
         if self.binary is None:
-            return (f"Could not find the '{self.tool}' binary. Set its path in "
-                    "Settings, or make sure it is on PATH.")
+            return (
+                f"Could not find the '{self.tool}' binary. Set its path in "
+                "Settings, or make sure it is on PATH."
+            )
         return None
 
     def export_session_state(self):
@@ -913,7 +990,10 @@ class CliToolBackend(AgentBackend):
         if configured:
             return "ready", f"Env key configured: {configured[0]}"
         if keys:
-            return "unsupported", "Auth check unavailable. Run the CLI directly to verify login or API keys."
+            return (
+                "unsupported",
+                "Auth check unavailable. Run the CLI directly to verify login or API keys.",
+            )
         return None
 
     def auth_status(self):
@@ -933,7 +1013,8 @@ class CliToolBackend(AgentBackend):
         try:
             result = subprocess.run(
                 _subprocess_cmd(cmd),
-                capture_output=True, timeout=8,
+                capture_output=True,
+                timeout=8,
                 creationflags=_creation_flags(),
             )
         except Exception as exc:  # noqa: BLE001
@@ -990,7 +1071,9 @@ class CliToolBackend(AgentBackend):
         for cmd in commands:
             try:
                 result = subprocess.run(
-                    _subprocess_cmd(cmd), capture_output=True, timeout=8,
+                    _subprocess_cmd(cmd),
+                    capture_output=True,
+                    timeout=8,
                     creationflags=_creation_flags(),
                 )
             except Exception as exc:  # noqa: BLE001
@@ -1022,7 +1105,7 @@ class CliToolBackend(AgentBackend):
             "Return JSON ONLY when you need to call one or more AgenticGIS "
             "tools. No markdown fences, no extra text around the JSON.\n"
             "To call one or more AgenticGIS tools:\n"
-            "{\"type\":\"tool_calls\",\"calls\":[{\"name\":\"list_layers\",\"arguments\":{}}]}\n"
+            '{"type":"tool_calls","calls":[{"name":"list_layers","arguments":{}}]}\n'
             "Use tool_calls when QGIS project data is needed. Use plain final "
             "text for ordinary conversation or once tool results are sufficient."
         )
@@ -1072,17 +1155,35 @@ class CliToolBackend(AgentBackend):
         return env
 
     def _runtime_cwd(self):
-        return _empty_runtime_dir(f"{self.tool or 'cli'}-workspace")
+        path = _empty_runtime_dir(f"{self.tool or 'cli'}-workspace")
+        # Some CLI agents (e.g. OpenCode) require the working directory to be
+        # a git repository. Initialise one lazily so they don't hang on startup.
+        git_dir = os.path.join(path, ".git")
+        if not os.path.isdir(git_dir):
+            try:
+                subprocess.run(
+                    ["git", "init"],
+                    cwd=path,
+                    capture_output=True,
+                    timeout=5,
+                    check=False,
+                )
+            except Exception:
+                pass
+        return path
 
     def _collect_process_output(self, cmd, env, cwd, should_stop):
         try:
             with self._lock:
                 self._proc = subprocess.Popen(
-                    _subprocess_cmd(cmd), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                    _subprocess_cmd(cmd),
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
                     bufsize=0,
                     env=env,
                     cwd=cwd,
-                    start_new_session=True, close_fds=True,
+                    start_new_session=True,
+                    close_fds=True,
                     creationflags=_creation_flags(),
                 )
         except Exception as exc:
@@ -1165,7 +1266,12 @@ class CliToolBackend(AgentBackend):
                 args = call.get("arguments", {}) or {}
                 if name in tools_mod.TOOL_BY_NAME:
                     payload, is_error, is_cancelled, _result = _dispatch_one_tool(
-                        self.toolkit, self.executor, name, args, emit, should_stop,
+                        self.toolkit,
+                        self.executor,
+                        name,
+                        args,
+                        emit,
+                        should_stop,
                     )
                     if should_stop() or is_cancelled:
                         emit(AgentEvent(EventType.DONE))
@@ -1179,7 +1285,12 @@ class CliToolBackend(AgentBackend):
             emit(AgentEvent(EventType.DONE))
             return messages
 
-        emit(AgentEvent(EventType.ERROR, {"error": "CLI proxy reached the maximum tool iterations."}))
+        emit(
+            AgentEvent(
+                EventType.ERROR,
+                {"error": "CLI proxy reached the maximum tool iterations."},
+            )
+        )
         emit(AgentEvent(EventType.DONE))
         return messages
 
@@ -1262,19 +1373,27 @@ class CliToolBackend(AgentBackend):
             with self._lock:
                 self._proc = subprocess.Popen(
                     _subprocess_cmd(cmd),
-                    stdin=subprocess.PIPE if stdin_data is not None else subprocess.DEVNULL,
-                    stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                    stdin=subprocess.PIPE
+                    if stdin_data is not None
+                    else subprocess.DEVNULL,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
                     bufsize=0,
                     env=env,
                     cwd=cwd,
-                    start_new_session=True, close_fds=True,
+                    start_new_session=True,
+                    close_fds=True,
                     creationflags=_creation_flags(),
                 )
             if stdin_data is not None:
                 self._proc.stdin.write(stdin_data.encode("utf-8"))
                 self._proc.stdin.close()
         except Exception as exc:
-            emit(AgentEvent(EventType.ERROR, {"error": f"Failed to launch {self.tool}: {exc}"}))
+            emit(
+                AgentEvent(
+                    EventType.ERROR, {"error": f"Failed to launch {self.tool}: {exc}"}
+                )
+            )
             stream = NormalizingStream(adapter, emit)
             return stream
         try:
