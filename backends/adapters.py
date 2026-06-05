@@ -231,12 +231,12 @@ class ClaudeAdapter(CliAdapter):
         if etype == "assistant":
             parts = [
                 b.get("text", "")
-                for b in raw.get("message", {}).get("content", [])
+                for b in (raw.get("message", {}).get("content") or [])
                 if isinstance(b, dict) and b.get("type") == "text"
             ]
             return NormalizedEvent(text="".join(parts), session_id=sid)
         if etype == "user":
-            for b in raw.get("message", {}).get("content", []):
+            for b in (raw.get("message", {}).get("content") or []):
                 if isinstance(b, dict) and b.get("type") == "tool_result":
                     return NormalizedEvent(
                         tool_calls=[{

@@ -187,7 +187,7 @@ class OpenAIHttpClient:
                         pass
 
                 # tool_call deltas
-                for tcd in delta.get("tool_calls", []):
+                for tcd in (delta.get("tool_calls") or []):
                     idx = tcd.get("index", 0)
                     if idx not in tool_calls:
                         tool_calls[idx] = {
