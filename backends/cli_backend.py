@@ -41,6 +41,7 @@ from .adapters import (
     ClaudeAdapter, CodexAdapter, CursorAdapter, GeminiAdapter,
     OpenCodeAdapter, QwenAdapter, KimiAdapter, DevinAdapter,
     KiroAdapter, PiAdapter, CopilotAdapter, DefaultAdapter,
+    get_adapter,
 )
 
 
@@ -310,211 +311,6 @@ def _empty_runtime_dir(name):
     return path
 
 
-def _opencode_config_json():
-    return json.dumps({
-        "$schema": "https://opencode.ai/config.json",
-        "instructions": [],
-        "plugin": [],
-        "skills": {"paths": [], "urls": []},
-        "mcp": {},
-        "permission": {
-            "bash": "deny",
-            "edit": "deny",
-            "glob": "deny",
-            "grep": "deny",
-            "read": "deny",
-            "write": "deny",
-            "webfetch": "deny",
-            "task": "deny",
-            "skill": "deny",
-        },
-    })
-
-
-def _devin_config_json():
-    return json.dumps({
-        "permissions": {"allow": [], "deny": [], "ask": []},
-        "mcpServers": {},
-        "read_config_from": {
-            "cursor": False,
-            "windsurf": False,
-            "claude": False,
-        },
-    })
-
-
-def _runtime_json_file(name, content):
-    path = os.path.join(_empty_runtime_dir(name), "config.json")
-    with open(path, "w", encoding="utf-8") as fh:
-        fh.write(content)
-    return path
-
-
-def _build_default_command(backend, prompt):
-    return [backend.binary, "-p", prompt, *backend.extra_args]
-
-
-def _build_kimi_command(backend, prompt):
-    return [
-        backend.binary, "-p", prompt,
-        *backend.extra_args,
-        "--output-format", "stream-json",
-    ]
-
-
-def _build_claude_command(backend, prompt):
-    return [
-        backend.binary, "-p", prompt,
-        *backend.extra_args,
-        "--output-format", "stream-json", "--verbose",
-        "--setting-sources", "local",
-        "--settings", "{}",
-        "--disable-slash-commands",
-        "--plugin-dir", _empty_runtime_dir("claude-empty-plugins"),
-        "--no-session-persistence",
-    ]
-
-
-def _build_opencode_command(backend, prompt):
-    return [
-        backend.binary, "run", prompt,
-        *backend.extra_args,
-        "--pure",
-        "--format", "json",
-    ]
-
-
-def _build_codex_command(backend, prompt):
-    return [
-        backend.binary, "exec",
-        *backend.extra_args,
-        "--ignore-user-config",
-        "--ignore-rules",
-        "--ephemeral",
-        "--skip-git-repo-check",
-        "--disable", "apps",
-        "--disable", "plugins",
-        "--cd", _empty_runtime_dir("codex-empty-workspace"),
-        "--json",
-        prompt,
-    ]
-
-
-def _build_cursor_command(backend, prompt):
-    base = os.path.basename(backend.binary or "")
-    if base.startswith("cursor") and not base.startswith("cursor-agent"):
-        return [
-            backend.binary, "agent", "-p", prompt,
-            *backend.extra_args,
-            "--output-format", "json",
-        ]
-    return [
-        backend.binary, "-p", prompt,
-        *backend.extra_args,
-        "--output-format", "json",
-    ]
-
-
-def _build_gemini_command(backend, prompt):
-    return [
-        backend.binary, "-p", prompt,
-        *backend.extra_args,
-        "--output-format", "json",
-        "--approval-mode", "default",
-        "--extensions", "none",
-    ]
-
-
-def _build_qwen_command(backend, prompt):
-    return [
-        backend.binary, "--prompt", prompt,
-        *backend.extra_args,
-        "--output-format", "stream-json",
-    ]
-
-
-def _build_devin_command(backend, prompt):
-    return [
-        backend.binary, "--print",
-        "--config", _runtime_json_file("devin-config", _devin_config_json()),
-        *backend.extra_args,
-        "--", prompt,
-    ]
-
-
-def _build_kiro_command(backend, prompt):
-    return [
-        backend.binary, "chat",
-        "--no-interactive",
-        *backend.extra_args,
-        prompt,
-    ]
-
-
-def _build_pi_command(backend, prompt):
-    return [
-        backend.binary,
-        "--print", prompt,
-        *backend.extra_args,
-        "--mode", "json",
-        "--no-extensions",
-        "--no-skills",
-        "--no-prompt-templates",
-        "--no-themes",
-        "--no-context-files",
-        "--no-session",
-        "--offline",
-    ]
-
-
-def _build_copilot_command(backend, prompt):
-    if os.path.basename(backend.binary or "") == "gh":
-        return [
-            backend.binary, "copilot", "suggest",
-            *backend.extra_args,
-            prompt,
-        ]
-    return [
-        backend.binary, "suggest",
-        *backend.extra_args,
-        prompt,
-    ]
-
-
-def _copilot_test_commands(backend):
-    if os.path.basename(backend.binary or "") == "gh":
-        return [[backend.binary, "copilot", "--help"]]
-    return []
-
-
-def _opencode_env():
-    opencode_config_path = _runtime_json_file("opencode-config", _opencode_config_json())
-    return {
-        "OPENCODE_CONFIG_CONTENT": _opencode_config_json(),
-        "OPENCODE_CONFIG": opencode_config_path,
-        "OPENCODE_CONFIG_DIR": os.path.dirname(opencode_config_path),
-        "OPENCODE_DISABLE_PROJECT_CONFIG": "1",
-        "OPENCODE_PURE": "1",
-        "OPENCODE_ENABLE_EXA": "0",
-    }
-
-
-def _parse_claude_auth_detail(output, default_detail):
-    if not output.startswith("{"):
-        return default_detail
-    try:
-        payload = json.loads(output)
-    except Exception:
-        return default_detail
-    if payload.get("loggedIn") is True:
-        auth_method = payload.get("authMethod") or "logged in"
-        provider = payload.get("apiProvider") or ""
-        return " · ".join(part for part in (auth_method, provider) if part)
-    if payload.get("loggedIn") is False:
-        return "Not logged in"
-    return default_detail
-
-
 _COMMON_RUNTIME_ENV = {
     "OPENCODE_DISABLE_DEFAULT_PLUGINS": "1",
     "OPENCODE_DISABLE_CLAUDE_CODE": "1",
@@ -570,48 +366,6 @@ _EXTRA_CANDIDATE_ROOTS = {
         "/opt/homebrew/Cellar/node/*/bin",
     ),
 }
-
-
-_CLI_AGENT_PROFILES = {
-    "claude": {
-        "auth_status_args": ("auth", "status"),
-        "login_args": ("auth", "login"),
-        "build_command": _build_claude_command,
-        "parse_auth_detail": _parse_claude_auth_detail,
-    },
-    "codex": {
-        "auth_status_args": ("login", "status"),
-        "login_args": ("login",),
-        "build_command": _build_codex_command,
-    },
-    "cursor": {"build_command": _build_cursor_command},
-    "gemini": {
-        "auth_status_args": ("status",),
-        "login_args": ("login",),
-        "build_command": _build_gemini_command,
-    },
-    "opencode": {
-        "auth_status_args": ("status",),
-        "login_args": ("login",),
-        "build_command": _build_opencode_command,
-        "env": _opencode_env,
-    },
-    "qwen": {"build_command": _build_qwen_command},
-    "kimi": {
-        "build_command": _build_kimi_command,
-    },
-    "devin": {"build_command": _build_devin_command},
-    "kiro": {"build_command": _build_kiro_command},
-    "pi": {"build_command": _build_pi_command},
-    "copilot": {
-        "build_command": _build_copilot_command,
-        "test_commands": _copilot_test_commands,
-    },
-}
-
-
-def _agent_profile(tool):
-    return _CLI_AGENT_PROFILES.get(tool or "", {})
 
 
 def _existing_dirs(paths):
@@ -1126,7 +880,7 @@ class CliToolBackend(AgentBackend):
 
     def _check_login_cmd(self):
         """Return the command to check authentication status."""
-        args = _agent_profile(self.tool).get("auth_status_args")
+        args = get_adapter(self.tool).auth_status_args
         return [self.binary, *args] if args else None
 
     def _env_auth_status(self):
@@ -1164,7 +918,7 @@ class CliToolBackend(AgentBackend):
 
         output = _process_output(result)
         detail = output.splitlines()[0] if output else ""
-        parser = _agent_profile(self.tool).get("parse_auth_detail")
+        parser = get_adapter(self.tool).auth_detail_parser
         if callable(parser):
             detail = parser(output, detail)
         if result.returncode == 0:
@@ -1179,7 +933,7 @@ class CliToolBackend(AgentBackend):
 
     def _login_cmd(self):
         """Return the command to open a browser login flow."""
-        args = _agent_profile(self.tool).get("login_args", ("login",))
+        args = get_adapter(self.tool).login_args or ("login",)
         return [self.binary, *args]
 
     def login_browser(self):
@@ -1206,9 +960,9 @@ class CliToolBackend(AgentBackend):
             [self.binary, "version"],
             [self.binary, "--help"],
         ]
-        test_commands = _agent_profile(self.tool).get("test_commands")
-        if callable(test_commands):
-            commands = list(test_commands(self)) + commands
+        test_commands = get_adapter(self.tool).test_commands(binary=self.binary)
+        if test_commands:
+            commands = list(test_commands) + commands
         last_err = ""
         for cmd in commands:
             try:
@@ -1270,8 +1024,12 @@ class CliToolBackend(AgentBackend):
         )
 
     def _build_command(self, prompt, _base_url=None):
-        builder = _agent_profile(self.tool).get("build_command", _build_default_command)
-        return builder(self, prompt)
+        return get_adapter(self.tool).build_command(
+            binary=self.binary,
+            prompt=prompt,
+            extra_args=self.extra_args,
+            runtime_dir=self._runtime_cwd(),
+        )
 
     def _runtime_env(self):
         env = os.environ.copy()
@@ -1285,7 +1043,6 @@ class CliToolBackend(AgentBackend):
         )
         _prepend_path(env, node_and_wrapper_dirs)
         env.update(_COMMON_RUNTIME_ENV)
-        from .adapters import get_adapter
         adapter_env = get_adapter(self.tool).env()
         if adapter_env:
             env.update(adapter_env)
@@ -1363,7 +1120,6 @@ class CliToolBackend(AgentBackend):
             emit(AgentEvent(EventType.ERROR, {"error": err}))
             return history
 
-        from .adapters import get_adapter
         from ..core import tools as tools_mod
 
         messages = list(history or [])
