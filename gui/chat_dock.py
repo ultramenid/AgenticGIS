@@ -887,7 +887,7 @@ class ChatDock(QgsDockWidget):
             # card. The card itself is a separate child widget we
             # center on top.
             self._ask_overlay.setStyleSheet("background-color: rgba(0, 0, 0, 140);")
-            self._ask_overlay.setAttribute(Qt.WA_StyledBackground, True)
+            self._ask_overlay.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
             # Make sure the overlay never grabs focus away from the
             # card's buttons — the card's child buttons must be
             # clickable.

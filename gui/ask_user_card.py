@@ -51,7 +51,7 @@ class _OptionRow(QFrame):
         self.setObjectName("AskUserOptionRow")
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
-        self.setAttribute(Qt.WA_Hover, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_Hover, True)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum)
         self._hovered = False
         self._pressed = False
