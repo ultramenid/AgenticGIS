@@ -57,12 +57,25 @@ class CliAdapter:
     login_args: ClassVar[Sequence[str]] = ()
     auth_detail_parser: ClassVar[Optional[Callable[[str, str], str]]] = None
 
+    def stdin_prompt(self, prompt: str) -> Optional[str]:
+        """Return the prompt to write to stdin, or None to pass on command line.
+
+        Adapters that pipe the prompt via stdin instead of embedding it in
+        the command line can override this to avoid ENAMETOOLONG errors
+        from overlong argument strings.
+        """
+        return None
+
     def build_command(
         self, *, binary: str, prompt: str, extra_args: list, runtime_dir: str,
     ) -> list:
         return [binary, "-p", prompt, *extra_args]
 
     def parse_event(self, raw: dict) -> Optional[NormalizedEvent]:
+        for key in ("text", "response", "content", "output", "result", "message"):
+            val = raw.get(key)
+            if isinstance(val, str) and val.strip():
+                return NormalizedEvent(text=val.strip(), is_final=True)
         return None
 
     def parse_protocol_text(self, text: str) -> Optional[NormalizedEvent]:
@@ -285,7 +298,12 @@ class CodexAdapter(CliAdapter):
 
 
 class OpenCodeAdapter(CliAdapter):
-    """opencode — ``run`` with ``--format json`` and a runtime config."""
+    """opencode — ``run`` with structured JSON output.
+
+    Pipes the prompt via stdin (to avoid ENAMETOOLONG on the argument
+    line) and consumes the ``--format json`` event stream.  Non-json
+    output falls through to the base-class text-key extraction.
+    """
 
     id = "opencode"
     label = "OpenCode"
@@ -295,35 +313,27 @@ class OpenCodeAdapter(CliAdapter):
     auth_status_args = ("status",)
     login_args = ("login",)
 
+    def stdin_prompt(self, prompt):
+        return prompt
+
     def build_command(self, *, binary, prompt, extra_args, runtime_dir):
         return [
-            binary, "run", prompt, *extra_args,
-            "--pure",
+            binary, "run",
             "--format", "json",
+            "--dangerously-skip-permissions",
+            *extra_args,
         ]
 
-    def env(self) -> dict:
-        config = _opencode_config_json()
-        config_path = _runtime_json_file("opencode-config", config)
-        return {
-            "OPENCODE_CONFIG_CONTENT": config,
-            "OPENCODE_CONFIG": config_path,
-            "OPENCODE_CONFIG_DIR": os.path.dirname(config_path),
-            "OPENCODE_DISABLE_PROJECT_CONFIG": "1",
-            "OPENCODE_PURE": "1",
-            "OPENCODE_ENABLE_EXA": "0",
-        }
-
     def parse_event(self, raw):
-        # opencode events carry a "part" object that holds the actual payload.
-        part = raw.get("part") or {}
-        if not isinstance(part, dict):
-            return None
-        sid = raw.get("session_id") or raw.get("sessionID") or ""
-        ptype = part.get("type")
-        if ptype == "text":
-            return NormalizedEvent(text=str(part.get("text") or "").strip(), session_id=sid)
-        if ptype == "tool":
+        etype = raw.get("type")
+        part = raw.get("part") or raw
+        sid = raw.get("sessionID") or raw.get("session_id") or ""
+        if etype == "text":
+            return NormalizedEvent(
+                text=str(part.get("text") or "").strip(),
+                session_id=sid, is_final=True,
+            )
+        if etype == "tool_use":
             tool_name = part.get("tool", "")
             state = part.get("state") or {}
             if tool_name == "invalid":
@@ -337,11 +347,24 @@ class OpenCodeAdapter(CliAdapter):
                 }],
                 session_id=sid,
             )
-        return None
+        if etype == "error":
+            err = raw.get("error") or {}
+            if isinstance(err, dict):
+                err_text = err.get("data", {}).get("message", "") or err.get("message", "") or str(err)
+            else:
+                err_text = str(err)
+            return NormalizedEvent(is_error=True, text=err_text)
+        if etype in ("step_start", "step_finish"):
+            return None
+        return super().parse_event(raw)
 
 
 class CursorAdapter(CliAdapter):
-    """Cursor Agent — ``-p`` with ``--output-format json``."""
+    """Cursor Agent — ``-p`` with ``--output-format json``.
+
+    Cursor's JSON events lack a top-level ``type`` discriminator so we
+    fall back to the well-known text keys from ``DefaultAdapter``.
+    """
 
     id = "cursor"
     label = "Cursor Agent"
@@ -359,6 +382,13 @@ class CursorAdapter(CliAdapter):
             binary, "-p", prompt, *extra_args,
             "--output-format", "json",
         ]
+
+    def parse_event(self, raw):
+        for key in ("text", "response", "content", "output", "result", "message"):
+            val = raw.get(key)
+            if isinstance(val, str) and val.strip():
+                return NormalizedEvent(text=val.strip(), is_final=True)
+        return None
 
 
 class GeminiAdapter(CliAdapter):
@@ -446,7 +476,7 @@ class KiroAdapter(CliAdapter):
 
 
 class PiAdapter(CliAdapter):
-    """Pi — ``--print`` with deterministic off-switches."""
+    """Pi — ``-p`` for non-interactive prompt."""
 
     id = "pi"
     label = "Pi"
@@ -455,17 +485,8 @@ class PiAdapter(CliAdapter):
 
     def build_command(self, *, binary, prompt, extra_args, runtime_dir):
         return [
-            binary,
-            "--print", prompt,
+            binary, "-p", prompt,
             *extra_args,
-            "--mode", "json",
-            "--no-extensions",
-            "--no-skills",
-            "--no-prompt-templates",
-            "--no-themes",
-            "--no-context-files",
-            "--no-session",
-            "--offline",
         ]
 
 

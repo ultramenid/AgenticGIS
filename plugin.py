@@ -34,6 +34,7 @@ class AgenticGisPlugin:
         self.iface.addPluginToMenu("AgenticGIS", self._action)
 
     def unload(self):
+        self.toolkit.cleanup_gee_tiffs()
         self._stop_server()
         if self._dock is not None:
             try:

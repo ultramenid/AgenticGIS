@@ -237,9 +237,63 @@ backup. Two guardrails apply:
 Layer-removal tools only unload layers from the project — they never delete
 source files.
 
-## Roadmap
 
-Features planned for future releases:
+
+### Tile performance (WMS, not local)
+
+ee_plugin renders every GEE layer as **on-demand WMS tiles** — each zoom or pan
+triggers fresh tile requests to Google's servers. There is no local pyramid of
+precomputed overviews, so every navigation incurs a network round-trip.
+
+### `vis_params scale` is silently ignored
+
+Setting `scale` in `vis_params` (e.g. `{'min':0, 'max':1, 'scale':10}`) has
+**zero effect** on tile resolution. The ee_plugin calls
+`image.visualize(**vis_params)` then `getMapId({"image": image})` — the scale
+parameter is dropped before it reaches the tile server.
+
+To control resolution, use **`clipToBoundsAndScale(geometry=region, scale=N)`**
+in the Earth Engine expression itself. This resamples the composite before the
+tile server sees it.
+
+### GeoTIFF export for fast zoom
+
+For interactive exploration, AgenticGIS can download a GEE result as a **local
+GeoTIFF** (``export_format='geotiff'`` — default). This loads as a native QGIS
+raster layer with pyramid overviews, giving instant zoom/pan.
+
+**Limitations of the GeoTIFF download:**
+
+| Constraint | Detail |
+|---|---|
+| **Request size** | Earth Engine's synchronous download API rejects requests over **50 MB**. The tool auto-retries with 2× the requested scale (lower resolution = less data), up to 3 attempts. |
+| **Large areas** | Province-scale regions may still fail the download even at reduced resolution (e.g. 400 m). In that case the agent falls back to ``export_format='map'`` (WMS tiles). |
+| **No async export** | Only the synchronous `getDownloadId()` / `urlretrieve` path is implemented. `Export.image.toDrive()` and `Export.image.toCloudStorage()` are not supported. |
+| **Temp file cleanup** | Downloaded GeoTIFFs are tracked via a persistent manifest. Temp files are deleted when the layer is removed from the project, on plugin unload, and on the next startup after a crash. |
+| **Single-threaded** | Downloads block the agent loop until complete. Large downloads may take tens of seconds. |
+
+### Authentication
+
+AgenticGIS does not authenticate Earth Engine itself. You must install and
+authenticate the **Google Earth Engine** QGIS plugin separately (see
+[Requirements](#requirements) above).
+
+
+## Limitations — Google Earth Engine
+
+AgenticGIS drives Earth Engine through the **ee_plugin** (a separate QGIS plugin),
+not the native `earthengine` API. This introduces constraints you should know
+before working with satellite imagery.
+
+## Limitations — General
+
+- **CLI Agent mode** cannot stream partial results — the agent waits for the CLI
+  to produce its full response before processing tool results.
+- **Reusing layers** depends on the LLM recognising that existing layers contain
+  the data you need. The system prompt instructs it to prefer local clip/extract
+  over re-running GEE, but this is a model-level behaviour, not guaranteed.
+
+## Roadmap
 
 - **Custom skills** — user-defined tool bundles that extend the agent's
   capabilities beyond the built-in set.

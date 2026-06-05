@@ -190,8 +190,8 @@ TOOL_SPECS = [
             "Set is_analysis=true for layers you derive as analysis results "
             "(buffers, joins, filtered subsets, etc.): these are tracked as "
             "persistent results, reused by name instead of duplicated, and "
-            "never auto-deleted. Use zoom_to_layer after loading only when the "
-            "user needs to inspect the result immediately."
+            "never auto-deleted. After this, call zoom_to_layer so the user "
+            "sees the result on the map."
         ),
         "input_schema": {
             "type": "object",
@@ -306,13 +306,19 @@ TOOL_SPECS = [
             "\"img = ee.ImageCollection('COPERNICUS/S2_SR_HARMONIZED')"
             ".filterBounds(region).filterDate('2023-01-01','2023-03-01').median(); "
             "result = img.normalizedDifference(['B8','B4']).clip(region)\". "
-            "Pass vis_params for display, e.g. {'min':-0.2,'max':0.8,"
-            "'palette':['blue','white','green']}. "
-            "IMPORTANT: when geometry_mode is 'auto' (default) and the layer is "
-            "too large to send inline, this returns {ok:false, "
-            "needs_decision:true} instead of running. In that case call ask_user "
-            "with the offered options, then call gee_add_layer again with "
-            "geometry_mode set to 'bbox', 'simplify', or 'exact'."
+             "Pass vis_params for display, e.g. {'min':-0.2,'max':0.8,"
+             "'palette':['blue','white','green']}. "
+             "NOTE: vis_params 'scale' is silently ignored by the "
+             "ee_plugin — use clipToBoundsAndScale or reduceResolution "
+             "in the ee expression code itself to control resolution. "
+             "IMPORTANT: when geometry_mode is 'auto' (default) and the layer is "
+             "too large to send inline, this returns {ok:false, "
+             "needs_decision:true} instead of running. In that case call ask_user "
+             "with the offered options, then call gee_add_layer again with "
+             "geometry_mode set to 'bbox', 'simplify', or 'exact'. "
+             "For faster zoom/pan, set export_format='geotiff' — downloads the "
+             "image as a local GeoTIFF and loads it as a local raster layer "
+             "(instant zoom at the cost of upfront download time)."
         ),
         "input_schema": {
             "type": "object",
@@ -329,7 +335,9 @@ TOOL_SPECS = [
                     "type": "object",
                     "description": (
                         "Earth Engine visualization params (min, max, palette, "
-                        "bands, gamma). Omit for defaults."
+                        "bands, gamma). NOTE: scale here is silently ignored "
+                        "by the ee_plugin — control resolution via "
+                        "clipToBoundsAndScale/reduceResolution in the code."
                     ),
                 },
                 "name": {
@@ -378,6 +386,26 @@ TOOL_SPECS = [
                         "(default 2000)."
                     ),
                     "default": 2000,
+                },
+                "export_format": {
+                    "type": "string",
+                    "enum": ["map", "geotiff"],
+                    "description": (
+                        "'geotiff' (default): download and load as local raster "
+                        "(instant zoom/pan). 'map': add as WMS tile layer via "
+                        "ee_plugin (slower zoom, no download wait)."
+                    ),
+                    "default": "geotiff",
+                },
+                "export_scale": {
+                    "type": "integer",
+                    "minimum": 10,
+                    "description": (
+                        "Resolution in meters for GeoTIFF export when "
+                        "export_format='geotiff'. Default 250. "
+                        "Smaller = more detail but larger download."
+                    ),
+                    "default": 250,
                 },
             },
             "required": ["code"],
@@ -541,16 +569,19 @@ TOOL_SPECS = [
         "name": "ask_user",
         "method": "ask_user",
         "description": (
-            "Pause and ask the user a clarifying question. Use proactively "
-            "when the request is ambiguous (e.g. no analysis field named, "
-            "no CRS target, no comparison layer) and reactively when a "
-            "tool result looks suspicious (no spatial index, empty result, "
-            "schema mismatch, out-of-range value). Wait for the user's "
-            "reply before continuing. Always provide 2-4 options with the "
-            "first one being the recommended choice. Returns a dict with "
-            "'choice' (the picked option's label, or null), 'free_text' "
-            "(typed reply, or null), and 'cancelled' (true if the user "
-            "stopped the question)."
+            "Pause and ask the user a clarifying question. Use this "
+            "PROACTIVELY and OFTEN — it is your primary tool for "
+            "resolving ambiguity instead of guessing. Call it whenever "
+            "the user's request does not specify which fields to analyse, "
+            "which layer to use, which CRS target, or any other detail "
+            "you need. Also use it reactively when a tool result looks "
+            "suspicious (no spatial index, empty result, schema mismatch, "
+            "out-of-range value). Wait for the user's reply before "
+            "continuing. Always provide 2-4 options (list the available "
+            "choices as options) with the first one being the recommended "
+            "choice. Returns a dict with 'choice' (the picked option's "
+            "label, or null), 'free_text' (typed reply, or null), and "
+            "'cancelled' (true if the user stopped the question)."
         ),
         "input_schema": {
             "type": "object",

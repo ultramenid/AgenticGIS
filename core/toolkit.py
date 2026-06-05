@@ -16,8 +16,10 @@ its slot.
 """
 
 import io
+import os
 import re
 import sys
+import tempfile
 import threading
 import time
 import traceback
@@ -30,6 +32,7 @@ from qgis.core import (
     QgsFeatureRequest,
     QgsMapLayer,
     QgsProject,
+    QgsRasterLayer,
     QgsTask,
     QgsVectorLayer,
     QgsVectorLayerCache,
@@ -131,6 +134,9 @@ def _no_geometry_flag():
 _CANCELLED_SENTINEL = "__cancelled__"
 DEFAULT_FEATURE_SCAN_LIMIT = 100_000
 EVENT_PUMP_INTERVAL = 100
+# Timeout for background tool fallback to main-thread execution (seconds).
+# Must be bounded so Stop button remains responsive.
+_BG_TASK_FALLBACK_TIMEOUT = 30.0
 
 
 def _is_blank_chart_label(value):
@@ -371,6 +377,14 @@ class QgisToolkit:
         self._ns_template = None  # cached exec namespace
         # dirty flag — set when a tool may have mutated project state.
         self._canvas_dirty = False
+        # Track GeoTIFF temp files from gee_add_layer export_format='geotiff'
+        # for automatic cleanup on layer removal / plugin unload.
+        self._gee_tiff_sources = {}  # layer_id -> file_path
+        self._gee_tiff_cleanup_connected = False
+        self._gee_manifest_path = os.path.join(
+            tempfile.gettempdir(), "agenticgis_gee_manifest.json"
+        )
+        self._clean_orphan_gee_tiffs()
         # Logical-name -> layer_id map of agent-created analysis/result layers.
         # These are meant to persist; the agent reuses them instead of
         # recreating and never auto-deletes them.
@@ -750,7 +764,7 @@ class QgisToolkit:
             )
             return snap["error"]
         if snap.get("fallback"):
-            result = executor.run_sync(lambda: getattr(self, name)(**args))
+            result = executor.run_sync(lambda: getattr(self, name)(**args), timeout=_BG_TASK_FALLBACK_TIMEOUT)
             log_event(
                 "background_tool.end",
                 tool=name,
@@ -763,7 +777,7 @@ class QgisToolkit:
         def worker(task):
             layer = QgsVectorLayer(snap["source"], snap["name"], snap["provider"])
             if not layer.isValid():
-                return executor.run_sync(lambda: getattr(self, name)(**args))
+                return executor.run_sync(lambda: getattr(self, name)(**args), timeout=_BG_TASK_FALLBACK_TIMEOUT)
             if name == "analyze_layer":
                 cache = self._ensure_analysis_cache()
                 cached = cache.get(snap["cache_key"])
@@ -2024,6 +2038,8 @@ class QgisToolkit:
         geometry_mode="auto",
         max_vertices=5000,
         max_features=2000,
+        export_format="geotiff",
+        export_scale=250,
     ):
         """Evaluate an Earth Engine expression and add the result to the canvas.
 
@@ -2037,6 +2053,11 @@ class QgisToolkit:
         layer is too large (so the caller can ask the user); ``exact`` forces
         the true geometry (subject to hard ceilings); ``simplify`` reduces
         vertices to fit; ``bbox`` uses the bounding box only.
+
+        ``export_format`` controls how the result is loaded:
+        ``"map"`` (default) uses ee_plugin's Map.addLayer (WMS tile, slower
+        zoom). ``"geotiff"`` downloads as GeoTIFF and loads as a local raster
+        layer (instant zoom/pan, but requires download wait upfront).
         """
         try:
             import ee
@@ -2096,6 +2117,12 @@ class QgisToolkit:
                 "ok": False,
                 "error": "Earth Engine code must assign the ee object to `result`.",
             }
+
+        if export_format == "geotiff":
+            return self._add_ee_as_geotiff(
+                ee, obj, name, region, export_scale, region_layer, zoom
+            )
+
         try:
             EEMap.addLayer(obj, vis_params or {}, name)
         except Exception as exc:  # noqa: BLE001
@@ -2119,6 +2146,187 @@ class QgisToolkit:
             "zoomed": zoomed,
             "geometry_mode": mode_used,
         }
+
+    def _add_ee_as_geotiff(self, ee, obj, name, region, scale, region_layer, zoom):
+        """Download an EE image as GeoTIFF and load as a local raster layer."""
+        import json as _json
+        import urllib.request as _urllib
+
+        try:
+            from qgis.core import QgsMessageLog
+
+            def _log(msg):
+                QgsMessageLog.logMessage(msg, "AgenticGIS", level=0)
+        except Exception:
+            def _log(msg):
+                print(f"[AgenticGIS] {msg}")
+
+        _scale = scale
+
+        try:
+            download_region = None
+            if region is not None:
+                bounds = region.bounds(maxError=1).getInfo()["coordinates"][0]
+                coords = [[pt[0], pt[1]] for pt in bounds]
+                download_region = _json.dumps(coords)
+            _max_retries = 3
+            for attempt in range(_max_retries):
+                download_params = {
+                    "image": obj,
+                    "scale": _scale,
+                    "crs": "EPSG:3857",
+                    "format": "GEO_TIFF",
+                }
+                if download_region:
+                    download_params["region"] = download_region
+                try:
+                    download_id = ee.data.getDownloadId(download_params)
+                    break
+                except Exception as _exc:
+                    msg = str(_exc)
+                    if "request size" in msg or "must be less than or equal" in msg:
+                        if attempt < _max_retries - 1:
+                            _scale = int(_scale * 2)
+                            _log(
+                                f"Request too large ({_scale//2}m → {_scale}m), "
+                                f"retrying…"
+                            )
+                            continue
+                        raise
+                    raise
+            url = ee.data.makeDownloadUrl(download_id)
+            tmp = tempfile.NamedTemporaryFile(
+                suffix=".tif", prefix="gee_", delete=False
+            )
+            tmp_path = tmp.name
+            tmp.close()
+            try:
+                _urllib.urlretrieve(url, tmp_path)
+            except Exception as exc:
+                try:
+                    os.unlink(tmp_path)
+                except Exception:
+                    pass
+                _log(f"GeoTIFF download failed: {type(exc).__name__}: {exc}")
+                msg = f"GeoTIFF download failed: {type(exc).__name__}: {exc}"
+                if "400" in str(exc):
+                    msg += (
+                        ". Server rejected the export — the area may be too large "
+                        "even at reduced resolution. Try a smaller region or "
+                        "export_format='map'."
+                    )
+                elif "403" in str(exc) or "401" in str(exc):
+                    msg += (
+                        ". Authentication/authorization error — check GEE "
+                        "authentication."
+                    )
+                return {
+                    "ok": False,
+                    "error": msg,
+                    "final_scale": _scale,
+                }
+            layer = QgsRasterLayer(tmp_path, name, "gdal")
+            if not layer or not layer.isValid():
+                try:
+                    os.unlink(tmp_path)
+                except Exception:
+                    pass
+                _log(f"GeoTIFF raster invalid: {tmp_path}")
+                return {
+                    "ok": False,
+                    "error": f"Failed to load GeoTIFF as raster layer: {tmp_path}",
+                }
+            _log(f"Download OK → {tmp_path}, loading as raster layer '{name}'")
+            QgsProject.instance().addMapLayer(layer)
+            layer.setCustomProperty("gee_tiff_source", tmp_path)
+            self._gee_tiff_sources[layer.id()] = tmp_path
+            self._sync_gee_manifest(list(self._gee_tiff_sources.values()))
+            self._ensure_gee_tiff_cleanup_connection()
+            self._canvas_dirty = True
+            layer_id = layer.id()
+            zoomed = False
+            if zoom and region_layer is not None:
+                zoomed = self._zoom_to_layer(region_layer)
+            return {
+                "ok": True,
+                "name": name,
+                "layer_id": layer_id,
+                "zoomed": zoomed,
+                "export_format": "geotiff",
+                "source": tmp_path,
+            }
+        except Exception as exc:  # noqa: BLE001
+            _log(f"GeoTIFF export error: {type(exc).__name__}: {exc}")
+            return {
+                "ok": False,
+                "error": (
+                    f"GeoTIFF export failed: {type(exc).__name__}: {exc}. "
+                    "Try export_format='map' instead."
+                ),
+                "final_scale": _scale,
+            }
+
+    # ------------------------------------------------------------------ #
+    # GeoTIFF temp-file cleanup                                           #
+    # ------------------------------------------------------------------ #
+    def _clean_orphan_gee_tiffs(self):
+        """On startup, delete any GeoTIFF temp files from a previous crash
+        (tracked via the manifest file that persists across sessions)."""
+        import json as _json
+        try:
+            if os.path.exists(self._gee_manifest_path):
+                with open(self._gee_manifest_path) as _f:
+                    orphans = _json.load(_f)
+                for path in orphans:
+                    try:
+                        os.unlink(path)
+                    except Exception:
+                        pass
+                self._sync_gee_manifest([])
+            else:
+                self._sync_gee_manifest([])
+        except Exception:
+            pass
+
+    def _sync_gee_manifest(self, paths):
+        """Persist the list of tracked GeoTIFF paths to the manifest file."""
+        import json as _json
+        try:
+            with open(self._gee_manifest_path, "w") as _f:
+                _json.dump(paths, _f)
+        except Exception:
+            pass
+    def _ensure_gee_tiff_cleanup_connection(self):
+        """Connect to QgsProject.layersRemoved once so that when a GeoTIFF
+        layer is removed from the project its backing temp file is deleted."""
+        if self._gee_tiff_cleanup_connected:
+            return
+        try:
+            QgsProject.instance().layersRemoved.connect(self._on_gee_tiff_layers_removed)
+            self._gee_tiff_cleanup_connected = True
+        except Exception:
+            pass
+
+    def _on_gee_tiff_layers_removed(self, layer_ids):
+        """Callback for QgsProject.layersRemoved — delete temp files for removed layers."""
+        for lid in layer_ids:
+            path = self._gee_tiff_sources.pop(lid, None)
+            if path is not None:
+                try:
+                    os.unlink(path)
+                except Exception:
+                    pass
+        self._sync_gee_manifest(list(self._gee_tiff_sources.values()))
+
+    def cleanup_gee_tiffs(self):
+        """Delete all tracked GeoTIFF temp files. Called on plugin unload."""
+        for lid, path in list(self._gee_tiff_sources.items()):
+            try:
+                os.unlink(path)
+            except Exception:
+                pass
+        self._gee_tiff_sources.clear()
+        self._sync_gee_manifest([])
 
     @staticmethod
     def _gee_decision_payload(info):
