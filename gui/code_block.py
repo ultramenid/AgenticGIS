@@ -199,7 +199,7 @@ class CodeBlockWidget(QWidget):
         self.editor = QPlainTextEdit()
         self.editor.setReadOnly(True)
         self.editor.setPlainText(self.code)
-        self.editor.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.editor.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.editor.customContextMenuRequested.connect(self._show_context_menu)
         self.editor.setStyleSheet(f"""
             QPlainTextEdit {{

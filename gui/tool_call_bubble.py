@@ -154,7 +154,7 @@ class ToolCallBubble(QFrame):
                         input_label = QLabel(truncated_input)
                         input_label.setStyleSheet(mono_style)
                         input_label.setWordWrap(True)
-                        input_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+                        input_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
                         content_layout.addWidget(input_label)
                     except Exception:
                         pass
@@ -163,7 +163,7 @@ class ToolCallBubble(QFrame):
                 result_label = QLabel(truncated_result)
                 result_label.setStyleSheet(mono_style)
                 result_label.setWordWrap(True)
-                result_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+                result_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
                 content_layout.addWidget(result_label)
 
                 copy_btn = QPushButton("Copy")

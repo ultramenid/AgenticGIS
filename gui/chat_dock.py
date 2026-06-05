@@ -270,7 +270,7 @@ class ChatDock(QgsDockWidget):
             f"<span style='color:{_SUCCESS};font-size:11px;'>✓</span> "
             f"<span style='color:{_TEXT_3}; font-size:11px;'>Ready</span>"
         )
-        self.status.setTextFormat(Qt.RichText)
+        self.status.setTextFormat(Qt.TextFormat.RichText)
         self.status.setStyleSheet("background: transparent; padding-right: 4px;")
         top.addWidget(self.status)
 
@@ -501,7 +501,7 @@ class ChatDock(QgsDockWidget):
 
     def showEvent(self, event):
         super().showEvent(event)
-        self.input.setFocus(Qt.OtherFocusReason)
+        self.input.setFocus(Qt.FocusReason.OtherFocusReason)
         if (
             self._show_startup_picker
             and not self._startup_picker_shown
@@ -526,7 +526,7 @@ class ChatDock(QgsDockWidget):
         if obj is self.input and event.type() == QEvent.KeyPress:
             if event.key() == Qt.Key.Key_Escape:
                 return self._handle_input_escape()
-            if event.key() in (Qt.Key.Key_Up, Qt.Key.Key_Down) and event.modifiers() == Qt.NoModifier:
+            if event.key() in (Qt.Key.Key_Up, Qt.Key.Key_Down) and event.modifiers() == Qt.KeyboardModifier.NoModifier:
                 if self._handle_prompt_history_key(event.key()):
                     return True
             if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
@@ -541,10 +541,10 @@ class ChatDock(QgsDockWidget):
     def _newline_modifier(self, modifiers):
         return bool(
             modifiers & (
-                Qt.ShiftModifier
-                | Qt.AltModifier
-                | Qt.MetaModifier
-                | Qt.ControlModifier
+                Qt.KeyboardModifier.ShiftModifier
+                | Qt.KeyboardModifier.AltModifier
+                | Qt.KeyboardModifier.MetaModifier
+                | Qt.KeyboardModifier.ControlModifier
             )
         )
 
@@ -891,7 +891,7 @@ class ChatDock(QgsDockWidget):
             # Make sure the overlay never grabs focus away from the
             # card's buttons — the card's child buttons must be
             # clickable.
-            self._ask_overlay.setFocusPolicy(Qt.NoFocus)
+            self._ask_overlay.setFocusPolicy(Qt.FocusPolicy.NoFocus)
 
             self._ask_card_frame = _QW(self._ask_overlay)
             # Transparent positioning frame. AskUserCard owns the actual
@@ -927,7 +927,7 @@ class ChatDock(QgsDockWidget):
         try:
             first_option = card.findChild(QFrame, "AskUserOptionRow")
             if first_option is not None:
-                first_option.setFocus(Qt.OtherFocusReason)
+                first_option.setFocus(Qt.FocusReason.OtherFocusReason)
         except Exception:
             pass
         self._ask_user_card = card
@@ -1142,7 +1142,7 @@ class ChatDock(QgsDockWidget):
         actions.addWidget(cancel)
         actions.addWidget(confirm)
         card_layout.addLayout(actions)
-        field.setFocus(Qt.OtherFocusReason)
+        field.setFocus(Qt.FocusReason.OtherFocusReason)
         field.selectAll()
         return dialog, field
 

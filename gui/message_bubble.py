@@ -581,12 +581,12 @@ class MessageBubble(QFrame):
         self.text_label.setWordWrap(True)
         self.text_label.setMinimumWidth(0)  # allow label to shrink to viewport width
         self.text_label.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred)
-        self.text_label.setTextFormat(Qt.RichText)
+        self.text_label.setTextFormat(Qt.TextFormat.RichText)
         self.text_label.setTextInteractionFlags(
-            Qt.TextBrowserInteraction | Qt.TextSelectableByMouse
+            Qt.TextInteractionFlag.TextBrowserInteraction | Qt.TextInteractionFlag.TextSelectableByMouse
         )
         self.text_label.setOpenExternalLinks(True)
-        self.text_label.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.text_label.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.text_label.customContextMenuRequested.connect(self._show_context_menu)
 
         font = QFont("JetBrains Mono", 12)
@@ -750,7 +750,7 @@ class MessageContainer(QWidget):
             name_label.setStyleSheet(
                 f"color: {_TEXT_3}; font-size: 10px; background: transparent; border: none;"
             )
-            name_label.setTextFormat(Qt.PlainText)
+            name_label.setTextFormat(Qt.TextFormat.PlainText)
             name_label.setAlignment(Qt.AlignmentFlag.AlignRight if is_user else Qt.AlignmentFlag.AlignLeft)
             outer.addWidget(name_label)
 

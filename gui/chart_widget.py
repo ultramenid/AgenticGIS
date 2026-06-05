@@ -115,7 +115,7 @@ class ChartWidget(QFrame):
                 region = self._hit_regions[active]
                 kind = region["kind"]
                 painter.save()
-                painter.setBrush(Qt.NoBrush)
+                painter.setBrush(Qt.BrushStyle.NoBrush)
                 if kind == "bar":
                     _rect = region["rect"]
                     painter.setPen(QPen(QColor(_TEXT), 1.5))
@@ -123,7 +123,7 @@ class ChartWidget(QFrame):
                 elif kind == "line":
                     _rect = region["rect"]
                     painter.setBrush(QBrush(QColor(_TEXT)))
-                    painter.setPen(Qt.NoPen)
+                    painter.setPen(Qt.PenStyle.NoPen)
                     painter.drawEllipse(_rect)
                 painter.restore()
                 self._draw_inspector(painter, chart_rect, region)
@@ -175,8 +175,8 @@ class ChartWidget(QFrame):
         font_value = _font(9, QFont.Weight.Bold)
         fm_label = QFontMetrics(font_label)
         fm_value = QFontMetrics(font_value)
-        label = fm_label.elidedText(label, Qt.ElideRight, 160)
-        value = fm_value.elidedText(value, Qt.ElideRight, 160)
+        label = fm_label.elidedText(label, Qt.TextElideMode.ElideRight, 160)
+        value = fm_value.elidedText(value, Qt.TextElideMode.ElideRight, 160)
 
         w = max(fm_label.horizontalAdvance(label), fm_value.horizontalAdvance(value)) + 20
         h = 44
@@ -227,7 +227,7 @@ class ChartWidget(QFrame):
         bar_w = max(4, int(slot_w * 0.62))
 
         # Grid lines at 50% and 100%
-        grid_pen = QPen(QColor(_BORDER), 1, Qt.DashLine)
+        grid_pen = QPen(QColor(_BORDER), 1, Qt.PenStyle.DashLine)
         painter.setPen(grid_pen)
         for frac in (0.5, 1.0):
             gy = int(bottom - frac * chart_h)
@@ -257,7 +257,7 @@ class ChartWidget(QFrame):
 
             lbl = QFontMetrics(font).elidedText(
                 str(item.get("label", "")),
-                Qt.ElideRight,
+                Qt.TextElideMode.ElideRight,
                 max(12, bar_w),
             )
             painter.setPen(QColor(_TEXT_3))
@@ -308,13 +308,13 @@ class ChartWidget(QFrame):
             for x, y in coords:
                 poly_pts.append(QPoint(x, y))
             poly_pts.append(QPoint(coords[-1][0], bottom))
-            painter.setPen(Qt.NoPen)
+            painter.setPen(Qt.PenStyle.NoPen)
             painter.setBrush(QBrush(fill_color))
             painter.drawPolygon(QPolygon(poly_pts))
 
         pen = QPen(line_color, 2)
         painter.setPen(pen)
-        painter.setBrush(Qt.NoBrush)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
         for i in range(1, len(coords)):
             painter.drawLine(
                 coords[i - 1][0], coords[i - 1][1],
@@ -399,7 +399,7 @@ class ChartWidget(QFrame):
 
         # Donut hole
         painter.setBrush(QBrush(QColor(_INPUT_BG)))
-        painter.setPen(Qt.NoPen)
+        painter.setPen(Qt.PenStyle.NoPen)
         painter.drawEllipse(cx - hole_r, cy - hole_r, hole_r * 2, hole_r * 2)
 
         # Center label: total count or single label
@@ -430,7 +430,7 @@ class ChartWidget(QFrame):
             painter.setPen(QColor(_TEXT_2))
             lbl = QFontMetrics(font).elidedText(
                 str(item.get("label", "")),
-                Qt.ElideRight,
+                Qt.TextElideMode.ElideRight,
                 max(20, legend_w - 18),
             )
             painter.drawText(lx + 14, ly + i * 18 + 10, lbl)

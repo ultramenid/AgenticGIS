@@ -149,7 +149,7 @@ class ToolSubItem(QWidget):
         key_lbl = QLabel(self._extract_key(tool_input))
         key_lbl.setFont(mono)
         key_lbl.setStyleSheet(f"color:{_TEXT}; background:transparent; font-size:10px;")
-        key_lbl.setTextFormat(Qt.PlainText)
+        key_lbl.setTextFormat(Qt.TextFormat.PlainText)
         hbox.addWidget(key_lbl)
 
         json_str = json.dumps(tool_input, default=str)
@@ -158,7 +158,7 @@ class ToolSubItem(QWidget):
         json_lbl = QLabel(json_str)
         json_lbl.setFont(mono)
         json_lbl.setStyleSheet(f"color:{_TEXT_3}; background:transparent; font-size:10px;")
-        json_lbl.setTextFormat(Qt.PlainText)
+        json_lbl.setTextFormat(Qt.TextFormat.PlainText)
         hbox.addWidget(json_lbl)
         hbox.addStretch()
 
@@ -266,7 +266,7 @@ class ToolGroupRow(QWidget):
         name_lbl.setStyleSheet(
             f"color:{_TEXT}; background:transparent; font-size:10px;"
         )
-        name_lbl.setTextFormat(Qt.PlainText)
+        name_lbl.setTextFormat(Qt.TextFormat.PlainText)
         hbox.addWidget(name_lbl)
 
         self._count_lbl = QLabel("")
@@ -396,12 +396,12 @@ class AgentTurnBubble(QFrame):
         self.text_lbl.setWordWrap(True)
         self.text_lbl.setMinimumWidth(0)
         self.text_lbl.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred)
-        self.text_lbl.setTextFormat(Qt.RichText)
+        self.text_lbl.setTextFormat(Qt.TextFormat.RichText)
         self.text_lbl.setTextInteractionFlags(
-            Qt.TextBrowserInteraction | Qt.TextSelectableByMouse
+            Qt.TextInteractionFlag.TextBrowserInteraction | Qt.TextInteractionFlag.TextSelectableByMouse
         )
         self.text_lbl.setOpenExternalLinks(True)
-        self.text_lbl.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.text_lbl.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.text_lbl.customContextMenuRequested.connect(self._show_text_context_menu)
         font = QFont("JetBrains Mono", 12)
         font.setStyleHint(QFont.StyleHint.Monospace)
@@ -569,8 +569,8 @@ class AgentTurnBubble(QFrame):
             self._user_decision_lbl = QLabel("")
             self._user_decision_lbl.setWordWrap(True)
             self._user_decision_lbl.setMinimumWidth(0)
-            self._user_decision_lbl.setTextFormat(Qt.PlainText)
-            self._user_decision_lbl.setTextInteractionFlags(Qt.TextSelectableByMouse)
+            self._user_decision_lbl.setTextFormat(Qt.TextFormat.PlainText)
+            self._user_decision_lbl.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
             self._user_decision_lbl.setStyleSheet(
                 f"color:{_TEXT_2}; background:{_SURFACE_2}; border:1px solid {_BORDER_SOFT};"
                 f" border-radius:5px; padding:5px 9px; margin:6px 12px 0 12px;"
