@@ -359,3 +359,88 @@ class KimiAdapter(CliAdapter):
             binary, "-p", prompt, *extra_args,
             "--output-format", "stream-json",
         ]
+
+
+class DevinAdapter(CliAdapter):
+    """Devin for Terminal — ``--print`` with a sandboxed config."""
+
+    id = "devin"
+    label = "Devin for Terminal"
+    commands = ("devin",)
+    credential_style = "Devin account"
+
+    def build_command(self, *, binary, prompt, extra_args, runtime_dir):
+        return [
+            binary, "--print",
+            "--config", _runtime_json_file("devin-config", _devin_config_json()),
+            *extra_args,
+            "--", prompt,
+        ]
+
+
+class KiroAdapter(CliAdapter):
+    """Kiro CLI — ``chat --no-interactive``."""
+
+    id = "kiro"
+    label = "Kiro CLI"
+    commands = ("kiro",)
+    credential_style = "AWS credentials"
+
+    def build_command(self, *, binary, prompt, extra_args, runtime_dir):
+        return [
+            binary, "chat",
+            "--no-interactive",
+            *extra_args,
+            prompt,
+        ]
+
+
+class PiAdapter(CliAdapter):
+    """Pi — ``--print`` with deterministic off-switches."""
+
+    id = "pi"
+    label = "Pi"
+    commands = ("pi",)
+    credential_style = "Pi account"
+
+    def build_command(self, *, binary, prompt, extra_args, runtime_dir):
+        return [
+            binary,
+            "--print", prompt,
+            *extra_args,
+            "--mode", "json",
+            "--no-extensions",
+            "--no-skills",
+            "--no-prompt-templates",
+            "--no-themes",
+            "--no-context-files",
+            "--no-session",
+            "--offline",
+        ]
+
+
+class CopilotAdapter(CliAdapter):
+    """GitHub Copilot CLI — ``gh copilot suggest`` or ``copilot suggest``."""
+
+    id = "copilot"
+    label = "GitHub Copilot CLI"
+    commands = ("gh", "copilot")
+    credential_style = "GitHub Copilot subscription"
+
+    def build_command(self, *, binary, prompt, extra_args, runtime_dir):
+        if os.path.basename(binary or "") == "gh":
+            return [
+                binary, "copilot", "suggest",
+                *extra_args,
+                prompt,
+            ]
+        return [
+            binary, "suggest",
+            *extra_args,
+            prompt,
+        ]
+
+    def test_commands(self, *, binary):
+        if os.path.basename(binary or "") == "gh":
+            return [[binary, "copilot", "--help"]]
+        return []
