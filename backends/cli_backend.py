@@ -1515,8 +1515,45 @@ def _emit_line(line, emit, session_id_holder=None):
     elif etype in ("step_start", "step_finish"):
         return  # opencode step markers — no user-visible content
 
+    # ── Codex exec --json format ─────────────────────────────────────────────
+    # Events: thread.started / turn.started / item.started / item.updated /
+    #         item.completed / turn.completed / turn.failed / error
+    elif etype == "item.completed":
+        item = event.get("item") or {}
+        itype = item.get("type", "")
+        if itype == "agent_message":
+            text = item.get("text", "")
+            if text:
+                emit(AgentEvent(EventType.TEXT, {"text": text}))
+        elif itype in ("command_execution", "mcp_tool_call"):
+            name = item.get("cmd") or item.get("tool") or itype
+            output = item.get("output") or item.get("stdout") or item.get("result") or ""
+            emit(AgentEvent(EventType.TOOL_USE, {
+                "name": str(name),
+                "input": item.get("arguments") or {"cmd": item.get("cmd", "")},
+            }))
+            if output:
+                emit(AgentEvent(EventType.TOOL_RESULT, {
+                    "name": str(name),
+                    "result": str(output)[:4000],
+                    "is_error": bool(item.get("exit_code", 0)),
+                }))
+    elif etype in ("turn.failed", "error"):
+        msg = event.get("message") or event.get("error") or event.get("detail") or ""
+        if isinstance(msg, dict):
+            msg = msg.get("message") or json.dumps(msg, default=str)
+        emit(AgentEvent(EventType.ERROR, {"error": str(msg)[:2000]}))
+    elif etype in ("thread.started", "turn.started", "item.started",
+                   "item.updated", "turn.completed"):
+        return  # Codex lifecycle markers — no user-visible content
+
     else:
-        # Truly unknown structured record — surface as raw text so the user
-        # sees something rather than nothing.
-        if event:
-            emit(AgentEvent(EventType.TEXT, {"text": line + "\n"}))
+        # Generic fallback: try well-known text keys (covers Gemini --output-format
+        # json with its top-level "response" key, Pi --mode json, and similar
+        # single-JSON-blob CLIs) before giving up.
+        for key in ("text", "response", "content", "output", "result", "message"):
+            val = event.get(key)
+            if isinstance(val, str) and val.strip():
+                emit(AgentEvent(EventType.TEXT, {"text": val.strip()}))
+                return
+        # Truly unrecognised — silently drop rather than dump raw JSON.
