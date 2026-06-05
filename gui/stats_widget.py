@@ -37,7 +37,7 @@ class StatsWidget(QFrame):
         self._build_ui()
 
     def _build_ui(self):
-        self.setFrameShape(QFrame.NoFrame)
+        self.setFrameShape(QFrame.Shape.NoFrame)
         self.setStyleSheet(f"""
             StatsWidget {{
                 background-color: {_INPUT_BG};
@@ -45,7 +45,7 @@ class StatsWidget(QFrame):
                 border-radius: 10px;
             }}
         """)
-        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum)
 
         main_layout = QVBoxLayout(self)
         main_layout.setSpacing(8)
@@ -53,7 +53,7 @@ class StatsWidget(QFrame):
 
         layer_name = self.stats_data.get("layer_name", "Layer")
         title = QLabel(layer_name)
-        title.setFont(QFont("Inter", 11, QFont.Bold))
+        title.setFont(QFont("Inter", 11, QFont.Weight.Bold))
         title.setStyleSheet(f"color: {_TEXT}; background: transparent;")
         main_layout.addWidget(title)
 
@@ -109,7 +109,7 @@ class StatsWidget(QFrame):
 
     def _create_stat_card(self, label, value):
         card = QFrame()
-        card.setFrameShape(QFrame.NoFrame)
+        card.setFrameShape(QFrame.Shape.NoFrame)
         card.setStyleSheet(f"""
             QFrame {{
                 background-color: {_SURFACE};

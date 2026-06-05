@@ -26,7 +26,7 @@ GRADIENT_START = "#79a883"
 GRADIENT_END = "#d9a35f"
 
 
-def _font(size, weight=QFont.Normal):
+def _font(size, weight=QFont.Weight.Normal):
     font = QFont()
     font.setPointSize(size)
     font.setWeight(weight)
@@ -51,7 +51,7 @@ class ChartWidget(QFrame):
         # 1-N entries and we'll repeat.
         raw_colors = chart_data.get("colors") or []
         self._custom_colors = [str(c) for c in raw_colors if isinstance(c, str) and c]
-        self.setFrameShape(QFrame.NoFrame)
+        self.setFrameShape(QFrame.Shape.NoFrame)
         self.setStyleSheet(f"""
             ChartWidget {{
                 background-color: {_INPUT_BG};
@@ -59,14 +59,14 @@ class ChartWidget(QFrame):
                 border-radius: 8px;
             }}
         """)
-        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         # Hit-test regions populated by _draw_*.
         self._hit_regions = []
         self._hover_index = -1
         self._pinned_index = -1
         self._cursor_pos = QPoint(0, 0)
         self.setMouseTracking(True)
-        self.setCursor(Qt.ArrowCursor)
+        self.setCursor(Qt.CursorShape.ArrowCursor)
 
     def minimumSizeHint(self):
         return QSize(100, 180)
@@ -86,12 +86,12 @@ class ChartWidget(QFrame):
 
             title_h = 0
             if self.title:
-                font = _font(10, QFont.Bold)
+                font = _font(10, QFont.Weight.Bold)
                 painter.setFont(font)
                 painter.setPen(QColor(_TEXT))
                 painter.drawText(
                     rect.left(), rect.top(), rect.width(), 20,
-                    Qt.AlignLeft | Qt.AlignVCenter, self.title
+                    Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, self.title
                 )
                 title_h = 24
 
@@ -172,7 +172,7 @@ class ChartWidget(QFrame):
             value = f"{value} ({pct:.1f}%)"
 
         font_label = _font(8)
-        font_value = _font(9, QFont.Bold)
+        font_value = _font(9, QFont.Weight.Bold)
         fm_label = QFontMetrics(font_label)
         fm_value = QFontMetrics(font_value)
         label = fm_label.elidedText(label, Qt.ElideRight, 160)
@@ -200,17 +200,17 @@ class ChartWidget(QFrame):
         painter.drawRoundedRect(box, 6, 6)
         painter.setFont(font_label)
         painter.setPen(QColor(_TEXT_2))
-        painter.drawText(box.adjusted(10, 6, -10, -22), Qt.AlignLeft | Qt.AlignVCenter, label)
+        painter.drawText(box.adjusted(10, 6, -10, -22), Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, label)
         painter.setFont(font_value)
         painter.setPen(QColor(_TEXT))
-        painter.drawText(box.adjusted(10, 22, -10, -6), Qt.AlignLeft | Qt.AlignVCenter, value)
+        painter.drawText(box.adjusted(10, 22, -10, -6), Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, value)
         painter.restore()
 
     def _draw_empty(self, painter, rect):
         font = _font(9)
         painter.setFont(font)
         painter.setPen(QColor(_TEXT_3))
-        painter.drawText(rect, Qt.AlignCenter, "No data")
+        painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, "No data")
 
     def _draw_bar(self, painter, rect):
         bars = self.data[:10]
@@ -253,7 +253,7 @@ class ChartWidget(QFrame):
 
             val_str = str(item["value"])
             painter.setPen(QColor(_TEXT_2))
-            painter.drawText(x, y - 2, bar_w, 12, Qt.AlignCenter, val_str)
+            painter.drawText(x, y - 2, bar_w, 12, Qt.AlignmentFlag.AlignCenter, val_str)
 
             lbl = QFontMetrics(font).elidedText(
                 str(item.get("label", "")),
@@ -261,7 +261,7 @@ class ChartWidget(QFrame):
                 max(12, bar_w),
             )
             painter.setPen(QColor(_TEXT_3))
-            painter.drawText(x, bottom + 4, bar_w, 16, Qt.AlignCenter, lbl)
+            painter.drawText(x, bottom + 4, bar_w, 16, Qt.AlignmentFlag.AlignCenter, lbl)
 
             # Hit region spans the full slot (not just the bar) so users
             # can hover the label too.
@@ -346,7 +346,7 @@ class ChartWidget(QFrame):
             font = _font(8)
             painter.setFont(font)
             painter.setPen(QColor(_TEXT_2))
-            painter.drawText(last_x - 20, last_y - 14, 40, 12, Qt.AlignCenter, last_val)
+            painter.drawText(last_x - 20, last_y - 14, 40, 12, Qt.AlignmentFlag.AlignCenter, last_val)
 
     def _draw_pie(self, painter, rect):
         items = [d for d in self.data[:7] if isinstance(d, dict) and "value" in d and isinstance(d.get("value"), (int, float))]
@@ -413,7 +413,7 @@ class ChartWidget(QFrame):
             painter.setPen(QColor(_TEXT_2))
             painter.drawText(
                 cx - hole_r, cy - hole_r, hole_r * 2, hole_r * 2,
-                Qt.AlignCenter, center_text
+                Qt.AlignmentFlag.AlignCenter, center_text
             )
 
         font = _font(8)
@@ -469,11 +469,11 @@ class ChartWidget(QFrame):
         idx = self._index_at(event.pos())
         if idx != self._hover_index:
             self._hover_index = idx
-            self.setCursor(Qt.PointingHandCursor if idx >= 0 else Qt.ArrowCursor)
+            self.setCursor(Qt.CursorShape.PointingHandCursor if idx >= 0 else Qt.CursorShape.ArrowCursor)
             self.update()
 
     def mousePressEvent(self, event):
-        if event.button() == Qt.LeftButton:
+        if event.button() == Qt.MouseButton.LeftButton:
             self._cursor_pos = event.pos()
             idx = self._index_at(event.pos())
             if self._pinned_index == idx:
@@ -483,7 +483,7 @@ class ChartWidget(QFrame):
             else:
                 self._pinned_index = -1
             self.update()
-        elif event.button() == Qt.RightButton:
+        elif event.button() == Qt.MouseButton.RightButton:
             # Copy the underlying data as TSV to the clipboard. Convenient
             # for the user to drop into a spreadsheet or note.
             rows = ["label\traw_label\tvalue"]
@@ -498,7 +498,7 @@ class ChartWidget(QFrame):
     def leaveEvent(self, event):
         if self._hover_index != -1:
             self._hover_index = -1
-            self.setCursor(Qt.ArrowCursor)
+            self.setCursor(Qt.CursorShape.ArrowCursor)
             self.update()
 
     def mouseDoubleClickEvent(self, event):

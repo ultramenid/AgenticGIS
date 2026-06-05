@@ -35,9 +35,9 @@ _ACCENT_HOV  = "#f2eadb"
 _WARN        = "#d99a3c"
 
 
-def _mono(size, weight=QFont.Normal):
+def _mono(size, weight=QFont.Weight.Normal):
     font = QFont("JetBrains Mono", size)
-    font.setStyleHint(QFont.Monospace)
+    font.setStyleHint(QFont.StyleHint.Monospace)
     font.setWeight(weight)
     return font
 
@@ -49,10 +49,10 @@ class _OptionRow(QFrame):
         super().__init__(parent)
         self._label = label or ""
         self.setObjectName("AskUserOptionRow")
-        self.setCursor(Qt.PointingHandCursor)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setFocusPolicy(Qt.StrongFocus)
         self.setAttribute(Qt.WA_Hover, True)
-        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum)
         self._hovered = False
         self._pressed = False
         self._apply_style()
@@ -65,7 +65,7 @@ class _OptionRow(QFrame):
         title = QLabel(self._label)
         self._title = title
         title.setObjectName("AskUserOptionTitle")
-        title.setFont(_mono(11, QFont.DemiBold))
+        title.setFont(_mono(11, QFont.Weight.DemiBold))
         title.setWordWrap(True)
         title.setMinimumWidth(0)
         title.setStyleSheet(
@@ -146,7 +146,7 @@ class _OptionRow(QFrame):
         super().focusOutEvent(event)
 
     def mousePressEvent(self, event):
-        if event.button() == Qt.LeftButton:
+        if event.button() == Qt.MouseButton.LeftButton:
             self._pressed = True
             self._apply_style()
         super().mousePressEvent(event)
@@ -160,7 +160,7 @@ class _OptionRow(QFrame):
         super().mouseReleaseEvent(event)
 
     def keyPressEvent(self, event):
-        if event.key() in (Qt.Key_Return, Qt.Key_Enter, Qt.Key_Space):
+        if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter, Qt.Key.Key_Space):
             self.clicked.emit(self._label)
             event.accept()
             return
@@ -175,7 +175,7 @@ class AskUserCard(QFrame):
         self.setObjectName("AskUserCard")
         self.setMinimumWidth(280)
         self.setMaximumWidth(560)
-        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         self.setStyleSheet(f"""
             QFrame#AskUserCard {{
                 background-color: {_SURFACE};
@@ -198,10 +198,10 @@ class AskUserCard(QFrame):
         marker.setStyleSheet(
             f"background:{_WARN}; border:1px solid {_WARN}; border-radius:4px;"
         )
-        header_row.addWidget(marker, 0, Qt.AlignVCenter)
+        header_row.addWidget(marker, 0, Qt.AlignmentFlag.AlignVCenter)
 
         header = QLabel("Action required")
-        header.setFont(_mono(10, QFont.DemiBold))
+        header.setFont(_mono(10, QFont.Weight.DemiBold))
         header.setStyleSheet(
             f"color:{_TEXT_2}; font-size:11px;"
             f"background:transparent; border:none;"
@@ -212,10 +212,10 @@ class AskUserCard(QFrame):
 
         q = QLabel(question)
         q.setObjectName("AskUserQuestion")
-        q.setFont(_mono(12, QFont.DemiBold))
+        q.setFont(_mono(12, QFont.Weight.DemiBold))
         q.setWordWrap(True)
         q.setMinimumWidth(0)
-        q.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        q.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         q.setStyleSheet(
             f"color:{_TEXT}; font-size:13px; line-height:1.45; "
             f"background:transparent; border:none;"
@@ -259,10 +259,10 @@ class AskUserCard(QFrame):
             ft_row.addWidget(self._free_text, 1)
 
             send = QPushButton("Send")
-            send.setCursor(Qt.PointingHandCursor)
+            send.setCursor(Qt.CursorShape.PointingHandCursor)
             send.setMinimumHeight(36)
             send.setMinimumWidth(72)
-            send.setFont(_mono(10, QFont.DemiBold))
+            send.setFont(_mono(10, QFont.Weight.DemiBold))
             send.setStyleSheet(f"""
                 QPushButton {{
                     background-color: {_ACCENT};

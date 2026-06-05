@@ -337,7 +337,7 @@ class ChatDock(QgsDockWidget):
 
         # -- Hairline divider -------------------------------------------- #
         divider = QFrame()
-        divider.setFrameShape(QFrame.HLine)
+        divider.setFrameShape(QFrame.Shape.HLine)
         divider.setFixedHeight(1)
         divider.setStyleSheet(f"background-color: {_BORDER}; border: none;")
         layout.addWidget(divider)
@@ -345,7 +345,7 @@ class ChatDock(QgsDockWidget):
         # -- Scrollable transcript --------------------------------------- #
         self.scroll = QScrollArea()
         self.scroll.setWidgetResizable(True)
-        self.scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.scroll.setStyleSheet(f"""
             QScrollArea {{
                 border: none;
@@ -385,7 +385,7 @@ class ChatDock(QgsDockWidget):
 
         # -- Hairline divider above input -------------------------------- #
         divider2 = QFrame()
-        divider2.setFrameShape(QFrame.HLine)
+        divider2.setFrameShape(QFrame.Shape.HLine)
         divider2.setFixedHeight(1)
         divider2.setStyleSheet(f"background-color: {_BORDER}; border: none;")
         layout.addWidget(divider2)
@@ -423,12 +423,12 @@ class ChatDock(QgsDockWidget):
         self.input.setAcceptRichText(False)
         self.input.setTabChangesFocus(True)
         self.input.setLineWrapMode(QTextEdit.WidgetWidth)
-        self.input.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-        self.input.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.input.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self.input.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.input.setFixedHeight(self._input_min_h)
         self.input.document().setDocumentMargin(0)
         mono_font = QFont("JetBrains Mono")
-        mono_font.setStyleHint(QFont.Monospace)
+        mono_font.setStyleHint(QFont.StyleHint.Monospace)
         mono_font.setPointSize(10)
         self.input.setFont(mono_font)
         self.input.setStyleSheet(f"""
@@ -454,7 +454,7 @@ class ChatDock(QgsDockWidget):
         """)
         self.input.textChanged.connect(self._resize_input)
         self._update_input_vertical_inset(self._input_min_h)
-        field_row.addWidget(self.input, 1, Qt.AlignVCenter)
+        field_row.addWidget(self.input, 1, Qt.AlignmentFlag.AlignVCenter)
 
         # Send button — inside the field frame, right edge
         self.send_btn = QPushButton("→")
@@ -471,7 +471,7 @@ class ChatDock(QgsDockWidget):
             QPushButton:disabled {{ color: {_TEXT_3}; }}
         """)
         self.send_btn.clicked.connect(self._on_send)
-        field_row.addWidget(self.send_btn, 0, Qt.AlignVCenter)
+        field_row.addWidget(self.send_btn, 0, Qt.AlignmentFlag.AlignVCenter)
 
         # Stop button — inside the field frame, replaces send when running
         self.stop_btn = QPushButton("■")
@@ -489,7 +489,7 @@ class ChatDock(QgsDockWidget):
         self.stop_btn.clicked.connect(self._on_stop)
         self.stop_btn.setEnabled(False)
         self.stop_btn.setVisible(False)
-        field_row.addWidget(self.stop_btn, 0, Qt.AlignVCenter)
+        field_row.addWidget(self.stop_btn, 0, Qt.AlignmentFlag.AlignVCenter)
 
         input_bar.addWidget(input_frame)
         layout.addWidget(input_wrap)
@@ -524,12 +524,12 @@ class ChatDock(QgsDockWidget):
             self.transcript_widget.setFixedWidth(event.size().width())
             return False
         if obj is self.input and event.type() == QEvent.KeyPress:
-            if event.key() == Qt.Key_Escape:
+            if event.key() == Qt.Key.Key_Escape:
                 return self._handle_input_escape()
-            if event.key() in (Qt.Key_Up, Qt.Key_Down) and event.modifiers() == Qt.NoModifier:
+            if event.key() in (Qt.Key.Key_Up, Qt.Key.Key_Down) and event.modifiers() == Qt.NoModifier:
                 if self._handle_prompt_history_key(event.key()):
                     return True
-            if event.key() in (Qt.Key_Return, Qt.Key_Enter):
+            if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
                 if self._newline_modifier(event.modifiers()):
                     self.input.insertPlainText("\n")
                     self._resize_input()
@@ -569,12 +569,12 @@ class ChatDock(QgsDockWidget):
         cursor = self.input.textCursor()
         block_number = cursor.blockNumber()
         last_block = max(0, self.input.document().blockCount() - 1)
-        if key == Qt.Key_Up and block_number > 0:
+        if key == Qt.Key.Key_Up and block_number > 0:
             return False
-        if key == Qt.Key_Down and block_number < last_block:
+        if key == Qt.Key.Key_Down and block_number < last_block:
             return False
 
-        if key == Qt.Key_Up:
+        if key == Qt.Key.Key_Up:
             if self._prompt_history_index is None:
                 self._prompt_history_draft = self.input.toPlainText()
                 self._prompt_history_index = len(self._prompt_history) - 1
@@ -583,7 +583,7 @@ class ChatDock(QgsDockWidget):
             self._set_input_text_from_history(self._prompt_history[self._prompt_history_index])
             return True
 
-        if key == Qt.Key_Down:
+        if key == Qt.Key.Key_Down:
             if self._prompt_history_index is None:
                 return False
             if self._prompt_history_index >= len(self._prompt_history) - 1:
@@ -733,7 +733,7 @@ class ChatDock(QgsDockWidget):
 
     def _add_agent_turn_widget(self):
         container = QWidget()
-        container.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        container.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         vl = QVBoxLayout(container)
         vl.setContentsMargins(16, 0, 16, 0)
         vl.setSpacing(3)
@@ -757,7 +757,7 @@ class ChatDock(QgsDockWidget):
 
     def _add_compaction_notice(self):
         w = QLabel("── history compacted ──")
-        w.setAlignment(Qt.AlignCenter)
+        w.setAlignment(Qt.AlignmentFlag.AlignCenter)
         w.setStyleSheet(
             f"color:{_TEXT_4}; font-size:10px; font-family:'JetBrains Mono',monospace;"
             f" padding:4px 0; background:transparent;"
@@ -1028,14 +1028,14 @@ class ChatDock(QgsDockWidget):
         new_session = QPushButton("New session")
         for button in (previous, sessions, new_session):
             button.setMinimumHeight(36)
-            button.setCursor(Qt.PointingHandCursor)
+            button.setCursor(Qt.CursorShape.PointingHandCursor)
             button.setStyleSheet(self._session_dialog_button_style("wide"))
             card_layout.addWidget(button)
 
         previous.clicked.connect(lambda: (dialog.accept(), self._switch_to_session(self._session_store.active_session()["id"])))
         sessions.clicked.connect(lambda: (dialog.accept(), self._show_session_list()))
         new_session.clicked.connect(lambda: (dialog.accept(), self._new_session_from_menu()))
-        dialog.exec_()
+        dialog.exec()
 
     def _session_dialog_style(self):
         return f"""
@@ -1069,9 +1069,9 @@ class ChatDock(QgsDockWidget):
         marker = QLabel("")
         marker.setFixedSize(9, 9)
         marker.setStyleSheet(f"background:{_WARN}; border:1px solid {_WARN}; border-radius:4px;")
-        header_row.addWidget(marker, 0, Qt.AlignVCenter)
+        header_row.addWidget(marker, 0, Qt.AlignmentFlag.AlignVCenter)
         header = QLabel(title)
-        header.setFont(QFont("JetBrains Mono", 10, QFont.DemiBold))
+        header.setFont(QFont("JetBrains Mono", 10, QFont.Weight.DemiBold))
         header.setStyleSheet(f"color:{_TEXT_2}; font-size:11px;")
         header_row.addWidget(header)
         header_row.addStretch(1)
@@ -1127,12 +1127,12 @@ class ChatDock(QgsDockWidget):
         actions.setSpacing(8)
         actions.addStretch(1)
         cancel = QPushButton("Cancel")
-        cancel.setCursor(Qt.PointingHandCursor)
+        cancel.setCursor(Qt.CursorShape.PointingHandCursor)
         cancel.setFixedHeight(32)
         cancel.setMinimumWidth(72)
         cancel.setStyleSheet(self._session_dialog_button_style("secondary"))
         confirm = QPushButton("Save")
-        confirm.setCursor(Qt.PointingHandCursor)
+        confirm.setCursor(Qt.CursorShape.PointingHandCursor)
         confirm.setFixedHeight(32)
         confirm.setMinimumWidth(72)
         confirm.setStyleSheet(self._session_dialog_button_style("wide"))
@@ -1173,7 +1173,7 @@ class ChatDock(QgsDockWidget):
         row_layout.setSpacing(3)
         title = QLabel(name)
         title.setWordWrap(True)
-        title.setFont(QFont("JetBrains Mono", 11, QFont.DemiBold))
+        title.setFont(QFont("JetBrains Mono", 11, QFont.Weight.DemiBold))
         title.setStyleSheet(f"color:{_TEXT}; font-size:12px;")
         meta = QLabel("Deletion cannot be undone")
         meta.setFont(QFont("JetBrains Mono", 10))
@@ -1187,12 +1187,12 @@ class ChatDock(QgsDockWidget):
         actions.setSpacing(8)
         actions.addStretch(1)
         cancel = QPushButton("Cancel")
-        cancel.setCursor(Qt.PointingHandCursor)
+        cancel.setCursor(Qt.CursorShape.PointingHandCursor)
         cancel.setFixedHeight(32)
         cancel.setMinimumWidth(72)
         cancel.setStyleSheet(self._session_dialog_button_style("secondary"))
         delete = QPushButton("Delete")
-        delete.setCursor(Qt.PointingHandCursor)
+        delete.setCursor(Qt.CursorShape.PointingHandCursor)
         delete.setFixedHeight(32)
         delete.setMinimumWidth(72)
         delete.setStyleSheet(self._session_dialog_button_style("danger"))
@@ -1206,7 +1206,7 @@ class ChatDock(QgsDockWidget):
     def _confirm_delete_session(self, session):
         dialog = self._build_delete_session_dialog(session)
         try:
-            return dialog.exec_() == QDialog.Accepted
+            return dialog.exec() == QDialog.Accepted
         finally:
             dialog.deleteLater()
 
@@ -1260,7 +1260,7 @@ class ChatDock(QgsDockWidget):
 
     def _prompt_session_name(self, title, current=""):
         dialog, field = self._build_session_name_dialog(title, current)
-        if dialog.exec_() != QDialog.Accepted:
+        if dialog.exec() != QDialog.Accepted:
             return None
         text = field.text()
         return (text or DEFAULT_SESSION_NAME).strip() or DEFAULT_SESSION_NAME
@@ -1325,7 +1325,7 @@ class ChatDock(QgsDockWidget):
             text_col.setSpacing(3)
             name = QLabel(session.get("name", DEFAULT_SESSION_NAME))
             name.setWordWrap(True)
-            name.setFont(QFont("JetBrains Mono", 11, QFont.DemiBold))
+            name.setFont(QFont("JetBrains Mono", 11, QFont.Weight.DemiBold))
             name.setStyleSheet(f"color:{_TEXT}; font-size:12px;")
             size_text = self._format_session_size(session.get("size_bytes", 0))
             meta = QLabel(
@@ -1345,7 +1345,7 @@ class ChatDock(QgsDockWidget):
                 ("Delete", lambda _checked=False, sid=session["id"]: self._delete_session_from_list(sid, dialog)),
             ):
                 button = QPushButton(text)
-                button.setCursor(Qt.PointingHandCursor)
+                button.setCursor(Qt.CursorShape.PointingHandCursor)
                 button.setFixedHeight(28)
                 button.setMinimumWidth(58)
                 role = "danger" if text == "Delete" else "secondary"
@@ -1355,12 +1355,12 @@ class ChatDock(QgsDockWidget):
             card_layout.addWidget(row)
 
         close = QPushButton("Close")
-        close.setCursor(Qt.PointingHandCursor)
+        close.setCursor(Qt.CursorShape.PointingHandCursor)
         close.setMinimumHeight(34)
         close.setStyleSheet(self._session_dialog_button_style("wide"))
         close.clicked.connect(dialog.reject)
         card_layout.addWidget(close)
-        dialog.exec_()
+        dialog.exec()
 
     def _rename_session_from_list(self, session_id, dialog):
         session = self._session_store.get_session(session_id)

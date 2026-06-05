@@ -33,7 +33,7 @@ class TypingIndicator(QWidget):
         self.destroyed.connect(self._on_destroyed)
 
     def _setup_ui(self):
-        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum)
 
         outer = QHBoxLayout(self)
         outer.setContentsMargins(16, 0, 16, 0)
@@ -48,7 +48,7 @@ class TypingIndicator(QWidget):
                 border-radius: 4px;
             }}
         """)
-        bubble.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
+        bubble.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum)
 
         layout = QHBoxLayout(bubble)
         layout.setContentsMargins(14, 9, 14, 9)
@@ -59,7 +59,7 @@ class TypingIndicator(QWidget):
         font = QFont()
         font.setFamily("JetBrains Mono")
         font.setPointSize(12)
-        font.setStyleHint(QFont.Monospace)
+        font.setStyleHint(QFont.StyleHint.Monospace)
         self.prefix_label.setFont(font)
         self.prefix_label.setStyleSheet(f"""
             color: {_TEXT};
@@ -73,7 +73,7 @@ class TypingIndicator(QWidget):
         self.cursor_label = QLabel(_CURSOR_ON)
         cursor_font = QFont()
         cursor_font.setFamily("JetBrains Mono")
-        cursor_font.setStyleHint(QFont.Monospace)
+        cursor_font.setStyleHint(QFont.StyleHint.Monospace)
         cursor_font.setPointSize(12)
         self.cursor_label.setFont(cursor_font)
         self.cursor_label.setMinimumWidth(12)

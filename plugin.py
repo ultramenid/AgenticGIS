@@ -119,5 +119,5 @@ class AgenticGisPlugin:
         from .gui.settings_dialog import SettingsDialog
 
         dialog = SettingsDialog(self.config, self.iface.mainWindow())
-        dialog.exec_()
+        dialog.exec()
         # Backend is rebuilt lazily on the next send via _get_backend().

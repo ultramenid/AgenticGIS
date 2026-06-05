@@ -47,10 +47,10 @@ class ReasoningTicker(QWidget):
         self._buffer = ""
         self._phase = 0
         self.setVisible(False)
-        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
 
         mono = QFont("JetBrains Mono", 10)
-        mono.setStyleHint(QFont.Monospace)
+        mono.setStyleHint(QFont.StyleHint.Monospace)
         mono.setItalic(True)
 
         hbox = QHBoxLayout(self)
@@ -68,7 +68,7 @@ class ReasoningTicker(QWidget):
         self._lbl.setStyleSheet(
             f"color:{_TEXT_3}; background:transparent; font-style:italic;"
         )
-        self._lbl.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        self._lbl.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         hbox.addWidget(self._lbl)
 
         self._timer = QTimer(self)
@@ -125,11 +125,11 @@ class ToolSubItem(QWidget):
         self._bubble = None   # set by AgentTurnBubble.add_tool()
         self._result = ""
 
-        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.setStyleSheet("background:transparent;")
 
         mono = QFont("JetBrains Mono", 10)
-        mono.setStyleHint(QFont.Monospace)
+        mono.setStyleHint(QFont.StyleHint.Monospace)
 
         hbox = QHBoxLayout(self)
         hbox.setContentsMargins(20, 1, 12, 1)
@@ -238,11 +238,11 @@ class ToolGroupRow(QWidget):
         self._elapsed = QElapsedTimer()
         self._elapsed.start()
 
-        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         self.setStyleSheet("background:transparent;")
 
         mono = QFont("JetBrains Mono", 10)
-        mono.setStyleHint(QFont.Monospace)
+        mono.setStyleHint(QFont.StyleHint.Monospace)
 
         self._layout = QVBoxLayout(self)
         self._layout.setContentsMargins(0, 2, 0, 2)
@@ -250,7 +250,7 @@ class ToolGroupRow(QWidget):
 
         # Header row
         header = QWidget()
-        header.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        header.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         hbox = QHBoxLayout(header)
         hbox.setContentsMargins(12, 2, 12, 2)
         hbox.setSpacing(6)
@@ -365,8 +365,8 @@ class AgentTurnBubble(QFrame):
         self._progress_phase = 0
         self._user_decision_lbl = None
 
-        self.setFrameShape(QFrame.NoFrame)
-        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        self.setFrameShape(QFrame.Shape.NoFrame)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         self.setStyleSheet(f"""
             AgentTurnBubble {{
                 background: {_SURFACE};
@@ -385,7 +385,7 @@ class AgentTurnBubble(QFrame):
 
         self._tools_area = QWidget(self)
         self._tools_area.setVisible(False)
-        self._tools_area.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        self._tools_area.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         self._tools_area.setStyleSheet("background:transparent;")
         self._tools_layout = QVBoxLayout(self._tools_area)
         self._tools_layout.setContentsMargins(0, 0, 0, 0)
@@ -395,7 +395,7 @@ class AgentTurnBubble(QFrame):
         self.text_lbl = QLabel("")
         self.text_lbl.setWordWrap(True)
         self.text_lbl.setMinimumWidth(0)
-        self.text_lbl.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Preferred)
+        self.text_lbl.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred)
         self.text_lbl.setTextFormat(Qt.RichText)
         self.text_lbl.setTextInteractionFlags(
             Qt.TextBrowserInteraction | Qt.TextSelectableByMouse
@@ -404,7 +404,7 @@ class AgentTurnBubble(QFrame):
         self.text_lbl.setContextMenuPolicy(Qt.CustomContextMenu)
         self.text_lbl.customContextMenuRequested.connect(self._show_text_context_menu)
         font = QFont("JetBrains Mono", 12)
-        font.setStyleHint(QFont.Monospace)
+        font.setStyleHint(QFont.StyleHint.Monospace)
         self.text_lbl.setFont(font)
         self.text_lbl.setStyleSheet(f"""
             color:{_TEXT}; background:transparent; border:none;

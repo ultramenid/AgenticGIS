@@ -65,9 +65,9 @@ _FORMAT_LABELS = [
 ]
 
 # ── Font helper ───────────────────────────────────────────────────────────────
-def _mono(size=10, weight=QFont.Normal):
+def _mono(size=10, weight=QFont.Weight.Normal):
     f = QFont("JetBrains Mono", size)
-    f.setStyleHint(QFont.Monospace)
+    f.setStyleHint(QFont.StyleHint.Monospace)
     f.setWeight(weight)
     return f
 
@@ -198,9 +198,9 @@ def _cmb(widget):
 
 def _install_tooltip_palette():
     palette = QToolTip.palette()
-    for group in (QPalette.Active, QPalette.Inactive, QPalette.Disabled):
-        palette.setColor(group, QPalette.ToolTipBase, QColor(_SURFACE_2))
-        palette.setColor(group, QPalette.ToolTipText, QColor(_TEXT))
+    for group in (QPalette.ColorGroup.Active, QPalette.ColorGroup.Inactive, QPalette.ColorGroup.Disabled):
+        palette.setColor(group, QPalette.ColorRole.ToolTipBase, QColor(_SURFACE_2))
+        palette.setColor(group, QPalette.ColorRole.ToolTipText, QColor(_TEXT))
     QToolTip.setPalette(palette)
     QToolTip.setFont(_mono(9))
     app = QApplication.instance()
@@ -267,8 +267,8 @@ class _ModelPickerWidget(QWidget):
         lay.setSpacing(0)
         self._btn = QPushButton()
         self._btn.setFont(_mono(10))
-        self._btn.setCursor(Qt.PointingHandCursor)
-        self._btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self._btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._btn.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self._btn.clicked.connect(self._toggle_popup)
         self._refresh_btn()
         lay.addWidget(self._btn)
@@ -333,7 +333,7 @@ class _ModelPickerWidget(QWidget):
             self._open_popup()
 
     def _open_popup(self):
-        popup = QFrame(self.window(), Qt.Popup | Qt.FramelessWindowHint)
+        popup = QFrame(self.window(), Qt.WindowType.Popup | Qt.WindowType.FramelessWindowHint)
         popup.setObjectName("ModelPopup")
         popup.setStyleSheet(self._POPUP_SS)
         popup.setFixedWidth(max(self._btn.width(), 300))
@@ -386,9 +386,9 @@ class _ModelPickerWidget(QWidget):
         # Section header helper
         def _header(text):
             it = QListWidgetItem(text)
-            it.setFont(_mono(8, QFont.DemiBold))
+            it.setFont(_mono(8, QFont.Weight.DemiBold))
             it.setForeground(QColor(_TEXT_3))
-            it.setFlags(Qt.NoItemFlags)  # not selectable
+            it.setFlags(Qt.ItemFlag.NoItemFlags)  # not selectable
             return it
 
         # ── Active model pinned at top ────────────────────────────────────
@@ -396,9 +396,9 @@ class _ModelPickerWidget(QWidget):
             if not q or q in self._active.lower():
                 lst.addItem(_header("  ACTIVE"))
                 it = QListWidgetItem(f"  {self._active}")
-                it.setData(Qt.UserRole, self._active)
+                it.setData(Qt.ItemDataRole.UserRole, self._active)
                 it.setForeground(QColor(_WARN))
-                it.setFont(_mono(10, QFont.DemiBold))
+                it.setFont(_mono(10, QFont.Weight.DemiBold))
                 lst.addItem(it)
 
         # ── Available models ──────────────────────────────────────────────
@@ -410,14 +410,14 @@ class _ModelPickerWidget(QWidget):
             lst.addItem(_header("  AVAILABLE"))
             for m in filtered:
                 it = QListWidgetItem(f"  {m}")
-                it.setData(Qt.UserRole, m)
+                it.setData(Qt.ItemDataRole.UserRole, m)
                 lst.addItem(it)
 
         # ── Custom entry hint when nothing matches ────────────────────────
         if q and not self._active_matches(q) and not filtered:
             lst.addItem(_header("  CUSTOM"))
             it = QListWidgetItem(f'  Use "{query.strip()}"')
-            it.setData(Qt.UserRole, query.strip())
+            it.setData(Qt.ItemDataRole.UserRole, query.strip())
             it.setForeground(QColor(_TEXT_2))
             lst.addItem(it)
 
@@ -432,8 +432,8 @@ class _ModelPickerWidget(QWidget):
         # Find first selectable item
         for i in range(lst.count()):
             it = lst.item(i)
-            if it.flags() & Qt.ItemIsEnabled and it.data(Qt.UserRole):
-                self._apply(it.data(Qt.UserRole))
+            if it.flags() & Qt.ItemFlag.ItemIsEnabled and it.data(Qt.ItemDataRole.UserRole):
+                self._apply(it.data(Qt.ItemDataRole.UserRole))
                 return
         # Fall back to raw typed text
         typed = self._popup._search.text().strip()
@@ -441,7 +441,7 @@ class _ModelPickerWidget(QWidget):
             self._apply(typed)
 
     def _pick_item(self, item):
-        val = item.data(Qt.UserRole)
+        val = item.data(Qt.ItemDataRole.UserRole)
         if val:
             self._apply(val)
 
@@ -493,7 +493,7 @@ def _ghost_btn(text):
 
 def _separator():
     line = QFrame()
-    line.setFrameShape(QFrame.HLine)
+    line.setFrameShape(QFrame.Shape.HLine)
     line.setStyleSheet(f"color: {_BORDER_SOFT}; background: {_BORDER_SOFT};")
     line.setFixedHeight(1)
     return line
@@ -535,14 +535,14 @@ class _SectionCard(QFrame):
         dot = QLabel("●")
         dot.setFont(_mono(7))
         dot.setStyleSheet(f"color: {_WARN}; background: transparent; border: none;")
-        h.addWidget(dot, 0, Qt.AlignVCenter)
+        h.addWidget(dot, 0, Qt.AlignmentFlag.AlignVCenter)
 
         cap = QLabel(title.upper())
-        cap.setFont(_mono(8, QFont.DemiBold))
+        cap.setFont(_mono(8, QFont.Weight.DemiBold))
         cap.setStyleSheet(
             f"color: {_TEXT_3}; background: transparent; border: none; letter-spacing: 1px;"
         )
-        h.addWidget(cap, 1, Qt.AlignVCenter)
+        h.addWidget(cap, 1, Qt.AlignmentFlag.AlignVCenter)
         root.addWidget(header)
 
         body = QWidget()
@@ -576,7 +576,7 @@ class _CollapsibleCard(QFrame):
 
         self._header = QWidget()
         self._header.setObjectName("CollapsibleHeader")
-        self._header.setCursor(Qt.PointingHandCursor)
+        self._header.setCursor(Qt.CursorShape.PointingHandCursor)
         self._header.setStyleSheet(
             "QWidget#CollapsibleHeader { background: transparent; }"
         )
@@ -587,21 +587,21 @@ class _CollapsibleCard(QFrame):
         dot = QLabel("●")
         dot.setFont(_mono(7))
         dot.setStyleSheet(f"color: {_TEXT_3}; background: transparent; border: none;")
-        h.addWidget(dot, 0, Qt.AlignVCenter)
+        h.addWidget(dot, 0, Qt.AlignmentFlag.AlignVCenter)
 
         cap = QLabel(title.upper())
-        cap.setFont(_mono(8, QFont.DemiBold))
+        cap.setFont(_mono(8, QFont.Weight.DemiBold))
         cap.setStyleSheet(
             f"color: {_TEXT_3}; background: transparent; border: none; letter-spacing: 1px;"
         )
-        h.addWidget(cap, 1, Qt.AlignVCenter)
+        h.addWidget(cap, 1, Qt.AlignmentFlag.AlignVCenter)
 
         self._arrow = QLabel("▾" if initially_expanded else "▸")
         self._arrow.setFont(_mono(9))
         self._arrow.setStyleSheet(
             f"color: {_TEXT_3}; background: transparent; border: none;"
         )
-        h.addWidget(self._arrow, 0, Qt.AlignVCenter)
+        h.addWidget(self._arrow, 0, Qt.AlignmentFlag.AlignVCenter)
         root.addWidget(self._header)
         self._header.mousePressEvent = lambda _e: self._toggle()
 
@@ -656,20 +656,20 @@ class SettingsDialog(QDialog):
         marker = QLabel("●")
         marker.setFont(_mono(10))
         marker.setStyleSheet(f"color: {_WARN}; background: transparent;")
-        hdr.addWidget(marker, 0, Qt.AlignVCenter)
+        hdr.addWidget(marker, 0, Qt.AlignmentFlag.AlignVCenter)
 
         title = QLabel("AgenticGIS  —  Settings")
-        title.setFont(_mono(13, QFont.DemiBold))
+        title.setFont(_mono(13, QFont.Weight.DemiBold))
         title.setStyleSheet(f"color: {_TEXT}; background: transparent;")
-        hdr.addWidget(title, 1, Qt.AlignVCenter)
+        hdr.addWidget(title, 1, Qt.AlignmentFlag.AlignVCenter)
         root.addLayout(hdr)
         root.addWidget(_separator())
 
         # ─ scrollable body ─
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QFrame.NoFrame)
-        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
 
         body_w = QWidget()
         body_w.setStyleSheet(f"background: {_SURFACE};")
@@ -684,7 +684,7 @@ class SettingsDialog(QDialog):
         cb = conn.body()
 
         self.connection_tabs = QTabBar()
-        self.connection_tabs.setFont(_mono(10, QFont.DemiBold))
+        self.connection_tabs.setFont(_mono(10, QFont.Weight.DemiBold))
         self.connection_tabs.setStyleSheet(_TAB_SS)
         self.connection_tabs.setDrawBase(False)
         self.connection_tabs.setExpanding(False)
@@ -692,7 +692,7 @@ class SettingsDialog(QDialog):
         for label, _ in _MODE_LABELS:
             self.connection_tabs.addTab(label)
         self.connection_tabs.currentChanged.connect(self.stack_set)
-        cb.addWidget(self.connection_tabs, 0, Qt.AlignLeft)
+        cb.addWidget(self.connection_tabs, 0, Qt.AlignmentFlag.AlignLeft)
 
         self.stack = QStackedWidget()
         self.stack.setStyleSheet("background: transparent; border: none;")
@@ -720,13 +720,13 @@ class SettingsDialog(QDialog):
         btn_row.addStretch(1)
 
         self._cancel_btn = QPushButton("Cancel")
-        self._cancel_btn.setFont(_mono(10, QFont.DemiBold))
+        self._cancel_btn.setFont(_mono(10, QFont.Weight.DemiBold))
         self._cancel_btn.setStyleSheet(_BTN_SECONDARY_SS)
         self._cancel_btn.clicked.connect(self.reject)
         btn_row.addWidget(self._cancel_btn)
 
         self._save_btn = QPushButton("Save")
-        self._save_btn.setFont(_mono(10, QFont.DemiBold))
+        self._save_btn.setFont(_mono(10, QFont.Weight.DemiBold))
         self._save_btn.setStyleSheet(_BTN_PRIMARY_SS)
         self._save_btn.setDefault(True)
         self._save_btn.clicked.connect(self._save_and_accept)
@@ -812,7 +812,7 @@ class SettingsDialog(QDialog):
         form = QFormLayout(w)
         form.setSpacing(10)
         form.setContentsMargins(0, 4, 0, 4)
-        form.setLabelAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        form.setLabelAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
         return form
 
     def _model_group(self, picker_attr):
@@ -822,7 +822,7 @@ class SettingsDialog(QDialog):
         mg = QFormLayout(group)
         mg.setSpacing(6)
         mg.setContentsMargins(0, 2, 0, 0)
-        mg.setLabelAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        mg.setLabelAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
 
         picker = _ModelPickerWidget("Select or type a model name")
         picker.modelChanged.connect(self._update_connection_tab_labels)
@@ -868,7 +868,7 @@ class SettingsDialog(QDialog):
         form = QFormLayout(form_w)
         form.setSpacing(10)
         form.setContentsMargins(0, 0, 0, 0)
-        form.setLabelAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        form.setLabelAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
 
         self.provider_combo = _cmb(QComboBox())
         for p in providers.all_providers():
@@ -881,7 +881,7 @@ class SettingsDialog(QDialog):
         form.addRow(_lbl("Base URL:"), self.api_base_url_edit)
 
         self.api_key_edit = _inp(QLineEdit())
-        self.api_key_edit.setEchoMode(QLineEdit.Password)
+        self.api_key_edit.setEchoMode(QLineEdit.EchoMode.Password)
         self.api_key_edit.setPlaceholderText("Paste your API key here")
         form.addRow(_lbl("API key:"), self.api_key_edit)
         col.addWidget(form_w)
@@ -910,7 +910,7 @@ class SettingsDialog(QDialog):
         form = QFormLayout(form_w)
         form.setSpacing(10)
         form.setContentsMargins(0, 0, 0, 0)
-        form.setLabelAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        form.setLabelAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
 
         self.custom_url_edit = _inp(QLineEdit())
         self.custom_url_edit.setPlaceholderText("https://api.example.com")
@@ -918,7 +918,7 @@ class SettingsDialog(QDialog):
         form.addRow(_lbl("Base URL:"), self.custom_url_edit)
 
         self.custom_key_edit = _inp(QLineEdit())
-        self.custom_key_edit.setEchoMode(QLineEdit.Password)
+        self.custom_key_edit.setEchoMode(QLineEdit.EchoMode.Password)
         self.custom_key_edit.setPlaceholderText("API key for this endpoint")
         form.addRow(_lbl("API key:"), self.custom_key_edit)
 
@@ -1156,7 +1156,12 @@ class SettingsDialog(QDialog):
         self._update_connection_tab_labels()
 
     def _browse_cli(self):
-        path, _ = QFileDialog.getOpenFileName(self, "Select agent CLI binary")
+        import platform as _platform
+        if _platform.system() == "Windows":
+            flt = "Executables (*.exe *.cmd *.bat);;All files (*)"
+        else:
+            flt = "All files (*)"
+        path, _ = QFileDialog.getOpenFileName(self, "Select agent CLI binary", "", flt)
         if path:
             self._cli_path_is_override = True
             self.cli_path_edit.setText(path)
@@ -1170,7 +1175,7 @@ class SettingsDialog(QDialog):
     def _selected_cli_agent_id(self):
         item = self.cli_agent_list.currentItem() if hasattr(self, "cli_agent_list") else None
         if item:
-            return item.data(Qt.UserRole)
+            return item.data(Qt.ItemDataRole.UserRole)
         return self.config.get("cli_tool") or "claude"
 
     def _cli_path_overrides(self):
@@ -1189,7 +1194,7 @@ class SettingsDialog(QDialog):
     def _select_cli_agent(self, agent_id):
         for i in range(self.cli_agent_list.count()):
             item = self.cli_agent_list.item(i)
-            if item.data(Qt.UserRole) == agent_id:
+            if item.data(Qt.ItemDataRole.UserRole) == agent_id:
                 self.cli_agent_list.setCurrentRow(i)
                 return
         if self.cli_agent_list.count():
@@ -1215,7 +1220,7 @@ class SettingsDialog(QDialog):
                 status = "missing" if scanned else "not scanned"
             active = "  ·  active" if row.get("id") == selected else ""
             item = QListWidgetItem(f"{row['label']}  ·  {status}{active}")
-            item.setData(Qt.UserRole, row["id"])
+            item.setData(Qt.ItemDataRole.UserRole, row["id"])
             item.setForeground(QColor(_TEXT if row.get("installed") or not scanned else _TEXT_3))
             self.cli_agent_list.addItem(item)
         self.cli_agent_list.blockSignals(False)

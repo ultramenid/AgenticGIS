@@ -40,7 +40,7 @@ class ToolCallBubble(QFrame):
             f"  border-radius: 10px;"
             f"}}"
         )
-        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum)
 
         # ── Outer layout ──────────────────────────────────────────────────────
         outer = QVBoxLayout(self)
@@ -53,11 +53,11 @@ class ToolCallBubble(QFrame):
 
         self.status_label = QLabel(_SPINNER_FRAMES[0])
         self.status_label.setStyleSheet(f"color: {_TEXT_3}; font-size: 10px;")
-        self.status_label.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        self.status_label.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
         header.addWidget(self.status_label)
 
         mono_font = QFont("Consolas", 10)
-        mono_font.setStyleHint(QFont.Monospace)
+        mono_font.setStyleHint(QFont.StyleHint.Monospace)
 
         self.name_label = QLabel(tool_name)
         self.name_label.setFont(mono_font)
@@ -181,7 +181,7 @@ class ToolCallBubble(QFrame):
                     f"}}"
                 )
                 copy_btn.clicked.connect(lambda: QGuiApplication.clipboard().setText(result_str))
-                content_layout.addWidget(copy_btn, alignment=Qt.AlignLeft)
+                content_layout.addWidget(copy_btn, alignment=Qt.AlignmentFlag.AlignLeft)
 
                 self.updateGeometry()
             except Exception:

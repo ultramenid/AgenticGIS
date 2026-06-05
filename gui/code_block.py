@@ -80,7 +80,7 @@ class SimplePythonHighlighter(QSyntaxHighlighter):
     def _setup_formats(self):
         self.keyword_fmt = QTextCharFormat()
         self.keyword_fmt.setForeground(QColor(_CLR_KEYWORD))
-        self.keyword_fmt.setFontWeight(QFont.DemiBold)
+        self.keyword_fmt.setFontWeight(QFont.Weight.DemiBold)
 
         self.qgis_fmt = QTextCharFormat()
         self.qgis_fmt.setForeground(QColor(_CLR_QGIS))
@@ -145,7 +145,7 @@ class CodeBlockWidget(QWidget):
         self._build_ui()
 
     def _build_ui(self):
-        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum)
 
         main_layout = QVBoxLayout(self)
         main_layout.setContentsMargins(0, 0, 0, 0)
@@ -175,7 +175,7 @@ class CodeBlockWidget(QWidget):
         hl.addStretch(1)
 
         copy_btn = QPushButton("Copy")
-        copy_btn.setCursor(Qt.PointingHandCursor)
+        copy_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         copy_btn.setStyleSheet(f"""
             QPushButton {{
                 background: transparent;

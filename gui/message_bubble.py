@@ -538,8 +538,8 @@ class MessageBubble(QFrame):
         self._animate_entrance()
 
     def _build_ui(self):
-        self.setFrameShape(QFrame.NoFrame)
-        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        self.setFrameShape(QFrame.Shape.NoFrame)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
 
         if self.is_error:
             bg_color      = _SURFACE
@@ -580,7 +580,7 @@ class MessageBubble(QFrame):
         self.text_label = QLabel(initial_html)
         self.text_label.setWordWrap(True)
         self.text_label.setMinimumWidth(0)  # allow label to shrink to viewport width
-        self.text_label.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Preferred)
+        self.text_label.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred)
         self.text_label.setTextFormat(Qt.RichText)
         self.text_label.setTextInteractionFlags(
             Qt.TextBrowserInteraction | Qt.TextSelectableByMouse
@@ -590,7 +590,7 @@ class MessageBubble(QFrame):
         self.text_label.customContextMenuRequested.connect(self._show_context_menu)
 
         font = QFont("JetBrains Mono", 12)
-        font.setStyleHint(QFont.Monospace)
+        font.setStyleHint(QFont.StyleHint.Monospace)
         self.text_label.setFont(font)
         self.text_label.setStyleSheet(f"""
             color: {text_color};
@@ -739,7 +739,7 @@ class MessageContainer(QWidget):
         parent=None,
     ):
         super().__init__(parent)
-        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(12, 0, 12, 0)
@@ -751,7 +751,7 @@ class MessageContainer(QWidget):
                 f"color: {_TEXT_3}; font-size: 10px; background: transparent; border: none;"
             )
             name_label.setTextFormat(Qt.PlainText)
-            name_label.setAlignment(Qt.AlignRight if is_user else Qt.AlignLeft)
+            name_label.setAlignment(Qt.AlignmentFlag.AlignRight if is_user else Qt.AlignmentFlag.AlignLeft)
             outer.addWidget(name_label)
 
         row = QHBoxLayout()
@@ -762,11 +762,11 @@ class MessageContainer(QWidget):
 
         if is_user:
             self.bubble.setMaximumWidth(280)
-            self.bubble.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Minimum)
+            self.bubble.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Minimum)
             row.addStretch(1)
             row.addWidget(self.bubble)
         else:
-            self.bubble.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+            self.bubble.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
             row.addWidget(self.bubble)
 
         outer.addLayout(row)

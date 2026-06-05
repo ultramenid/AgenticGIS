@@ -156,11 +156,26 @@ def _is_usable_file(path):
     return bool(path and os.path.exists(path) and os.access(path, os.X_OK))
 
 
+def _subprocess_cmd(cmd):
+    """Wrap .cmd/.bat files with ``cmd.exe /c`` on Windows.
+
+    On Windows only .exe files are directly executable by the OS loader.
+    npm-global and Scoop shims are .cmd files; without this wrapper
+    subprocess raises WinError 193 / WinError 2.
+    """
+    if not cmd or platform.system() != "Windows":
+        return list(cmd)
+    binary = cmd[0]
+    if isinstance(binary, str) and binary.lower().endswith((".cmd", ".bat")):
+        return ["cmd.exe", "/c"] + list(cmd)
+    return list(cmd)
+
+
 def _looks_like_agent_binary(path):
     """Filter out launcher stubs that exist but immediately report missing tools."""
     try:
         result = subprocess.run(
-            [path, "--version"], capture_output=True, text=True, timeout=4,
+            _subprocess_cmd([path, "--version"]), capture_output=True, text=True, timeout=4,
         )
     except Exception:
         return True
@@ -386,18 +401,23 @@ _COMMON_RUNTIME_ENV = {
 
 
 _RUNTIME_PATH_HINTS = (
+    # Tool-specific well-known bin dirs
     "~/.local/bin",
     "~/.opencode/bin",
     "~/.codex/bin",
     "~/.gemini/bin",
     "~/.claude/local",
     "~/.kimi-code/bin",
+    "~/.kiro/bin",
     "~/node_modules/.bin",
+    # System package managers
     "/opt/homebrew/bin",
+    "/opt/homebrew/Cellar/node/*/bin",
+    "/opt/local/bin",        # MacPorts
     "/usr/local/bin",
     "/usr/bin",
     "/bin",
-    "/opt/homebrew/Cellar/node/*/bin",
+    "/snap/bin",
 )
 
 
@@ -415,6 +435,8 @@ _EXTRA_CANDIDATE_ROOTS = {
     "opencode": ("~/.opencode/bin",),
     "gemini": ("~/.gemini/bin",),
     "codex": ("~/.codex/bin",),
+    "kimi": ("~/.kimi-code/bin", "~/.kimi/bin"),
+    "kiro": ("~/.kiro/bin",),
     "pi": (
         "~/.pi/bin",
         "~/.local/share/pi",
@@ -530,6 +552,126 @@ def _windows_program_dirs():
         yield "~/AppData/Local/Programs"
 
 
+def _windows_package_manager_bin_dirs():
+    """Yield known package-manager binary/shim directories on Windows.
+
+    These are directories where executables land directly (no further
+    sub-path joining needed).  Checked in order: env-var-customised paths
+    first, then well-known defaults.
+    """
+    localappdata = os.environ.get("LOCALAPPDATA") or ""
+    appdata = os.environ.get("APPDATA") or ""
+    userprofile = os.environ.get("USERPROFILE") or ""
+    programfiles = os.environ.get("ProgramFiles") or ""
+    programdata = os.environ.get("ProgramData") or ""
+
+    # npm global: on Windows executables land directly in the prefix dir.
+    # Default prefix is %APPDATA%\npm (NOT %APPDATA%\npm\bin as on Unix).
+    if appdata:
+        yield os.path.join(appdata, "npm")
+
+    # Scoop shims (per-user install)
+    scoop_root = os.environ.get("SCOOP") or (
+        os.path.join(userprofile, "scoop") if userprofile else ""
+    )
+    if scoop_root:
+        yield os.path.join(scoop_root, "shims")
+
+    # Scoop shims (system-wide install)
+    scoop_global = os.environ.get("SCOOP_GLOBAL") or (
+        os.path.join(programdata, "scoop") if programdata else ""
+    )
+    if scoop_global:
+        yield os.path.join(scoop_global, "shims")
+
+    # Volta shims: %VOLTA_HOME%\bin or %LOCALAPPDATA%\Volta\bin
+    volta_home = os.environ.get("VOLTA_HOME") or (
+        os.path.join(localappdata, "Volta") if localappdata else ""
+    )
+    if volta_home:
+        yield os.path.join(volta_home, "bin")
+    # Volta system installer puts binaries directly in %ProgramFiles%\Volta
+    if programfiles:
+        yield os.path.join(programfiles, "Volta")
+
+    # Chocolatey: %ChocolateyInstall%\bin
+    choco = os.environ.get("ChocolateyInstall") or (
+        os.path.join(programdata, "chocolatey") if programdata else ""
+    )
+    if choco:
+        yield os.path.join(choco, "bin")
+
+    # pnpm global: %PNPM_HOME% or %LOCALAPPDATA%\pnpm
+    pnpm_home = os.environ.get("PNPM_HOME") or (
+        os.path.join(localappdata, "pnpm") if localappdata else ""
+    )
+    if pnpm_home:
+        yield pnpm_home
+
+    # nvm-windows: NVM_SYMLINK points to the currently active Node.js dir
+    nvm_symlink = os.environ.get("NVM_SYMLINK")
+    if nvm_symlink:
+        yield nvm_symlink
+    # NVM_HOME contains per-version subdirs; the active symlink is better but
+    # fall back to probing version dirs via glob in _candidate_paths.
+    nvm_home = os.environ.get("NVM_HOME")
+    if nvm_home:
+        yield nvm_home
+
+    # Yarn global: %LOCALAPPDATA%\Yarn\bin
+    if localappdata:
+        yield os.path.join(localappdata, "Yarn", "bin")
+
+    # winget managed symlinks: %LOCALAPPDATA%\Microsoft\WinGet\Links
+    if localappdata:
+        yield os.path.join(localappdata, "Microsoft", "WinGet", "Links")
+
+
+def _unix_package_manager_bin_dirs():
+    """Yield known package-manager binary directories on macOS and Linux.
+
+    Called when QGIS launches without the user's full shell PATH.
+    Respects env-var overrides before falling back to well-known defaults.
+    Glob patterns (``*``) are left in place — callers that pass results
+    through ``_existing_dirs`` or ``_resolve_binary`` expand them correctly.
+    """
+    # Volta: $VOLTA_HOME/bin or ~/.volta/bin
+    volta_home = os.environ.get("VOLTA_HOME") or "~/.volta"
+    yield os.path.join(volta_home, "bin")
+
+    # nvm: newest installed Node version first when glob-sorted
+    nvm_dir = os.environ.get("NVM_DIR") or "~/.nvm"
+    yield os.path.join(nvm_dir, "versions", "node", "*", "bin")
+
+    # fnm (Fast Node Manager): env var or OS-specific defaults
+    fnm_dir = os.environ.get("FNM_DIR")
+    if fnm_dir:
+        yield os.path.join(fnm_dir, "node-versions", "*", "installation", "bin")
+    else:
+        yield "~/.local/share/fnm/node-versions/*/installation/bin"
+        yield "~/Library/Application Support/fnm/node-versions/*/installation/bin"
+
+    # asdf version manager shims: $ASDF_DATA_DIR/shims or ~/.asdf/shims
+    asdf_data = os.environ.get("ASDF_DATA_DIR") or "~/.asdf"
+    yield os.path.join(asdf_data, "shims")
+
+    # mise / rtx shims: $MISE_DATA_DIR/shims or ~/.local/share/mise/shims
+    mise_data = os.environ.get("MISE_DATA_DIR") or "~/.local/share/mise"
+    yield os.path.join(mise_data, "shims")
+    yield "~/.mise/shims"
+
+    # pnpm global bin: $PNPM_HOME or ~/.local/share/pnpm
+    pnpm_home = os.environ.get("PNPM_HOME") or "~/.local/share/pnpm"
+    yield pnpm_home
+
+    # Yarn global bin: $YARN_GLOBAL_FOLDER/bin or ~/.yarn/bin
+    yarn_global = os.environ.get("YARN_GLOBAL_FOLDER")
+    yield os.path.join(yarn_global, "bin") if yarn_global else "~/.yarn/bin"
+
+    # MacPorts
+    yield "/opt/local/bin"
+
+
 def _command_file_names(command, system=None):
     system = system or platform.system()
     if system == "Windows":
@@ -546,6 +688,20 @@ def _candidate_paths(tool, command, system=None):
     paths = []
 
     if system == "Windows":
+        # 1. Package-manager shim/bin dirs — executables live here directly.
+        for bin_dir in _windows_package_manager_bin_dirs():
+            for name in names:
+                paths.append(os.path.join(bin_dir, name))
+
+        # 2. nvm-windows version dirs via glob (%NVM_HOME%\v*\)
+        nvm_home = os.environ.get("NVM_HOME")
+        if nvm_home:
+            import glob as _glob
+            for ver_dir in sorted(_glob.glob(os.path.join(nvm_home, "v*")), reverse=True):
+                for name in names:
+                    paths.append(os.path.join(ver_dir, name))
+
+        # 3. Broader program-root dirs with common sub-path patterns.
         for root in _windows_program_dirs():
             for name in names:
                 paths.extend([
@@ -561,6 +717,12 @@ def _candidate_paths(tool, command, system=None):
                 ])
         return list(_unique_paths(paths))
 
+    # 1. Package-manager shim/bin dirs (Volta, nvm, fnm, asdf, mise, pnpm, Yarn…)
+    for bin_dir in _unix_package_manager_bin_dirs():
+        for name in names:
+            paths.append(os.path.join(bin_dir, name))
+
+    # 2. Common user-local and npm-global dirs
     home_roots = [
         "~/.local/bin",
         f"~/.{tool}/bin",
@@ -568,14 +730,18 @@ def _candidate_paths(tool, command, system=None):
         "~/.npm-global/bin",
         "~/node_modules/.bin",
     ]
+
+    # 3. System-wide package manager prefixes
     package_roots = [
         "/opt/homebrew/bin",
         "/usr/local/bin",
         "/usr/bin",
         "/snap/bin",
+        "/opt/local/bin",    # MacPorts
     ]
     if system == "Darwin":
         package_roots.extend([
+            "/opt/homebrew/Cellar/node/*/bin",
             "/Applications/Claude.app/Contents/MacOS",
             "/Applications/Claude Code.app/Contents/MacOS",
         ])
@@ -584,6 +750,7 @@ def _candidate_paths(tool, command, system=None):
         for name in names:
             paths.append(os.path.join(root, name))
 
+    # 4. Per-tool known install roots
     for root in _EXTRA_CANDIDATE_ROOTS.get(tool, ()):
         for name in names:
             paths.append(os.path.join(root, name))
@@ -711,7 +878,7 @@ class CliToolBackend(AgentBackend):
             return "unsupported", "Auth check unavailable for this CLI."
         try:
             result = subprocess.run(
-                cmd,
+                _subprocess_cmd(cmd),
                 capture_output=True, text=True, timeout=8,
             )
         except Exception as exc:  # noqa: BLE001
@@ -743,7 +910,7 @@ class CliToolBackend(AgentBackend):
             return False
         try:
             subprocess.Popen(
-                self._login_cmd(),
+                _subprocess_cmd(self._login_cmd()),
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
             )
@@ -767,7 +934,7 @@ class CliToolBackend(AgentBackend):
         for cmd in commands:
             try:
                 result = subprocess.run(
-                    cmd, capture_output=True, text=True, timeout=8,
+                    _subprocess_cmd(cmd), capture_output=True, text=True, timeout=8,
                 )
             except Exception as exc:  # noqa: BLE001
                 last_err = str(exc)
@@ -829,8 +996,12 @@ class CliToolBackend(AgentBackend):
     def _runtime_env(self):
         env = os.environ.copy()
         _scrub_child_env(env)
+        if platform.system() == "Windows":
+            extra = list(_windows_package_manager_bin_dirs())
+        else:
+            extra = list(_unix_package_manager_bin_dirs())
         node_and_wrapper_dirs = _existing_dirs(
-            [os.path.dirname(self.binary or ""), *_RUNTIME_PATH_HINTS]
+            [os.path.dirname(self.binary or ""), *extra, *_RUNTIME_PATH_HINTS]
         )
         _prepend_path(env, node_and_wrapper_dirs)
         env.update(_COMMON_RUNTIME_ENV)
@@ -848,7 +1019,7 @@ class CliToolBackend(AgentBackend):
         try:
             with self._lock:
                 self._proc = subprocess.Popen(
-                    cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                    _subprocess_cmd(cmd), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                     bufsize=0,
                     env=env,
                     cwd=cwd,
@@ -1245,13 +1416,16 @@ class CliToolBackend(AgentBackend):
 
     @staticmethod
     def _terminate_process_group(proc, kill=False):
-        sig = signal.SIGKILL if kill else signal.SIGTERM
-        try:
-            pgid = os.getpgid(proc.pid)
-            os.killpg(pgid, sig)
-            return
-        except Exception:
-            pass
+        # SIGKILL / process groups are POSIX-only; on Windows fall straight
+        # through to proc.kill() / proc.terminate().
+        if platform.system() != "Windows":
+            sig = signal.SIGKILL if kill else signal.SIGTERM
+            try:
+                pgid = os.getpgid(proc.pid)
+                os.killpg(pgid, sig)
+                return
+            except Exception:
+                pass
         try:
             if kill:
                 proc.kill()
