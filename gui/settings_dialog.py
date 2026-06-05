@@ -34,7 +34,7 @@ from qgis.PyQt.QtWidgets import (
 )
 
 from .. import config as config_mod
-from ..backends.cli_backend import CLI_AGENT_CATALOG
+from ..backends.cli_backend import CLI_AGENT_CATALOG, _agent_id_for_binary_path
 from ..backends import providers
 from .theme import (
     DIALOG_SURFACE as _SURFACE,
@@ -1158,11 +1158,14 @@ class SettingsDialog(QDialog):
     def _browse_cli(self):
         import platform as _platform
         if _platform.system() == "Windows":
-            flt = "Executables (*.exe *.cmd *.bat);;All files (*)"
+            flt = "Executables (*.exe *.cmd *.bat *.com);;All files (*)"
         else:
             flt = "All files (*)"
         path, _ = QFileDialog.getOpenFileName(self, "Select agent CLI binary", "", flt)
         if path:
+            agent_id = _agent_id_for_binary_path(path)
+            if agent_id:
+                self._select_cli_agent(agent_id)
             self._cli_path_is_override = True
             self.cli_path_edit.setText(path)
             self._scan_cli_agents()

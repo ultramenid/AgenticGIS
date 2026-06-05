@@ -175,15 +175,29 @@ def _subprocess_cmd(cmd):
     return list(cmd)
 
 
+def _decode_process_output(data):
+    if not data:
+        return ""
+    if isinstance(data, str):
+        return data
+    return data.decode("utf-8", errors="replace")
+
+
+def _process_output(result):
+    stdout = _decode_process_output(getattr(result, "stdout", b""))
+    stderr = _decode_process_output(getattr(result, "stderr", b""))
+    return f"{stdout}\n{stderr}".strip()
+
+
 def _looks_like_agent_binary(path):
     """Filter out launcher stubs that exist but immediately report missing tools."""
     try:
         result = subprocess.run(
-            _subprocess_cmd([path, "--version"]), capture_output=True, text=True, timeout=4,
+            _subprocess_cmd([path, "--version"]), capture_output=True, timeout=4,
         )
     except Exception:
         return True
-    output = f"{result.stdout or ''}\n{result.stderr or ''}".lower()
+    output = _process_output(result).lower()
     if result.returncode == 127 and "not found in path" in output:
         return False
     return True
@@ -200,6 +214,20 @@ def _unique_paths(paths):
             continue
         seen.add(key)
         yield expanded
+
+
+def _windows_home_dir():
+    userprofile = os.environ.get("USERPROFILE") or ""
+    if userprofile:
+        return userprofile
+    home_drive = os.environ.get("HOMEDRIVE") or ""
+    home_path = os.environ.get("HOMEPATH") or ""
+    if home_drive and home_path:
+        return home_drive + home_path
+    expanded = os.path.expanduser("~")
+    if expanded and expanded != "~":
+        return expanded
+    return ""
 
 
 def _empty_runtime_dir(name):
@@ -281,6 +309,7 @@ def _build_codex_command(backend, prompt):
         "--ignore-user-config",
         "--ignore-rules",
         "--ephemeral",
+        "--skip-git-repo-check",
         "--disable", "apps",
         "--disable", "plugins",
         "--cd", _empty_runtime_dir("codex-empty-workspace"),
@@ -557,10 +586,12 @@ def _windows_program_dirs():
         if value:
             yielded = True
             yield value
-    userprofile = os.environ.get("USERPROFILE")
+    userprofile = _windows_home_dir()
     if userprofile:
         yielded = True
         yield os.path.join(userprofile, ".local", "bin")
+        yield os.path.join(userprofile, "AppData", "Roaming")
+        yield os.path.join(userprofile, "AppData", "Local")
     if not yielded:
         yield "~/.local/bin"
         yield "~/AppData/Roaming/npm"
@@ -574,7 +605,7 @@ def _windows_package_manager_bin_dirs():
     sub-path joining needed).  Checked in order: env-var-customised paths
     first, then well-known defaults.
     """
-    userprofile = os.environ.get("USERPROFILE") or ""
+    userprofile = _windows_home_dir()
     localappdata = os.environ.get("LOCALAPPDATA") or (
         os.path.join(userprofile, "AppData", "Local") if userprofile else ""
     )
@@ -694,10 +725,26 @@ def _unix_package_manager_bin_dirs():
 def _command_file_names(command, system=None):
     system = system or platform.system()
     if system == "Windows":
-        if command.lower().endswith((".exe", ".cmd", ".bat")):
+        if command.lower().endswith((".exe", ".cmd", ".bat", ".com")):
             return (command,)
-        return (f"{command}.exe", f"{command}.cmd", f"{command}.bat", command)
+        return (f"{command}.exe", f"{command}.cmd", f"{command}.bat", f"{command}.com", command)
     return (command,)
+
+
+def _agent_id_for_binary_path(path, system=None):
+    """Infer the catalog agent from a selected binary path, if possible."""
+    if not path:
+        return None
+    system = system or platform.system()
+    base = os.path.basename(str(path).replace("\\", "/")).lower()
+    stem, _ext = os.path.splitext(base)
+    for agent in CLI_AGENT_CATALOG:
+        for command in agent.get("commands", (agent["id"],)):
+            names = {name.lower() for name in _command_file_names(command, system)}
+            stems = {os.path.splitext(name)[0] for name in names}
+            if base in names or stem in stems:
+                return agent["id"]
+    return None
 
 
 def _candidate_paths(tool, command, system=None):
@@ -903,12 +950,12 @@ class CliToolBackend(AgentBackend):
         try:
             result = subprocess.run(
                 _subprocess_cmd(cmd),
-                capture_output=True, text=True, timeout=8,
+                capture_output=True, timeout=8,
             )
         except Exception as exc:  # noqa: BLE001
             return "unsupported", str(exc)
 
-        output = (result.stdout or result.stderr or "").strip()
+        output = _process_output(result)
         detail = output.splitlines()[0] if output else ""
         parser = _agent_profile(self.tool).get("parse_auth_detail")
         if callable(parser):
@@ -958,12 +1005,12 @@ class CliToolBackend(AgentBackend):
         for cmd in commands:
             try:
                 result = subprocess.run(
-                    _subprocess_cmd(cmd), capture_output=True, text=True, timeout=8,
+                    _subprocess_cmd(cmd), capture_output=True, timeout=8,
                 )
             except Exception as exc:  # noqa: BLE001
                 last_err = str(exc)
                 continue
-            output = (result.stdout or result.stderr or "").strip()
+            output = _process_output(result)
             if result.returncode == 0:
                 return True, (output.splitlines()[0] if output else "OK")
             if output:
