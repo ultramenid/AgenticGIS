@@ -152,11 +152,42 @@ def agent_by_id(agent_id):
     return _AGENT_BY_ID.get(agent_id)
 
 
+def _windows_pathexts():
+    raw = os.environ.get("PATHEXT") or ".EXE;.CMD;.BAT;.COM"
+    exts = []
+    for ext in raw.split(";"):
+        value = ext.strip().lower()
+        if not value:
+            continue
+        if not value.startswith("."):
+            value = "." + value
+        if value not in exts:
+            exts.append(value)
+    for ext in (".exe", ".cmd", ".bat", ".com"):
+        if ext not in exts:
+            exts.append(ext)
+    return tuple(exts)
+
+
+def _expand_candidate_path(path):
+    expanded = os.path.expandvars(str(path))
+    if platform.system() == "Windows":
+        home = _windows_home_dir()
+        if home and expanded == "~":
+            return home
+        if home and expanded.startswith(("~/", "~\\")):
+            return os.path.join(home, expanded[2:].lstrip("\\/"))
+    return os.path.expanduser(expanded)
+
+
 def _is_usable_file(path):
-    if not path or not os.path.isfile(path):
+    if not path:
+        return False
+    path = _expand_candidate_path(path)
+    if not os.path.isfile(path):
         return False
     if platform.system() == "Windows":
-        return os.path.splitext(path)[1].lower() in (".exe", ".cmd", ".bat", ".com")
+        return os.path.splitext(path)[1].lower() in _windows_pathexts()
     return os.access(path, os.X_OK)
 
 
@@ -208,7 +239,7 @@ def _unique_paths(paths):
     for path in paths:
         if not path:
             continue
-        expanded = os.path.expanduser(os.path.expandvars(path))
+        expanded = _expand_candidate_path(path)
         key = os.path.normcase(os.path.abspath(expanded))
         if key in seen:
             continue
@@ -534,7 +565,7 @@ def _existing_dirs(paths):
     for path in paths:
         if not path:
             continue
-        expanded = os.path.expanduser(os.path.expandvars(path))
+        expanded = _expand_candidate_path(path)
         if "*" in expanded:
             import glob
             candidates = glob.glob(expanded)
@@ -552,7 +583,7 @@ def _prepend_path(env, paths):
     seen = set()
     merged = []
     for entry in list(paths) + [part for part in existing.split(os.pathsep) if part]:
-        norm = os.path.normcase(os.path.abspath(os.path.expanduser(entry)))
+        norm = os.path.normcase(os.path.abspath(_expand_candidate_path(entry)))
         if norm in seen:
             continue
         seen.add(norm)
@@ -615,10 +646,46 @@ def _windows_package_manager_bin_dirs():
     programfiles = os.environ.get("ProgramFiles") or ""
     programdata = os.environ.get("ProgramData") or ""
 
+    npm_prefix = os.environ.get("NPM_CONFIG_PREFIX") or os.environ.get("npm_config_prefix") or ""
+    if npm_prefix:
+        # Windows npm global shims live directly in the prefix. Some custom
+        # prefixes still use a bin subdir, so check both.
+        yield npm_prefix
+        yield os.path.join(npm_prefix, "bin")
+
     # npm global: on Windows executables land directly in the prefix dir.
     # Default prefix is %APPDATA%\npm (NOT %APPDATA%\npm\bin as on Unix).
     if appdata:
         yield os.path.join(appdata, "npm")
+
+    if userprofile:
+        # User-level toolchain bins that GUI apps commonly miss when PATH is
+        # stripped. Mirrors Open Design's "well known user toolchain bins"
+        # approach, adjusted for Windows npm shim layout.
+        for path in (
+            os.path.join(userprofile, ".local", "bin"),
+            os.path.join(userprofile, ".codex", "bin"),
+            os.path.join(userprofile, ".vite-plus", "bin"),
+            os.path.join(userprofile, ".bun", "bin"),
+            os.path.join(userprofile, ".cargo", "bin"),
+            os.path.join(userprofile, ".asdf", "shims"),
+            os.path.join(userprofile, "node_modules", ".bin"),
+            os.path.join(userprofile, ".npm-global"),
+            os.path.join(userprofile, ".npm-global", "bin"),
+            os.path.join(userprofile, ".npm-packages"),
+            os.path.join(userprofile, ".npm-packages", "bin"),
+            os.path.join(userprofile, ".local", "share", "mise", "shims"),
+            os.path.join(userprofile, ".local", "share", "mise", "installs", "npm-openai-codex", "*", "bin"),
+            os.path.join(userprofile, ".local", "share", "mise", "installs", "node", "*", "bin"),
+            os.path.join(userprofile, ".nvm", "versions", "node", "*", "bin"),
+            os.path.join(userprofile, ".local", "share", "fnm", "node-versions", "*", "installation", "bin"),
+            os.path.join(userprofile, ".fnm", "node-versions", "*", "installation", "bin"),
+        ):
+            yield path
+
+    bun_install = os.environ.get("BUN_INSTALL") or ""
+    if bun_install:
+        yield os.path.join(bun_install, "bin")
 
     # Scoop shims (per-user install)
     scoop_root = os.environ.get("SCOOP") or (
@@ -676,6 +743,16 @@ def _windows_package_manager_bin_dirs():
     if localappdata:
         yield os.path.join(localappdata, "Microsoft", "WinGet", "Links")
 
+    # Windows Store/App Installer aliases, including Codex app aliases, are
+    # normally on a terminal PATH but often absent from GUI-launched QGIS.
+    if localappdata:
+        yield os.path.join(localappdata, "Microsoft", "WindowsApps")
+
+    # Microsoft Store package payloads can expose Codex under WindowsApps.
+    # Best-effort glob; if Windows denies listing this folder it is ignored.
+    if programfiles:
+        yield os.path.join(programfiles, "WindowsApps", "OpenAI.Codex_*", "app")
+
 
 def _unix_package_manager_bin_dirs():
     """Yield known package-manager binary directories on macOS and Linux.
@@ -725,9 +802,9 @@ def _unix_package_manager_bin_dirs():
 def _command_file_names(command, system=None):
     system = system or platform.system()
     if system == "Windows":
-        if command.lower().endswith((".exe", ".cmd", ".bat", ".com")):
+        if os.path.splitext(command)[1].lower() in _windows_pathexts():
             return (command,)
-        return (f"{command}.exe", f"{command}.cmd", f"{command}.bat", f"{command}.com", command)
+        return tuple(f"{command}{ext}" for ext in _windows_pathexts()) + (command,)
     return (command,)
 
 
