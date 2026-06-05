@@ -1130,6 +1130,7 @@ class CliToolBackend(AgentBackend):
         for _ in agent_iteration_steps(max_iters):
             if should_stop():
                 emit(AgentEvent(EventType.THINKING, {"text": "Stopped."}))
+                emit(AgentEvent(EventType.DONE))
                 return messages
 
             prompt = self._conversation_prompt(messages)
@@ -1144,6 +1145,7 @@ class CliToolBackend(AgentBackend):
                         self.toolkit, self.executor, name, args, emit, should_stop,
                     )
                     if should_stop() or is_cancelled:
+                        emit(AgentEvent(EventType.DONE))
                         return messages
                     messages.append({"role": "tool", "name": name, "content": payload})
                     continue
@@ -1155,6 +1157,7 @@ class CliToolBackend(AgentBackend):
             return messages
 
         emit(AgentEvent(EventType.ERROR, {"error": "CLI proxy reached the maximum tool iterations."}))
+        emit(AgentEvent(EventType.DONE))
         return messages
 
     # ------------------------------------------------------------------ #
