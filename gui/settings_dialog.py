@@ -1222,7 +1222,17 @@ class SettingsDialog(QDialog):
         self.cli_agent_list.blockSignals(True)
         self.cli_agent_list.clear()
         found = 0
+        # Put the active agent on top so users can see which CLI is in use
+        # without having to scan the list for the "· active" marker.
+        active_row = None
+        rest = []
         for row in self._cli_scan_rows:
+            if active_row is None and row.get("id") == selected:
+                active_row = row
+            else:
+                rest.append(row)
+        ordered_rows = ([active_row] if active_row is not None else []) + rest
+        for row in ordered_rows:
             found += 1 if row.get("installed") else 0
             if row.get("installed") and (scanned or row.get("_selected_probe")):
                 status = "found"
