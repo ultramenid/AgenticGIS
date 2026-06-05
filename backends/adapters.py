@@ -319,10 +319,25 @@ class OpenCodeAdapter(CliAdapter):
     def build_command(self, *, binary, prompt, extra_args, runtime_dir):
         return [
             binary, "run",
+            "--pure",
             "--format", "json",
             "--dangerously-skip-permissions",
             *extra_args,
         ]
+
+    def env(self) -> dict:
+        config_dir = _empty_runtime_dir("opencode-config")
+        config_path = os.path.join(config_dir, "config.json")
+        content = _opencode_config_json()
+        with open(config_path, "w", encoding="utf-8") as fh:
+            fh.write(content)
+        return {
+            "OPENCODE_PURE": "1",
+            "OPENCODE_DISABLE_PROJECT_CONFIG": "1",
+            "OPENCODE_CONFIG": config_path,
+            "OPENCODE_CONFIG_DIR": config_dir,
+            "OPENCODE_CONFIG_CONTENT": content,
+        }
 
     def parse_event(self, raw):
         etype = raw.get("type")
