@@ -37,6 +37,11 @@ from .base import AgentBackend, AgentEvent, EventType, _dispatch_one_tool
 from ..core import tools as tools_mod
 from .base import agent_iteration_steps
 from .openai_backend import DEFAULT_SYSTEM_PROMPT as AGENTICGIS_SYSTEM_PROMPT
+from .adapters import (
+    ClaudeAdapter, CodexAdapter, CursorAdapter, GeminiAdapter,
+    OpenCodeAdapter, QwenAdapter, KimiAdapter, DevinAdapter,
+    KiroAdapter, PiAdapter, CopilotAdapter, DefaultAdapter,
+)
 
 
 CLI_AGENT_CATALOG = (
@@ -46,102 +51,119 @@ CLI_AGENT_CATALOG = (
         "commands": ("claude",),
         "credential_style": "Claude subscription or Anthropic credentials",
         "warning": "Provider policy may treat third-party automation differently.",
+        "adapter_class": ClaudeAdapter,
     },
     {
         "id": "codex",
         "label": "Codex CLI",
         "commands": ("codex",),
         "credential_style": "OpenAI API key or ChatGPT account in Codex",
+        "adapter_class": CodexAdapter,
     },
     {
         "id": "cursor",
         "label": "Cursor Agent",
         "commands": ("cursor-agent", "cursor"),
         "credential_style": "Cursor account or configured provider keys",
+        "adapter_class": CursorAdapter,
     },
     {
         "id": "gemini",
         "label": "Gemini CLI",
         "commands": ("gemini",),
         "credential_style": "Google account or Gemini API key",
+        "adapter_class": GeminiAdapter,
     },
     {
         "id": "copilot",
         "label": "GitHub Copilot CLI",
         "commands": ("gh", "copilot"),
         "credential_style": "GitHub Copilot subscription",
+        "adapter_class": CopilotAdapter,
     },
     {
         "id": "opencode",
         "label": "OpenCode",
         "commands": ("opencode",),
         "credential_style": "Provider keys in OpenCode config",
+        "adapter_class": OpenCodeAdapter,
     },
     {
         "id": "qwen",
         "label": "Qwen Code",
         "commands": ("qwen",),
         "credential_style": "DashScope or Qwen API key",
+        "adapter_class": QwenAdapter,
     },
     {
         "id": "grok",
         "label": "Grok",
         "commands": ("grok",),
         "credential_style": "xAI account or key",
+        "adapter_class": DefaultAdapter,
     },
     {
         "id": "hermes",
         "label": "Hermes",
         "commands": ("hermes",),
         "credential_style": "Configured provider keys",
+        "adapter_class": DefaultAdapter,
     },
     {
         "id": "kimi",
         "label": "Kimi CLI",
         "commands": ("kimi",),
         "credential_style": "Moonshot/Kimi API key",
+        "adapter_class": KimiAdapter,
     },
     {
         "id": "devin",
         "label": "Devin for Terminal",
         "commands": ("devin",),
         "credential_style": "Devin account",
+        "adapter_class": DevinAdapter,
     },
     {
         "id": "deepseek_tui",
         "label": "DeepSeek TUI",
         "commands": ("deepseek", "deepseek-tui"),
         "credential_style": "DeepSeek API key",
+        "adapter_class": DefaultAdapter,
     },
     {
         "id": "pi",
         "label": "Pi",
         "commands": ("pi",),
         "credential_style": "Pi account",
+        "adapter_class": PiAdapter,
     },
     {
         "id": "mistral_vibe",
         "label": "Mistral Vibe CLI",
         "commands": ("mistral-vibe", "vibe"),
         "credential_style": "Mistral API key",
+        "adapter_class": DefaultAdapter,
     },
     {
         "id": "kiro",
         "label": "Kiro CLI",
         "commands": ("kiro",),
         "credential_style": "AWS credentials",
+        "adapter_class": KiroAdapter,
     },
     {
         "id": "kilo",
         "label": "Kilo",
         "commands": ("kilo",),
         "credential_style": "Configured provider keys",
+        "adapter_class": DefaultAdapter,
     },
     {
         "id": "qoder",
         "label": "Qoder CLI",
         "commands": ("qoder",),
         "credential_style": "Qoder account or provider keys",
+        "adapter_class": DefaultAdapter,
     },
 )
 
