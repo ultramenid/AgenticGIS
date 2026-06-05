@@ -153,7 +153,11 @@ def agent_by_id(agent_id):
 
 
 def _is_usable_file(path):
-    return bool(path and os.path.exists(path) and os.access(path, os.X_OK))
+    if not path or not os.path.isfile(path):
+        return False
+    if platform.system() == "Windows":
+        return os.path.splitext(path)[1].lower() in (".exe", ".cmd", ".bat", ".com")
+    return os.access(path, os.X_OK)
 
 
 def _subprocess_cmd(cmd):
