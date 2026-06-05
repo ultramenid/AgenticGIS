@@ -15,6 +15,7 @@ Reliability hardening
 """
 
 import json
+import threading
 import urllib.error
 import urllib.request
 
@@ -37,6 +38,9 @@ class OpenAIHttpClient:
         self.extra_headers = extra_headers or {}
         self.org = org
         self.timeout = timeout
+        self._active_response = None
+        self._active_lock = threading.Lock()
+        self._cancel_requested = False
 
     def _headers(self):
         headers = {
@@ -117,9 +121,22 @@ class OpenAIHttpClient:
             data=data, headers=headers, method="POST",
         )
 
+        with self._active_lock:
+            self._cancel_requested = False
+
         response = None
         try:
             response = urllib.request.urlopen(request, timeout=effective_timeout)
+            with self._active_lock:
+                self._active_response = response
+                # Cancel was called while urlopen() was blocking — close immediately.
+                if self._cancel_requested:
+                    self._active_response = None
+                    try:
+                        response.close()
+                    except Exception:
+                        pass
+                    return [], "stop"
         except urllib.error.HTTPError as exc:
             try:
                 detail = exc.read().decode("utf-8", "replace")
@@ -191,6 +208,9 @@ class OpenAIHttpClient:
                 response.close()
             except Exception:
                 pass
+            with self._active_lock:
+                if self._active_response is response:
+                    self._active_response = None
 
         blocks = []
         if text_parts:
@@ -216,6 +236,18 @@ class OpenAIHttpClient:
             finish_reason = "stop"
 
         return blocks, finish_reason
+
+    def cancel_current_request(self):
+        """Best-effort cancellation of the active streaming response."""
+        with self._active_lock:
+            self._cancel_requested = True
+            response = self._active_response
+        if response is None:
+            return
+        try:
+            response.close()
+        except Exception:
+            pass
 
     @staticmethod
     def _build_messages(system, messages):

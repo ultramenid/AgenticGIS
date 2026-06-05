@@ -1,9 +1,10 @@
-"""Drive an installed, already-logged-in agent CLI.
+"""Use an installed, already-logged-in agent CLI as a model proxy.
 
-The plugin hosts a local MCP server (see ``server.mcp_server``); this backend
-spawns the CLI in headless mode pointed at that server, so the CLI's own agent
-loop calls the QGIS tools. Because the CLI is already authenticated, no API
-key is needed. We stream the CLI's stdout back into the chat dock.
+This backend no longer exposes QGIS through MCP to the spawned CLI. Instead it
+prompts the CLI for a small JSON instruction, then AgenticGIS executes any QGIS
+tool calls in-process just like the custom/API backends. Because the CLI is
+already authenticated, no API key is needed and AgenticGIS never reads the
+CLI-owned OAuth tokens.
 
 Conversation continuity is handled per-tool: Claude Code returns a
 ``session_id`` we ``--resume`` on later turns.
@@ -27,10 +28,15 @@ import platform
 import select
 import shlex
 import shutil
+import signal
 import subprocess
+import tempfile
 import threading
 
-from .base import AgentBackend, AgentEvent, EventType
+from .base import AgentBackend, AgentEvent, EventType, _dispatch_one_tool
+from ..core import tools as tools_mod
+from .base import agent_iteration_steps
+from .openai_backend import DEFAULT_SYSTEM_PROMPT as AGENTICGIS_SYSTEM_PROMPT
 
 
 CLI_AGENT_CATALOG = (
@@ -141,7 +147,6 @@ CLI_AGENT_CATALOG = (
 
 _AGENT_BY_ID = {agent["id"]: agent for agent in CLI_AGENT_CATALOG}
 
-
 def agent_by_id(agent_id):
     """Return a CLI agent catalog entry by id, or None."""
     return _AGENT_BY_ID.get(agent_id)
@@ -176,6 +181,336 @@ def _unique_paths(paths):
             continue
         seen.add(key)
         yield expanded
+
+
+def _empty_runtime_dir(name):
+    path = os.path.join(tempfile.gettempdir(), "AgenticGIS", name)
+    os.makedirs(path, exist_ok=True)
+    return path
+
+
+def _opencode_config_json():
+    return json.dumps({
+        "$schema": "https://opencode.ai/config.json",
+        "instructions": [],
+        "plugin": [],
+        "skills": {"paths": [], "urls": []},
+        "mcp": {},
+    })
+
+
+def _devin_config_json():
+    return json.dumps({
+        "permissions": {"allow": [], "deny": [], "ask": []},
+        "mcpServers": {},
+        "read_config_from": {
+            "cursor": False,
+            "windsurf": False,
+            "claude": False,
+        },
+    })
+
+
+def _runtime_json_file(name, content):
+    path = os.path.join(_empty_runtime_dir(name), "config.json")
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write(content)
+    return path
+
+
+def _build_default_command(backend, prompt):
+    return [backend.binary, prompt] + backend.extra_args
+
+
+def _build_claude_command(backend, prompt):
+    return [
+        backend.binary, "-p", prompt,
+        *backend.extra_args,
+        "--output-format", "stream-json", "--verbose",
+        "--setting-sources", "local",
+        "--settings", "{}",
+        "--disable-slash-commands",
+        "--plugin-dir", _empty_runtime_dir("claude-empty-plugins"),
+        "--no-session-persistence",
+    ]
+
+
+def _build_opencode_command(backend, prompt):
+    return [
+        backend.binary, "run", prompt,
+        *backend.extra_args,
+        "--pure",
+        "--format", "json",
+    ]
+
+
+def _build_codex_command(backend, prompt):
+    return [
+        backend.binary, "exec",
+        *backend.extra_args,
+        "--ignore-user-config",
+        "--ignore-rules",
+        "--ephemeral",
+        "--disable", "apps",
+        "--disable", "plugins",
+        "--cd", _empty_runtime_dir("codex-empty-workspace"),
+        "--json",
+        prompt,
+    ]
+
+
+def _build_cursor_command(backend, prompt):
+    base = os.path.basename(backend.binary or "")
+    if base.startswith("cursor") and not base.startswith("cursor-agent"):
+        return [
+            backend.binary, "agent", "-p", prompt,
+            *backend.extra_args,
+            "--output-format", "json",
+        ]
+    return [
+        backend.binary, "-p", prompt,
+        *backend.extra_args,
+        "--output-format", "json",
+    ]
+
+
+def _build_gemini_command(backend, prompt):
+    return [
+        backend.binary, "-p", prompt,
+        *backend.extra_args,
+        "--output-format", "json",
+        "--approval-mode", "default",
+        "--extensions", "none",
+    ]
+
+
+def _build_qwen_command(backend, prompt):
+    return [
+        backend.binary, "--prompt", prompt,
+        *backend.extra_args,
+        "--output-format", "stream-json",
+    ]
+
+
+def _build_devin_command(backend, prompt):
+    return [
+        backend.binary, "--print",
+        "--config", _runtime_json_file("devin-config", _devin_config_json()),
+        *backend.extra_args,
+        "--", prompt,
+    ]
+
+
+def _build_kiro_command(backend, prompt):
+    return [
+        backend.binary, "chat",
+        "--no-interactive",
+        *backend.extra_args,
+        prompt,
+    ]
+
+
+def _build_pi_command(backend, prompt):
+    return [
+        backend.binary,
+        "--print", prompt,
+        *backend.extra_args,
+        "--mode", "json",
+        "--no-extensions",
+        "--no-skills",
+        "--no-prompt-templates",
+        "--no-themes",
+        "--no-context-files",
+        "--no-session",
+        "--offline",
+    ]
+
+
+def _build_copilot_command(backend, prompt):
+    if os.path.basename(backend.binary or "") == "gh":
+        return [
+            backend.binary, "copilot", "suggest",
+            *backend.extra_args,
+            prompt,
+        ]
+    return [
+        backend.binary, "suggest",
+        *backend.extra_args,
+        prompt,
+    ]
+
+
+def _copilot_test_commands(backend):
+    if os.path.basename(backend.binary or "") == "gh":
+        return [[backend.binary, "copilot", "--help"]]
+    return []
+
+
+def _opencode_env():
+    opencode_config_path = _runtime_json_file("opencode-config", _opencode_config_json())
+    return {
+        "OPENCODE_CONFIG_CONTENT": _opencode_config_json(),
+        "OPENCODE_CONFIG": opencode_config_path,
+        "OPENCODE_CONFIG_DIR": os.path.dirname(opencode_config_path),
+        "OPENCODE_DISABLE_PROJECT_CONFIG": "1",
+        "OPENCODE_PURE": "1",
+        "OPENCODE_ENABLE_EXA": "0",
+    }
+
+
+def _parse_claude_auth_detail(output, default_detail):
+    if not output.startswith("{"):
+        return default_detail
+    try:
+        payload = json.loads(output)
+    except Exception:
+        return default_detail
+    if payload.get("loggedIn") is True:
+        auth_method = payload.get("authMethod") or "logged in"
+        provider = payload.get("apiProvider") or ""
+        return " · ".join(part for part in (auth_method, provider) if part)
+    if payload.get("loggedIn") is False:
+        return "Not logged in"
+    return default_detail
+
+
+_COMMON_RUNTIME_ENV = {
+    "OPENCODE_DISABLE_DEFAULT_PLUGINS": "1",
+    "OPENCODE_DISABLE_CLAUDE_CODE": "1",
+    "OPENCODE_DISABLE_CLAUDE_CODE_PROMPT": "1",
+    "OPENCODE_DISABLE_CLAUDE_CODE_SKILLS": "1",
+    "OPENCODE_DISABLE_LSP_DOWNLOAD": "1",
+    "OPENCODE_DISABLE_MODELS_FETCH": "1",
+    "PI_OFFLINE": "1",
+}
+
+
+_RUNTIME_PATH_HINTS = (
+    "~/.local/bin",
+    "~/.opencode/bin",
+    "~/.codex/bin",
+    "~/.gemini/bin",
+    "~/.claude/local",
+    "~/.kimi-code/bin",
+    "~/node_modules/.bin",
+    "/opt/homebrew/bin",
+    "/usr/local/bin",
+    "/usr/bin",
+    "/bin",
+    "/opt/homebrew/Cellar/node/*/bin",
+)
+
+
+_ENV_AUTH_KEYS = {
+    "pi": (
+        "ANTHROPIC_API_KEY", "ANTHROPIC_OAUTH_TOKEN", "OPENAI_API_KEY",
+        "GEMINI_API_KEY", "DEEPSEEK_API_KEY", "XAI_API_KEY",
+        "OPENROUTER_API_KEY", "KIMI_API_KEY", "MISTRAL_API_KEY",
+    ),
+}
+
+
+_EXTRA_CANDIDATE_ROOTS = {
+    "claude": ("~/.claude/local", "~/.local/share/claude"),
+    "opencode": ("~/.opencode/bin",),
+    "gemini": ("~/.gemini/bin",),
+    "codex": ("~/.codex/bin",),
+    "pi": (
+        "~/.pi/bin",
+        "~/.local/share/pi",
+        "/opt/homebrew/bin",
+        "/opt/homebrew/Cellar/node/*/bin",
+    ),
+}
+
+
+_CLI_AGENT_PROFILES = {
+    "claude": {
+        "auth_status_args": ("auth", "status"),
+        "login_args": ("auth", "login"),
+        "build_command": _build_claude_command,
+        "parse_auth_detail": _parse_claude_auth_detail,
+    },
+    "codex": {
+        "auth_status_args": ("login", "status"),
+        "login_args": ("login",),
+        "build_command": _build_codex_command,
+    },
+    "cursor": {"build_command": _build_cursor_command},
+    "gemini": {
+        "auth_status_args": ("status",),
+        "login_args": ("login",),
+        "build_command": _build_gemini_command,
+    },
+    "opencode": {
+        "auth_status_args": ("status",),
+        "login_args": ("login",),
+        "build_command": _build_opencode_command,
+        "env": _opencode_env,
+    },
+    "qwen": {"build_command": _build_qwen_command},
+    "devin": {"build_command": _build_devin_command},
+    "kiro": {"build_command": _build_kiro_command},
+    "pi": {"build_command": _build_pi_command},
+    "copilot": {
+        "build_command": _build_copilot_command,
+        "test_commands": _copilot_test_commands,
+    },
+}
+
+
+def _agent_profile(tool):
+    return _CLI_AGENT_PROFILES.get(tool or "", {})
+
+
+def _existing_dirs(paths):
+    out = []
+    for path in paths:
+        if not path:
+            continue
+        expanded = os.path.expanduser(os.path.expandvars(path))
+        if "*" in expanded:
+            import glob
+            candidates = glob.glob(expanded)
+        else:
+            candidates = [expanded]
+        for candidate in candidates:
+            if os.path.isdir(candidate):
+                out.append(candidate)
+    return out
+
+
+def _prepend_path(env, paths):
+    path_key = next((key for key in env if key.lower() == "path"), "PATH")
+    existing = env.get(path_key, "")
+    seen = set()
+    merged = []
+    for entry in list(paths) + [part for part in existing.split(os.pathsep) if part]:
+        norm = os.path.normcase(os.path.abspath(os.path.expanduser(entry)))
+        if norm in seen:
+            continue
+        seen.add(norm)
+        merged.append(entry)
+    env[path_key] = os.pathsep.join(merged)
+
+
+def _scrub_child_env(env):
+    exact = {
+        "CODEX_CI",
+        "CODEX_SANDBOX",
+        "CODEX_SANDBOX_NETWORK_DISABLED",
+        "CODEX_THREAD_ID",
+        "CLAUDE_CODE_SSE_PORT",
+        "CLAUDE_CODE_ENTRYPOINT",
+    }
+    prefixes = (
+        "MCP__PLUGIN_",
+        "SUPERPOWERS_",
+    )
+    for key in list(env):
+        upper = key.upper()
+        if upper in exact or any(upper.startswith(prefix) for prefix in prefixes):
+            env.pop(key, None)
 
 
 def _windows_program_dirs():
@@ -249,29 +584,9 @@ def _candidate_paths(tool, command, system=None):
         for name in names:
             paths.append(os.path.join(root, name))
 
-    if tool == "claude":
+    for root in _EXTRA_CANDIDATE_ROOTS.get(tool, ()):
         for name in names:
-            paths.extend([
-                os.path.join("~/.claude/local", name),
-                os.path.join("~/.local/share/claude", name),
-            ])
-    elif tool == "opencode":
-        for name in names:
-            paths.append(os.path.join("~/.opencode/bin", name))
-    elif tool == "gemini":
-        for name in names:
-            paths.append(os.path.join("~/.gemini/bin", name))
-    elif tool == "codex":
-        for name in names:
-            paths.append(os.path.join("~/.codex/bin", name))
-    elif tool == "pi":
-        for name in names:
-            paths.extend([
-                os.path.join("~/.pi/bin", name),
-                os.path.join("~/.local/share/pi", name),
-                os.path.join("/opt/homebrew/bin", name),
-                os.path.join("/opt/homebrew/Cellar/node", "*", "bin", name),
-            ])
+            paths.append(os.path.join(root, name))
 
     return list(_unique_paths(paths))
 
@@ -314,7 +629,7 @@ def scan_cli_agents(path_overrides=None):
 
 
 class CliToolBackend(AgentBackend):
-    def __init__(self, config, server_provider):
+    def __init__(self, config, toolkit=None, executor=None, server_provider=None):
         self.config = config
         self.tool = config.get("cli_tool")
         self.binary = _resolve_binary(self.tool, config.get("cli_path"))
@@ -322,7 +637,10 @@ class CliToolBackend(AgentBackend):
             self.extra_args = shlex.split(config.get("cli_args") or "")
         except ValueError:
             self.extra_args = []
-        # Zero-arg callable returning the running MCP server's base URL.
+        self.toolkit = toolkit
+        self.executor = executor
+        # Kept only for backwards-compatible construction; no longer used for
+        # CLI chat because CLI mode is an in-process proxy, not an MCP client.
         self._server_provider = server_provider
         # synchronise mutations of _proc and _session_id across the
         # dock and the worker thread.
@@ -340,8 +658,6 @@ class CliToolBackend(AgentBackend):
         if self.binary is None:
             return (f"Could not find the '{self.tool}' binary. Set its path in "
                     "Settings, or make sure it is on PATH.")
-        if self._server_provider is None or self._server_provider() is None:
-            return "The local MCP bridge could not start."
         return None
 
     def export_session_state(self):
@@ -352,30 +668,26 @@ class CliToolBackend(AgentBackend):
         with self._lock:
             self._session_id = (state or {}).get("session_id") or None
 
+    def cancel_current_request(self):
+        """Terminate the active CLI process group immediately."""
+        with self._lock:
+            proc = self._proc
+        if proc is None:
+            return
+        self._terminate_process_group(proc, kill=True)
+
     # ------------------------------------------------------------------ #
     # Login / auth helpers
     # ------------------------------------------------------------------ #
 
     def _check_login_cmd(self):
         """Return the command to check authentication status."""
-        if self.tool == "claude":
-            return [self.binary, "auth", "status"]
-        if self.tool == "codex":
-            return [self.binary, "login", "status"]
-        if self.tool in ("opencode", "gemini"):
-            return [self.binary, "status"]
-        return None
+        args = _agent_profile(self.tool).get("auth_status_args")
+        return [self.binary, *args] if args else None
 
     def _env_auth_status(self):
         """Cheap readiness checks for CLIs that rely on provider env vars."""
-        keys_by_tool = {
-            "pi": (
-                "ANTHROPIC_API_KEY", "ANTHROPIC_OAUTH_TOKEN", "OPENAI_API_KEY",
-                "GEMINI_API_KEY", "DEEPSEEK_API_KEY", "XAI_API_KEY",
-                "OPENROUTER_API_KEY", "KIMI_API_KEY", "MISTRAL_API_KEY",
-            ),
-        }
-        keys = keys_by_tool.get(self.tool, ())
+        keys = _ENV_AUTH_KEYS.get(self.tool, ())
         configured = [key for key in keys if os.environ.get(key)]
         if configured:
             return "ready", f"Env key configured: {configured[0]}"
@@ -407,17 +719,9 @@ class CliToolBackend(AgentBackend):
 
         output = (result.stdout or result.stderr or "").strip()
         detail = output.splitlines()[0] if output else ""
-        if self.tool == "claude" and output.startswith("{"):
-            try:
-                payload = json.loads(output)
-                if payload.get("loggedIn") is True:
-                    auth_method = payload.get("authMethod") or "logged in"
-                    provider = payload.get("apiProvider") or ""
-                    detail = " · ".join(part for part in (auth_method, provider) if part)
-                elif payload.get("loggedIn") is False:
-                    detail = "Not logged in"
-            except Exception:
-                pass
+        parser = _agent_profile(self.tool).get("parse_auth_detail")
+        if callable(parser):
+            detail = parser(output, detail)
         if result.returncode == 0:
             return "ready", detail or "Logged in"
         if result.returncode in (1, 2) and detail:
@@ -430,11 +734,8 @@ class CliToolBackend(AgentBackend):
 
     def _login_cmd(self):
         """Return the command to open a browser login flow."""
-        if self.tool == "claude":
-            return [self.binary, "auth", "login"]
-        if self.tool in ("opencode", "codex", "gemini"):
-            return [self.binary, "login"]
-        return [self.binary, "login"]
+        args = _agent_profile(self.tool).get("login_args", ("login",))
+        return [self.binary, *args]
 
     def login_browser(self):
         """Launch the browser-based login flow."""
@@ -459,8 +760,9 @@ class CliToolBackend(AgentBackend):
             [self.binary, "version"],
             [self.binary, "--help"],
         ]
-        if self.tool == "copilot" and os.path.basename(self.binary) == "gh":
-            commands.insert(0, [self.binary, "copilot", "--help"])
+        test_commands = _agent_profile(self.tool).get("test_commands")
+        if callable(test_commands):
+            commands = list(test_commands(self)) + commands
         last_err = ""
         for cmd in commands:
             try:
@@ -478,73 +780,279 @@ class CliToolBackend(AgentBackend):
         return False, last_err or "CLI did not respond successfully"
 
     # ------------------------------------------------------------------ #
-    def _mcp_config_json(self, base_url):
-        return json.dumps({
-            "mcpServers": {
-                "AgenticGIS": {"type": "http", "url": base_url}
-            }
-        })
-
-    def _with_guardrails(self, message):
+    def _system_prompt(self):
         return (
-            "You are operating AgenticGIS inside QGIS. Stay within AgenticGIS "
-            "scope: QGIS, loaded project layers, spatial data, GIS analysis, "
-            "maps, and plugin/QGIS automation. If the user asks for something "
-            "outside that context or outside this plugin's capability, respond "
-            "exactly: we dont do that here\n\n"
-            "Access outside currently loaded project layers (external files, "
-            "folders, URLs, databases, or filesystem/network reads/writes) "
-            "requires explicit user permission. If permission is denied, do "
-            "not work around it.\n\n"
-            "Prefer analyze_layer before arbitrary run_pyqgis for layer "
-            "analysis. For large layers, use structured summaries, statistics, "
-            "charts, sampling, or bounded iteration. Do not use "
-            "list(layer.getFeatures()), do not materialize all features. Do "
-            "not fetch geometry when only attributes are needed.\n\n"
-            "If the user explicitly asks to remove or clear loaded layers, "
-            "use remove_layer or clear_layers. These tools unload layers from "
-            "the QGIS project only; they never delete source files.\n\n"
-            "When you add a derived result layer, call add_layer with "
-            "is_analysis=true so it is kept as a persistent result and reused "
-            "by name. Do not force canvas zoom/refresh on large layer loads; "
-            "call zoom_to_layer(layer_id) only when the user asks to inspect "
-            "the result immediately. Do not delete analysis layers.\n\n"
-            "For remote sensing, satellite imagery, Earth Engine/GEE, NDVI, or "
-            "spectral indices: call gee_status first to verify the GEE plugin "
-            "is installed and authenticated, then ask the user to confirm "
-            "before running gee_add_layer.\n\n"
-            f"User request: {message}"
+            f"{AGENTICGIS_SYSTEM_PROMPT}\n\n"
+            "## CLI proxy rules\n\n"
+            "You are running inside a CLI transport, but AgenticGIS executes "
+            "all QGIS tools in-process. Do not use this CLI's own filesystem, "
+            "shell, browser, plugin, skill, or MCP tools to answer the user's "
+            "GIS request. When you need project data, request an AgenticGIS "
+            "tool call in the JSON protocol below.\n\n"
+            "For final answers, write normal plain text/markdown directly, "
+            "with the same rich, useful, detailed answer you would give in "
+            "API/custom mode. Do not wrap final answers in JSON. Preserve the "
+            "normal AgenticGIS style: concrete findings, useful context, "
+            "tables/charts/layers when relevant, and one useful follow-up "
+            "sentence after analysis.\n\n"
+            "Return JSON ONLY when you need to call one or more AgenticGIS "
+            "tools. No markdown fences, no extra text around the JSON.\n"
+            "To call one or more AgenticGIS tools:\n"
+            "{\"type\":\"tool_calls\",\"calls\":[{\"name\":\"list_layers\",\"arguments\":{}}]}\n"
+            "Use tool_calls when QGIS project data is needed. Use plain final "
+            "text for ordinary conversation or once tool results are sufficient."
         )
 
-    def _build_command(self, message, base_url):
-        message = self._with_guardrails(message)
-        if self.tool == "claude":
-            cmd = [
-                self.binary, "-p", message,
-                "--output-format", "stream-json", "--verbose",
-                "--mcp-config", self._mcp_config_json(base_url),
-                "--permission-mode", "bypassPermissions",
-            ]
-            if self._session_id:
-                cmd += ["--resume", self._session_id]
-            return cmd + self.extra_args
-        if self.tool == "opencode":
-            return [self.binary, "run", message] + self.extra_args
-        if self.tool == "codex":
-            # Codex CLI (beta) — headless mode with MCP config
-            cmd = [
-                self.binary, "run", message,
-                "--mcp-config", self._mcp_config_json(base_url),
-                "--json",
-            ]
-            if self._session_id:
-                cmd += ["--resume", self._session_id]
-            return cmd + self.extra_args
-        if self.tool == "gemini":
-            # Gemini CLI — stream JSON output
-            return [self.binary, "run", message, "--format", "json"] + self.extra_args
-        # Fallback: run with message as the only argument
-        return [self.binary, message] + self.extra_args
+    def _tool_prompt(self):
+        specs = [
+            {
+                "name": spec["name"],
+                "description": spec["description"],
+                "input_schema": spec["input_schema"],
+            }
+            for spec in tools_mod.TOOL_SPECS
+        ]
+        return json.dumps(specs, default=str)
+
+    def _conversation_prompt(self, messages):
+        return (
+            f"{self._system_prompt()}\n\n"
+            f"Available AgenticGIS tools:\n{self._tool_prompt()}\n\n"
+            "Conversation, newest last:\n"
+            f"{json.dumps(messages, default=str)}"
+        )
+
+    def _build_command(self, prompt, _base_url=None):
+        builder = _agent_profile(self.tool).get("build_command", _build_default_command)
+        return builder(self, prompt)
+
+    def _runtime_env(self):
+        env = os.environ.copy()
+        _scrub_child_env(env)
+        node_and_wrapper_dirs = _existing_dirs(
+            [os.path.dirname(self.binary or ""), *_RUNTIME_PATH_HINTS]
+        )
+        _prepend_path(env, node_and_wrapper_dirs)
+        env.update(_COMMON_RUNTIME_ENV)
+        profile_env = _agent_profile(self.tool).get("env")
+        if callable(profile_env):
+            env.update(profile_env())
+        elif isinstance(profile_env, dict):
+            env.update(profile_env)
+        return env
+
+    def _runtime_cwd(self):
+        return _empty_runtime_dir(f"{self.tool or 'cli'}-workspace")
+
+    def _collect_process_output(self, cmd, env, cwd, should_stop):
+        try:
+            with self._lock:
+                self._proc = subprocess.Popen(
+                    cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                    bufsize=0,
+                    env=env,
+                    cwd=cwd,
+                    start_new_session=True, close_fds=True,
+                )
+        except Exception as exc:
+            return "", f"Failed to launch {self.tool}: {exc}", False
+
+        proc = self._proc
+        stdout = proc.stdout
+        stderr = proc.stderr
+        out_chunks = []
+        err_chunks = []
+        stopped = False
+        try:
+            while True:
+                if should_stop():
+                    stopped = True
+                    self._terminate_process_group(proc, kill=True)
+                    break
+                if proc.poll() is not None:
+                    for stream, chunks in ((stdout, out_chunks), (stderr, err_chunks)):
+                        if not stream:
+                            continue
+                        while True:
+                            try:
+                                rest = os.read(stream.fileno(), 4096)
+                            except Exception:
+                                rest = b""
+                            if not rest:
+                                break
+                            chunks.append(rest)
+                    break
+                try:
+                    readable, _, _ = select.select([stdout, stderr], [], [], 0.2)
+                except (OSError, ValueError):
+                    continue
+                for stream in readable:
+                    try:
+                        chunk = os.read(stream.fileno(), 4096)
+                    except Exception:
+                        chunk = b""
+                    if not chunk:
+                        continue
+                    if stream is stdout:
+                        out_chunks.append(chunk)
+                    else:
+                        err_chunks.append(chunk)
+        finally:
+            self._finalize_process(proc, stopped=stopped)
+
+        out_text = b"".join(out_chunks).decode("utf-8", "replace")
+        err_text = b"".join(err_chunks).decode("utf-8", "replace")
+        if stopped:
+            return out_text, "Stopped.", False
+        return out_text, err_text, proc.returncode == 0
+
+    def _run_model_proxy(self, messages, should_stop):
+        prompt = self._conversation_prompt(messages)
+        cmd = self._build_command(prompt, None)
+        out_text, err_text, ok = self._collect_process_output(
+            cmd, self._runtime_env(), self._runtime_cwd(), should_stop
+        )
+        if not ok and err_text.strip():
+            return "", err_text.strip()
+        return self._extract_model_text(out_text), ""
+
+    def _extract_model_text(self, output):
+        """Extract assistant text from common CLI JSONL/event wrappers."""
+        if not output:
+            return ""
+        final_texts = []
+        texts = []
+        raw_non_json = []
+        for event in self._json_objects_from_text(output):
+            extracted = self._text_from_event(event)
+            if extracted and (not texts or texts[-1] != extracted):
+                if self._is_final_text_event(event):
+                    final_texts.append(extracted)
+                else:
+                    texts.append(extracted)
+        if final_texts:
+            return final_texts[-1].strip()
+        if texts:
+            return "\n".join(texts).strip()
+        for line in output.splitlines():
+            stripped = line.strip()
+            if not stripped:
+                continue
+            if self._looks_like_startup_noise(stripped):
+                continue
+            try:
+                event = json.loads(stripped)
+            except Exception:
+                raw_non_json.append(line)
+                continue
+            extracted = self._text_from_event(event)
+            if extracted and (not texts or texts[-1] != extracted):
+                if self._is_final_text_event(event):
+                    final_texts.append(extracted)
+                else:
+                    texts.append(extracted)
+        if final_texts:
+            return final_texts[-1].strip()
+        if texts:
+            return "\n".join(texts).strip()
+        return "\n".join(raw_non_json).strip() or output.strip()
+
+    @staticmethod
+    def _is_final_text_event(event):
+        if not isinstance(event, dict):
+            return False
+        etype = str(event.get("type") or event.get("event") or "").lower()
+        if etype in {"final", "result", "done", "response.completed", "turn.completed"}:
+            return True
+        if etype.endswith(".completed") or etype.endswith("_completed"):
+            return True
+        return bool(event.get("final") or event.get("is_final"))
+
+    @staticmethod
+    def _looks_like_startup_noise(text):
+        markers = (
+            "hookSpecificOutput",
+            "hookEventName",
+            "SessionStart",
+            "<context_window_protection>",
+            "<EXTREMELY_IMPORTANT>",
+            "context-mode",
+            "superpowers",
+        )
+        return any(marker in text for marker in markers)
+
+    @staticmethod
+    def _json_objects_from_text(text):
+        decoder = json.JSONDecoder()
+        index = 0
+        while index < len(text or ""):
+            start = text.find("{", index)
+            if start < 0:
+                break
+            try:
+                obj, end = decoder.raw_decode(text[start:])
+            except Exception:
+                index = start + 1
+                continue
+            if isinstance(obj, dict):
+                yield obj
+            index = start + max(end, 1)
+
+    def _text_from_event(self, event):
+        if not isinstance(event, dict):
+            return ""
+        if "hookSpecificOutput" in event:
+            return ""
+        if event.get("type") == "assistant":
+            parts = []
+            for block in event.get("message", {}).get("content", []):
+                if isinstance(block, dict) and block.get("type") == "text":
+                    parts.append(block.get("text", ""))
+            return "".join(parts).strip()
+        if event.get("type") in ("system", "step-start", "step-finish", "tool"):
+            return ""
+        for key in ("text", "message", "content", "output", "result", "response"):
+            value = event.get(key)
+            if isinstance(value, str):
+                return value.strip()
+            if isinstance(value, dict):
+                nested = self._text_from_event(value)
+                if nested:
+                    return nested
+        data = event.get("data") or event.get("event") or event.get("msg")
+        if isinstance(data, dict):
+            return self._text_from_event(data)
+        return ""
+
+    @staticmethod
+    def _first_json_object(text):
+        decoder = json.JSONDecoder()
+        for index, ch in enumerate(text or ""):
+            if ch != "{":
+                continue
+            try:
+                obj, _end = decoder.raw_decode(text[index:])
+            except Exception:
+                continue
+            if isinstance(obj, dict):
+                return obj
+        return None
+
+    def _parse_proxy_response(self, text):
+        payload = self._first_json_object(text)
+        if not payload:
+            return {"type": "final", "text": text.strip()}
+        rtype = payload.get("type")
+        if rtype == "final":
+            return {"type": "final", "text": str(payload.get("text", "")).strip()}
+        if rtype == "tool_call":
+            return {"type": "tool_calls", "calls": [payload]}
+        if rtype == "tool_calls":
+            calls = payload.get("calls") or payload.get("tool_calls") or []
+            return {"type": "tool_calls", "calls": calls if isinstance(calls, list) else []}
+        if "name" in payload and ("arguments" in payload or "input" in payload):
+            return {"type": "tool_calls", "calls": [payload]}
+        return {"type": "final", "text": text.strip()}
 
     def send(self, message, history, emit, should_stop):
         err = self.validate()
@@ -552,30 +1060,55 @@ class CliToolBackend(AgentBackend):
             emit(AgentEvent(EventType.ERROR, {"error": err}))
             return history
 
-        base_url = self._server_provider()
-        cmd = self._build_command(message, base_url)
-        # start_new_session detaches the child from QGIS's process
-        # group, so Ctrl-C in the spawned CLI doesn't kill QGIS, and
-        # close_fds prevents file-descriptor leaks.
-        try:
-            with self._lock:
-                self._proc = subprocess.Popen(
-                    cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                    text=True, bufsize=1,
-                    start_new_session=True, close_fds=True,
+        messages = list(history or [])
+        messages.append({"role": "user", "content": message})
+        max_iters = self.config.get("max_iterations")
+
+        for _ in agent_iteration_steps(max_iters):
+            if should_stop():
+                emit(AgentEvent(EventType.THINKING, {"text": "Stopped."}))
+                return messages
+
+            response_text, error = self._run_model_proxy(messages, should_stop)
+            if error:
+                emit(AgentEvent(EventType.ERROR, {"error": error[:2000]}))
+                return messages
+            parsed = self._parse_proxy_response(response_text)
+
+            if parsed["type"] == "final":
+                text = parsed.get("text", "")
+                if text:
+                    emit(AgentEvent(EventType.TEXT, {"text": text}))
+                messages.append({"role": "assistant", "content": text})
+                emit(AgentEvent(EventType.DONE))
+                return messages
+
+            calls = parsed.get("calls") or []
+            messages.append({"role": "assistant", "content": json.dumps(parsed, default=str)})
+            if not calls:
+                emit(AgentEvent(EventType.ERROR, {"error": "CLI returned an empty tool call."}))
+                return messages
+
+            for call in calls:
+                if should_stop():
+                    return messages
+                name = call.get("name")
+                args = call.get("arguments", call.get("input", {}))
+                if not isinstance(args, dict):
+                    args = {}
+                payload, is_error, is_cancelled, _result = _dispatch_one_tool(
+                    self.toolkit, self.executor, name, args, emit, should_stop
                 )
-        except Exception as exc:
-            emit(AgentEvent(EventType.ERROR, {"error": f"Failed to launch {self.tool}: {exc}"}))
-            return history
+                if should_stop() or is_cancelled:
+                    return messages
+                messages.append({
+                    "role": "tool",
+                    "name": name,
+                    "content": payload,
+                })
 
-        proc = self._proc
-        try:
-            self._drain_process(proc, emit, should_stop)
-        finally:
-            self._finalize_process(proc)
-
-        emit(AgentEvent(EventType.DONE))
-        return history
+        emit(AgentEvent(EventType.ERROR, {"error": "CLI proxy reached the maximum tool iterations."}))
+        return messages
 
     # ------------------------------------------------------------------ #
     # Streaming I/O — single-threaded select() loop, robust JSONL parser #
@@ -618,10 +1151,7 @@ class CliToolBackend(AgentBackend):
                     err_acc.append(self._read_all(stderr, None))
 
         if poller_stopped:
-            try:
-                proc.terminate()
-            except Exception:
-                pass
+            self._terminate_process_group(proc, kill=True)
 
         # Persist the session id for the next turn's --resume.
         if sid_holder[0]:
@@ -685,28 +1215,50 @@ class CliToolBackend(AgentBackend):
             except Exception:
                 pass
 
-    def _finalize_process(self, proc):
+    def _finalize_process(self, proc, stopped=False):
         """Reap the child, escalating to SIGKILL if it refuses to die."""
-        # bounded kill. Try terminate (SIGTERM), wait 5s, then kill.
+        if stopped:
+            self._terminate_process_group(proc, kill=True)
+            try:
+                proc.wait(timeout=0.05)
+            except Exception:
+                pass
+            self._close_process_pipes(proc)
+            with self._lock:
+                if self._proc is proc:
+                    self._proc = None
+            return
+        # Bounded shutdown: ask the process group to exit, then kill quickly if needed.
+        self._terminate_process_group(proc, kill=False)
         try:
-            proc.terminate()
+            proc.wait(timeout=0.8)
+        except subprocess.TimeoutExpired:
+            self._terminate_process_group(proc, kill=True)
+        try:
+            proc.wait(timeout=1.5)
         except Exception:
             pass
-        try:
-            proc.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            try:
-                proc.kill()
-            except Exception:
-                pass
-            try:
-                proc.wait(timeout=2)
-            except Exception:
-                pass
         self._close_process_pipes(proc)
         with self._lock:
             if self._proc is proc:
                 self._proc = None
+
+    @staticmethod
+    def _terminate_process_group(proc, kill=False):
+        sig = signal.SIGKILL if kill else signal.SIGTERM
+        try:
+            pgid = os.getpgid(proc.pid)
+            os.killpg(pgid, sig)
+            return
+        except Exception:
+            pass
+        try:
+            if kill:
+                proc.kill()
+            else:
+                proc.terminate()
+        except Exception:
+            pass
 
     # ------------------------------------------------------------------ #
     # JSONL event handling                                                #

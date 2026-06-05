@@ -10,6 +10,7 @@ from qgis.PyQt.QtCore import QSettings
 SETTINGS_KEY = "AgenticGIS/sessions_json"
 SCHEMA_VERSION = 1
 DEFAULT_SESSION_NAME = "New session"
+WARN_SESSION_BYTES = 1_000_000
 
 
 def _now():
@@ -87,13 +88,25 @@ class SessionStore:
 
     def list_sessions(self):
         self._normalize()
-        return [dict(session) for session in self._data["sessions"]]
+        return [self._with_size_metadata(session) for session in self._data["sessions"]]
 
     def get_session(self, session_id):
         for session in self._data.get("sessions", []):
             if session.get("id") == session_id:
-                return dict(session)
+                return self._with_size_metadata(session)
         return None
+
+    @staticmethod
+    def _session_size_bytes(session):
+        return len(json.dumps(session, separators=(",", ":"), default=str).encode("utf-8"))
+
+    @classmethod
+    def _with_size_metadata(cls, session):
+        item = dict(session)
+        size = cls._session_size_bytes(session)
+        item["size_bytes"] = size
+        item["size_warning"] = size >= WARN_SESSION_BYTES
+        return item
 
     def active_session(self):
         active_id = self._data.get("active_session_id")

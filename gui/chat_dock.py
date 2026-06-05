@@ -7,6 +7,7 @@ mode (default) and respects QGIS's own theme via neutral grays.
 
 import html
 import time
+from collections import deque
 from datetime import datetime
 
 from qgis.gui import QgsDockWidget
@@ -37,30 +38,34 @@ from .message_bubble import MessageContainer
 from .stats_widget import StatsWidget
 from .typing_indicator import TypingIndicator
 from .ask_user_card import AskUserCard
-
-# ── Design Tokens (Mono + Signal palette) ──────────────────────────────────
-_CANVAS      = "#141414"   # transcript / app background (true neutral black)
-_SURFACE     = "#1c1c1c"   # card surface
-_SURFACE_2   = "#232323"   # elevated: chips, inline-code background
-_BORDER      = "#2b2b2b"   # hairline border
-_BORDER_SOFT = "#222222"   # fainter border
-_TEXT        = "#e8e8e8"   # primary text
-_TEXT_2      = "#9a9a9a"   # secondary text
-_TEXT_3      = "#6f6f6f"   # muted meta
-_TEXT_4      = "#4a4a4a"   # faint
-# NO decorative accent. These alias to neutrals so existing refs don't break:
-_ACCENT      = "#e8e8e8"   # primary white (send arrow, etc.)
-_ACCENT_DIM  = "#9a9a9a"
-_ACCENT_HOV  = "#ffffff"
-_PURPLE      = "#6f6f6f"   # thinking -> grayscale dim (NO purple)
-# SIGNAL colors — appear ONLY on tool/message STATE, never on plain text or chrome:
-_WARN        = "#d99a3c"   # amber  — tool running
-_SUCCESS     = "#5aa86f"   # green  — tool done / ready dot
-_DANGER      = "#d05a5a"   # red    — error
-_CODE_GREEN  = "#e8e8e8"   # inline-code text -> grayscale (NO green/teal)
+from .theme import (
+    DOCK_CANVAS as _CANVAS,
+    DOCK_SURFACE as _SURFACE,
+    DOCK_SURFACE_2 as _SURFACE_2,
+    DOCK_BORDER as _BORDER,
+    DOCK_BORDER_SOFT as _BORDER_SOFT,
+    DOCK_TEXT as _TEXT,
+    DOCK_TEXT_2 as _TEXT_2,
+    DOCK_TEXT_3 as _TEXT_3,
+    DOCK_TEXT_4 as _TEXT_4,
+    DOCK_ACCENT as _ACCENT,
+    DOCK_ACCENT_DIM as _ACCENT_DIM,
+    DOCK_ACCENT_HOV as _ACCENT_HOV,
+    DOCK_PURPLE as _PURPLE,
+    DOCK_WARN as _WARN,
+    DOCK_SUCCESS as _SUCCESS,
+    DOCK_DANGER as _DANGER,
+    DOCK_CODE_GREEN as _CODE_GREEN,
+)
 _STREAM_COALESCE_INTERVAL_S = 0.030
 _STREAM_COALESCE_MAX_CHARS = 8192
 _STREAM_RENDER_INTERVAL_S = 0.050
+
+_MAX_EVENTS_BUFFERED = 1000
+_BUFFER_DROP_COUNT = 500
+
+_MAX_TURN_TEXT_CHARS = 200_000
+_MAX_THINKING_TEXT_CHARS = 50_000
 
 
 class ChatWorker(QThread):
@@ -76,9 +81,17 @@ class ChatWorker(QThread):
         self._coalesce_type = None
         self._coalesce_text = ""
         self._last_coalesce_flush = time.monotonic()
+        self._event_buffer = deque()
+        self._last_buffer_flush = time.monotonic()
 
     def stop(self):
         self._stop = True
+        try:
+            cancel = getattr(self._backend, "cancel_current_request", None)
+            if callable(cancel):
+                cancel()
+        except Exception:
+            pass
 
     def run(self):
         try:
@@ -114,7 +127,7 @@ class ChatWorker(QThread):
         deltas, queueing each token can make QGIS feel stuck even if each paint
         is cheap. Coalescing adjacent TEXT/THINKING deltas preserves content and
         ordering while sharply reducing queued signal count. Non-stream events
-        are flushed through immediately.
+        are buffered and flushed so the signal queue never grows unbounded.
         """
         if ev.type in (EventType.TEXT, EventType.THINKING):
             delta = ev.data.get("text", "")
@@ -132,15 +145,31 @@ class ChatWorker(QThread):
                 return
 
         self._flush_coalesced_event()
-        self.event.emit(ev)
+        self._event_buffer.append(ev)
+        if len(self._event_buffer) > _MAX_EVENTS_BUFFERED:
+            for _ in range(_BUFFER_DROP_COUNT):
+                if self._event_buffer:
+                    self._event_buffer.popleft()
+        self._flush_event_buffer()
+
+    def _flush_event_buffer(self):
+        while self._event_buffer:
+            ev = self._event_buffer.popleft()
+            try:
+                self.event.emit(ev)
+            except RuntimeError:
+                pass
 
     def _flush_coalesced_event(self, now=None):
-        if not self._coalesce_text or self._coalesce_type is None:
-            return
-        self.event.emit(AgentEvent(self._coalesce_type, {"text": self._coalesce_text}))
-        self._coalesce_type = None
-        self._coalesce_text = ""
-        self._last_coalesce_flush = now if now is not None else time.monotonic()
+        if self._coalesce_text and self._coalesce_type is not None:
+            try:
+                self._event_buffer.append(AgentEvent(self._coalesce_type, {"text": self._coalesce_text}))
+            except RuntimeError:
+                pass
+            self._coalesce_type = None
+            self._coalesce_text = ""
+            self._last_coalesce_flush = now if now is not None else time.monotonic()
+        self._flush_event_buffer()
 
 
 class ChatDock(QgsDockWidget):
@@ -189,6 +218,7 @@ class ChatDock(QgsDockWidget):
         self._last_stream_render_at = 0.0
         self._thinking_text = ""           # accumulated thinking/progress text
         self._thinking_started = False     # whether add_thinking_block was called this turn
+        self._current_text_truncated = False
         self._ask_user_card = None
         self._ask_user_payload = None
         self._scroll_locked = False
@@ -478,6 +508,12 @@ class ChatDock(QgsDockWidget):
         ):
             self._startup_picker_shown = True
             QTimer.singleShot(0, self._show_startup_session_picker)
+
+    def closeEvent(self, event):
+        self._stop_active_worker()
+        self._status_timer.stop()
+        self._stream_render_timer.stop()
+        super().closeEvent(event)
 
     # ------------------------------------------------------------------ #
     def eventFilter(self, obj, event):
@@ -810,12 +846,15 @@ class ChatDock(QgsDockWidget):
         else:
             mark = self._status_icon or "·"
         session_name = self._status_session_name or DEFAULT_SESSION_NAME
-        self.status.setText(
-            f"<span style='color:{self._status_color};font-size:11px;'>{html.escape(mark)}</span> "
-            f"<span style='color:{_TEXT_3}; font-size:11px;'>{html.escape(self._status_text)}</span>"
-            f"<span style='color:{_TEXT_4}; font-size:11px;'> - </span>"
-            f"<span style='color:{_TEXT_2}; font-size:11px;'>{html.escape(session_name)}</span>"
-        )
+        try:
+            self.status.setText(
+                f"<span style='color:{self._status_color};font-size:11px;'>{html.escape(mark)}</span> "
+                f"<span style='color:{_TEXT_3}; font-size:11px;'>{html.escape(self._status_text)}</span>"
+                f"<span style='color:{_TEXT_4}; font-size:11px;'> - </span>"
+                f"<span style='color:{_TEXT_2}; font-size:11px;'>{html.escape(session_name)}</span>"
+            )
+        except RuntimeError:
+            pass
 
     # ------------------------------------------------------------------ #
     def _emit_ask_user_threadsafe(self, question, options, allow_free_text):
@@ -1267,7 +1306,7 @@ class ChatDock(QgsDockWidget):
         sessions = self._session_store.list_sessions()
         card, card_layout = self._session_dialog_card(
             "Sessions",
-            f"{len(sessions)} saved chats. Latest 20 are kept.",
+            f"{len(sessions)} saved chats. Latest 20 are kept. Large sessions are highlighted.",
         )
         layout.addWidget(card)
 
@@ -1287,11 +1326,14 @@ class ChatDock(QgsDockWidget):
             name.setWordWrap(True)
             name.setFont(QFont("JetBrains Mono", 11, QFont.DemiBold))
             name.setStyleSheet(f"color:{_TEXT}; font-size:12px;")
+            size_text = self._format_session_size(session.get("size_bytes", 0))
             meta = QLabel(
-                f"{'Current' if active else 'Updated'} - {self._format_session_time(session.get('updated_at'))}"
+                f"{'Current' if active else 'Updated'} - "
+                f"{self._format_session_time(session.get('updated_at'))} - {size_text}"
             )
             meta.setFont(QFont("JetBrains Mono", 10))
-            meta.setStyleSheet(f"color:{_WARN if active else _TEXT_3}; font-size:10px;")
+            meta_color = _WARN if (active or session.get("size_warning")) else _TEXT_3
+            meta.setStyleSheet(f"color:{meta_color}; font-size:10px;")
             text_col.addWidget(name)
             text_col.addWidget(meta)
             row_layout.addLayout(text_col, 1)
@@ -1359,6 +1401,27 @@ class ChatDock(QgsDockWidget):
             return dt.strftime("%Y-%m-%d %H:%M")
         except ValueError:
             return str(value)
+
+    @staticmethod
+    def _format_session_size(size_bytes):
+        try:
+            size = max(0, int(size_bytes or 0))
+        except (TypeError, ValueError):
+            size = 0
+        units = ("B", "KB", "MB", "GB")
+        value = float(size)
+        unit = units[0]
+        for unit in units:
+            if value < 1024.0 or unit == units[-1]:
+                break
+            value /= 1024.0
+        if unit == "B":
+            return f"{int(value)} {unit}"
+        if value >= 100:
+            return f"{value:.0f} {unit}"
+        if value >= 10:
+            return f"{value:.1f} {unit}"
+        return f"{value:.2f} {unit}"
 
     def _stop_active_worker(self):
         if self._worker is None:
@@ -1456,9 +1519,7 @@ class ChatDock(QgsDockWidget):
         worker_was_active = self._worker is not None
         # Stop any active worker BEFORE clearing widgets to prevent crashes
         if worker_was_active:
-            self._stop_requested = True
-            self._worker.stop()
-            # The worker's QThread.finished signal releases self._worker.
+            self._stop_active_worker()
         if self._ask_user_card is not None:
             if self._toolkit is not None:
                 self._toolkit._resolve_ask_user({
@@ -1484,6 +1545,8 @@ class ChatDock(QgsDockWidget):
         self._last_stream_render_at = 0.0
         self._thinking_text = ""
         self._thinking_started = False
+        self._current_text_truncated = False
+        self._status_timer.stop()
         self._scroll_locked = False
         if not worker_was_active:
             self._stop_requested = False
@@ -1529,6 +1592,7 @@ class ChatDock(QgsDockWidget):
         self._current_agent_turn = None
         self._current_tool_row = None
         self._thinking_started = False
+        self._current_text_truncated = False
 
         self.send_btn.setEnabled(False)
         self.send_btn.setVisible(False)
@@ -1551,6 +1615,16 @@ class ChatDock(QgsDockWidget):
         if self._worker is not None:
             self._stop_requested = True
             self._worker.stop()
+            self._remove_current_agent_turn()
+            self._current_tool_row = None
+            self._pending_tool = None
+            self._current_text = ""
+            self._tool_progress_text = ""
+            self._showing_tool_progress = False
+            self._pending_stream_render = False
+            self._pending_stream_kind = None
+            self._pending_stream_scroll = False
+            self._stream_render_timer.stop()
             # Cooperatively cancel any main-thread operation (run_pyqgis,
             # processing.run, create_chart, get_layer_statistics). The worker
             # also stops the agent loop, but main-thread work needs a separate
@@ -1602,6 +1676,12 @@ class ChatDock(QgsDockWidget):
                 if not self._streaming:
                     self._streaming = True
                 self._current_text += delta
+                if len(self._current_text) > _MAX_TURN_TEXT_CHARS:
+                    if not self._current_text_truncated:
+                        self._current_text = self._current_text[:_MAX_TURN_TEXT_CHARS] + "\n\n… (truncated)"
+                        self._current_text_truncated = True
+                        self._schedule_stream_render("final")
+                    return
                 self._schedule_stream_render("final")
 
         elif ev.type == EventType.TOOL_USE:
@@ -1747,6 +1827,17 @@ class ChatDock(QgsDockWidget):
             # has somewhere to live.
             self._get_or_create_agent_turn()
 
+    def _remove_current_agent_turn(self):
+        turn = self._current_agent_turn
+        if turn is None:
+            return
+        container = turn.parentWidget()
+        if container is not None:
+            self.transcript_layout.removeWidget(container)
+            container.deleteLater()
+        self._current_agent_turn = None
+        self._current_turn_event = None
+
     def _set_tool_progress(self, text: str):
         """Show temporary tool progress in the response area.
 
@@ -1760,9 +1851,6 @@ class ChatDock(QgsDockWidget):
         self._tool_progress_text = text
         self._showing_tool_progress = True
         turn.set_progress_text(self._tool_progress_text)
-        app = QApplication.instance()
-        if app is not None:
-            app.processEvents()
 
     def _schedule_stream_render(self, kind: str):
         """Throttle expensive rich-text rendering during stream floods."""
@@ -1817,6 +1905,8 @@ class ChatDock(QgsDockWidget):
             if not text.startswith((" ", "\n", ".", ",", ":", ";", ")")):
                 self._thinking_text += " "
         self._thinking_text += text
+        if len(self._thinking_text) > _MAX_THINKING_TEXT_CHARS:
+            self._thinking_text = self._thinking_text[:_MAX_THINKING_TEXT_CHARS]
         turn.set_thinking_text(self._thinking_text)
         turn_event = self._ensure_current_turn_event()
         if turn_event is not None:
@@ -1833,13 +1923,16 @@ class ChatDock(QgsDockWidget):
         # finalize_text(self._current_text) on it, producing a second bubble
         # with the same text (the "double response" bug).
         self._hide_typing()
-        self.send_btn.setEnabled(True)
-        self.send_btn.setVisible(True)
-        self.stop_btn.setEnabled(False)
-        self.stop_btn.setVisible(False)
+        try:
+            self.send_btn.setEnabled(True)
+            self.send_btn.setVisible(True)
+            self.stop_btn.setEnabled(False)
+            self.stop_btn.setVisible(False)
+            self._set_status("Ready", _SUCCESS, icon="✓")
+        except RuntimeError:
+            pass
         self._scroll_locked = False
         self._thinking_started = False
-        self._set_status("Ready", _SUCCESS, icon="✓")
         self._stop_requested = False
 
     def _on_worker_thread_finished(self, worker):

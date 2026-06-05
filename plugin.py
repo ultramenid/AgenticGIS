@@ -36,6 +36,10 @@ class AgenticGisPlugin:
     def unload(self):
         self._stop_server()
         if self._dock is not None:
+            try:
+                self._dock._stop_active_worker()
+            except Exception:
+                pass
             self.iface.removeDockWidget(self._dock)
             self._dock.deleteLater()
             self._dock = None

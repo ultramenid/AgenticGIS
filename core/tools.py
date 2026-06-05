@@ -587,7 +587,41 @@ TOOL_SPECS = [
 TOOL_BY_NAME = {spec["name"]: spec for spec in TOOL_SPECS}
 
 
-def dispatch(toolkit, executor, name, arguments):
+def _dispatch_cancelled(should_stop):
+    try:
+        return bool(should_stop and should_stop())
+    except Exception:
+        return False
+
+
+def _cancelled_result():
+    return {"ok": False, "error": "cancelled by user", "cancelled": True}
+
+
+def _log_dispatch_end(tool, path, start, result=None):
+    """Emit a uniform ``tool.dispatch.end`` log_event for any dispatch path."""
+    ok = None
+    cancelled = False
+    error = None
+    if isinstance(result, dict):
+        ok = result.get("ok")
+        cancelled = bool(result.get("cancelled"))
+    elif isinstance(result, str):
+        ok = False
+        error = result
+    elapsed_ms = int((time.perf_counter() - start) * 1000)
+    log_event(
+        "tool.dispatch.end",
+        tool=tool,
+        path=path,
+        elapsed_ms=elapsed_ms,
+        ok=ok,
+        cancelled=cancelled,
+        error=error,
+    )
+
+
+def dispatch(toolkit, executor, name, arguments, should_stop=None):
     """Run tool ``name`` with ``arguments`` against ``toolkit`` on the main
     thread (via ``executor``) and return its result. Raises ``KeyError`` for
     an unknown tool name."""
@@ -598,70 +632,52 @@ def dispatch(toolkit, executor, name, arguments):
     log_event("tool.dispatch.start", tool=name, arg_keys=sorted(args.keys()))
 
     try:
+        if _dispatch_cancelled(should_stop):
+            _log_dispatch_end(name, "pre_cancelled", start, _cancelled_result())
+            return _cancelled_result()
+
         if name == "ask_user":
+            if _dispatch_cancelled(should_stop):
+                return _cancelled_result()
             result = method(**args)
-            log_event(
-                "tool.dispatch.end",
-                tool=name,
-                path="ask_user",
-                elapsed_ms=int((time.perf_counter() - start) * 1000),
-                ok=not isinstance(result, str),
-                error=result if isinstance(result, str) else None,
-            )
+            _log_dispatch_end(name, "ask_user", start, result)
             return result
 
         confirm_external_access = getattr(toolkit, "confirm_external_access", None)
         if confirm_external_access is not None:
+            if _dispatch_cancelled(should_stop):
+                return _cancelled_result()
             denied = confirm_external_access(name, args)
             if denied is not None:
-                log_event(
-                    "tool.dispatch.end",
-                    tool=name,
-                    path="denied",
-                    elapsed_ms=int((time.perf_counter() - start) * 1000),
-                    ok=False,
-                    cancelled=bool(denied.get("cancelled")) if isinstance(denied, dict) else False,
-                )
+                _log_dispatch_end(name, "denied", start, denied)
                 return denied
 
         if name == "run_processing" and hasattr(toolkit, "run_processing_background"):
+            if _dispatch_cancelled(should_stop):
+                return _cancelled_result()
             result = toolkit.run_processing_background(
                 executor,
                 args.get("alg_id"),
                 args.get("params") or {},
             )
-            log_event(
-                "tool.dispatch.end",
-                tool=name,
-                path="processing_task",
-                elapsed_ms=int((time.perf_counter() - start) * 1000),
-                ok=bool(result.get("ok")) if isinstance(result, dict) else None,
-                cancelled=bool(result.get("cancelled")) if isinstance(result, dict) else False,
-            )
+            _log_dispatch_end(name, "processing_task", start, result)
             return result
 
         can_run_background = getattr(toolkit, "can_run_background", None)
         if can_run_background is not None and can_run_background(name):
+            if _dispatch_cancelled(should_stop):
+                return _cancelled_result()
             result = toolkit.run_background_tool(executor, name, args)
-            log_event(
-                "tool.dispatch.end",
-                tool=name,
-                path="background",
-                elapsed_ms=int((time.perf_counter() - start) * 1000),
-                ok=bool(result.get("ok")) if isinstance(result, dict) else None,
-                cancelled=bool(result.get("cancelled")) if isinstance(result, dict) else False,
-            )
+            _log_dispatch_end(name, "background", start, result)
             return result
 
-        result = executor.run_sync(lambda: method(**args))
-        log_event(
-            "tool.dispatch.end",
-            tool=name,
-            path="main_thread",
-            elapsed_ms=int((time.perf_counter() - start) * 1000),
-            ok=bool(result.get("ok")) if isinstance(result, dict) else None,
-            cancelled=bool(result.get("cancelled")) if isinstance(result, dict) else False,
-        )
+        def run_method():
+            if _dispatch_cancelled(should_stop):
+                return _cancelled_result()
+            return method(**args)
+
+        result = executor.run_sync(run_method)
+        _log_dispatch_end(name, "main_thread", start, result)
         return result
     except BaseException as exc:
         log_event(

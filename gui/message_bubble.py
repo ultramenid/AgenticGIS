@@ -22,28 +22,27 @@ from qgis.PyQt.QtWidgets import (
     QWidget,
 )
 
-# ── Mono + Signal Palette ──────────────────────────────────
-_CANVAS      = "#141414"   # transcript / app background (true neutral black)
-_SURFACE     = "#1c1c1c"   # card surface
-_SURFACE_2   = "#232323"   # elevated: chips, inline-code background
-_BORDER      = "#2b2b2b"   # hairline border
-_BORDER_SOFT = "#222222"   # fainter border
-_TEXT        = "#e8e8e8"   # primary text
-_TEXT_2      = "#9a9a9a"   # secondary text
-_TEXT_3      = "#6f6f6f"   # muted meta
-_TEXT_4      = "#4a4a4a"   # faint
-# NO decorative accent — alias to neutrals so existing refs don't break:
-_ACCENT      = "#e8e8e8"   # primary white (send arrow, etc.)
-_ACCENT_DIM  = "#9a9a9a"
-_ACCENT_HOV  = "#ffffff"
-_PURPLE      = "#6f6f6f"   # thinking -> grayscale dim (NO purple)
-# SIGNAL colors — appear ONLY on tool/message STATE, never on plain text/chrome:
-_WARN        = "#d99a3c"   # amber  — tool running
-_SUCCESS     = "#5aa86f"   # green  — tool done / ready dot
-_DANGER      = "#d05a5a"   # red    — error
+from .theme import (
+    DOCK_CANVAS as _CANVAS,
+    DOCK_SURFACE as _SURFACE,
+    DOCK_SURFACE_2 as _SURFACE_2,
+    DOCK_BORDER as _BORDER,
+    DOCK_BORDER_SOFT as _BORDER_SOFT,
+    DOCK_TEXT as _TEXT,
+    DOCK_TEXT_2 as _TEXT_2,
+    DOCK_TEXT_3 as _TEXT_3,
+    DOCK_TEXT_4 as _TEXT_4,
+    DOCK_ACCENT as _ACCENT,
+    DOCK_ACCENT_DIM as _ACCENT_DIM,
+    DOCK_ACCENT_HOV as _ACCENT_HOV,
+    DOCK_PURPLE as _PURPLE,
+    DOCK_WARN as _WARN,
+    DOCK_SUCCESS as _SUCCESS,
+    DOCK_DANGER as _DANGER,
+    DOCK_CODE_GREEN as _CODE_GREEN,
+)
 
-# Inline-code token color -> grayscale (NO green/teal)
-_CODE_GREEN  = "#e8e8e8"
+# ── One Dark palette (carbon.sh default theme) ─────────────────────────
 
 # ── One Dark palette (carbon.sh default theme) ─────────────────────────
 _SYN_BG     = "#282c34"

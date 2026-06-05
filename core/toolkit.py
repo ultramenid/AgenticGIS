@@ -17,6 +17,7 @@ its slot.
 
 import io
 import re
+import sys
 import threading
 import time
 import traceback
@@ -35,6 +36,7 @@ from qgis.core import (
 )
 
 from .cancellation import CancellationRegistry as _CancellationRegistry
+from .cancellation import cancel_requested as _cancel_requested
 from .analysis_cache import AnalysisCache, layer_cache_token
 from .dev_logging import log_event
 from .layer_analysis import analyze_vector_layer
@@ -91,7 +93,6 @@ def _layer_brief(layer):
     except RuntimeError:
         return {"ok": False, "id": "?", "name": "?", "valid": False,
                 "error": "layer no longer available"}
-
     if isinstance(layer, QgsVectorLayer):
         try:
             info["feature_count"] = layer.featureCount()
@@ -108,6 +109,16 @@ def _layer_brief(layer):
     return info
 
 
+def _require_vector_layer(layer_id):
+    """Look up a layer by id and return it, or a structured error dict."""
+    layer = QgsProject.instance().mapLayer(layer_id)
+    if layer is None:
+        return {"ok": False, "error": f"No layer with id {layer_id!r}"}
+    if not isinstance(layer, QgsVectorLayer):
+        return {"ok": False, "error": f"Layer {layer.name()!r} is not a vector layer"}
+    return layer
+
+
 def _no_geometry_flag():
     """Return the QGIS no-geometry feature request flag across QGIS versions."""
     try:
@@ -120,16 +131,6 @@ def _no_geometry_flag():
 _CANCELLED_SENTINEL = "__cancelled__"
 DEFAULT_FEATURE_SCAN_LIMIT = 100_000
 EVENT_PUMP_INTERVAL = 100
-
-
-def _cancel_requested(cancel):
-    if cancel is None:
-        return False
-    if hasattr(cancel, "isCanceled"):
-        return bool(cancel.isCanceled())
-    if hasattr(cancel, "is_set"):
-        return bool(cancel.is_set())
-    return False
 
 
 def _is_blank_chart_label(value):
@@ -926,8 +927,7 @@ class QgisToolkit:
         """
         start = time.perf_counter()
         log_event("toolkit.run_pyqgis.start", code_len=len(code) if isinstance(code, str) else None)
-        event, owner = self._cancel.register()
-        try:
+        with self._cancel.scope() as (event, owner):
             result = self._run_pyqgis_inner(code, event, owner)
             elapsed_ms = int((time.perf_counter() - start) * 1000)
             log_event(
@@ -943,8 +943,6 @@ class QgisToolkit:
                     "For field stats use get_layer_statistics; for summaries use analyze_layer."
                 ))
             return result
-        finally:
-            self._cancel.release(event)
 
     def _run_pyqgis_inner(self, code, event, owner):
         import qgis.core as qgis_core
@@ -1063,7 +1061,18 @@ class QgisToolkit:
                     "stdout": "", "stderr": ""}
         try:
             with redirect_stdout(out), redirect_stderr(err):
-                exec(compile(code, "<agenticgis>", "exec"), ns)  # noqa: S102
+                old_trace = sys.gettrace()
+
+                def _cancel_trace(frame, event_name, arg):
+                    if _cancel_check():
+                        raise KeyboardInterrupt
+                    return _cancel_trace
+
+                try:
+                    sys.settrace(_cancel_trace)
+                    exec(compile(code, "<agenticgis>", "exec"), ns)  # noqa: S102
+                finally:
+                    sys.settrace(old_trace)
             if _cancel_check():
                 result["ok"] = False
                 result["error"] = "run_pyqgis: cancelled by user"
@@ -1118,9 +1127,6 @@ class QgisToolkit:
         end = (start + limit) if limit else total
         sliced = layers[start:end]
         result = [_layer_brief(layer) for layer in sliced]
-        # Backward compatibility: return raw list when no pagination requested
-        if limit is None and not offset:
-            return result
         return {
             "ok": True,
             "total": total,
@@ -1130,11 +1136,9 @@ class QgisToolkit:
         }
 
     def get_layer_fields(self, layer_id):
-        layer = QgsProject.instance().mapLayer(layer_id)
-        if layer is None:
-            return {"ok": False, "error": f"No layer with id {layer_id!r}"}
-        if not isinstance(layer, QgsVectorLayer):
-            return {"ok": False, "error": f"Layer {layer.name()!r} is not a vector layer"}
+        layer = _require_vector_layer(layer_id)
+        if isinstance(layer, dict):
+            return layer
         return {
             "ok": True,
             "layer": layer.name(),
@@ -1219,11 +1223,9 @@ class QgisToolkit:
         This is the preferred tool for exploratory layer analysis because it
         centralizes large-layer safety instead of relying on generated PyQGIS.
         """
-        layer = QgsProject.instance().mapLayer(layer_id)
-        if layer is None:
-            return {"ok": False, "error": f"No layer with id {layer_id!r}"}
-        if not isinstance(layer, QgsVectorLayer):
-            return {"ok": False, "error": f"Layer {layer.name()!r} is not a vector layer"}
+        layer = _require_vector_layer(layer_id)
+        if isinstance(layer, dict):
+            return layer
 
         args = {
             "analysis_type": analysis_type or "auto",
@@ -1240,12 +1242,8 @@ class QgisToolkit:
             cached["cached"] = True
             return cached
 
-        event, owner = self._cancel.register()
-        try:
+        with self._cancel.scope() as (event, owner):
             result = self._analyze_layer_object(layer, args, feedback=event)
-        finally:
-            if owner:
-                self._cancel.release(event)
         if isinstance(result, dict) and result.get("ok"):
             cache.set(key, result)
         return result
@@ -1294,63 +1292,61 @@ class QgisToolkit:
         # wire a feedback so the QGIS processing framework honours our
         # cancellation token. Falls back to a direct call if the framework
         # doesn't accept ``feedback`` (older QGIS).
-        event, owner = self._cancel.register()
-        feedback = _make_qgs_feedback(event) if owner else None
+        with self._cancel.scope() as (event, owner):
+            feedback = _make_qgs_feedback(event) if owner else None
 
-        try:
-            if feedback is not None:
-                try:
-                    output = processing.run(alg_id, dict(params or {}), feedback=feedback)
-                except TypeError:
-                    # Older QGIS signature without feedback kwarg
+            try:
+                if feedback is not None:
+                    try:
+                        output = processing.run(alg_id, dict(params or {}), feedback=feedback)
+                    except TypeError:
+                        # Older QGIS signature without feedback kwarg
+                        output = processing.run(alg_id, dict(params or {}))
+                else:
                     output = processing.run(alg_id, dict(params or {}))
-            else:
-                output = processing.run(alg_id, dict(params or {}))
-        except KeyboardInterrupt:
-            # If the user cancelled, surface the cancel flag; otherwise
-            # treat the interrupt as a generic error so the agent knows
-            # it isn't something it can retry.
-            if event is not None and event.is_set():
-                result = {"ok": False, "error": "cancelled by user", "cancelled": True}
-            else:
-                result = {"ok": False, "error": "interrupted by user"}
-            log_event(
-                "toolkit.run_processing.end",
-                alg_id=alg_id,
-                elapsed_ms=int((time.perf_counter() - start) * 1000),
-                ok=False,
-                cancelled=bool(result.get("cancelled")),
-            )
-            return result
-        except BaseException as exc:  # noqa: BLE001
-            # distinguish the cancel path from real errors so the agent
-            # can decide whether to retry.
-            if event is not None and event.is_set():
-                result = {"ok": False, "error": "cancelled by user", "cancelled": True}
+            except KeyboardInterrupt:
+                # If the user cancelled, surface the cancel flag; otherwise
+                # treat the interrupt as a generic error so the agent knows
+                # it isn't something it can retry.
+                if event is not None and event.is_set():
+                    result = {"ok": False, "error": "cancelled by user", "cancelled": True}
+                else:
+                    result = {"ok": False, "error": "interrupted by user"}
                 log_event(
                     "toolkit.run_processing.end",
                     alg_id=alg_id,
                     elapsed_ms=int((time.perf_counter() - start) * 1000),
                     ok=False,
-                    cancelled=True,
+                    cancelled=bool(result.get("cancelled")),
                 )
                 return result
-            name = type(exc).__name__
-            # Pull a "cleaner" message out of QGIS-specific exception types
-            # when available.
-            msg = str(exc)
-            result = {"ok": False, "error": f"{name}: {msg}"}
-            log_event(
-                "toolkit.run_processing.end",
-                alg_id=alg_id,
-                elapsed_ms=int((time.perf_counter() - start) * 1000),
-                ok=False,
-                cancelled=False,
-                error_type=name,
-            )
-            return result
-        finally:
-            self._cancel.release(event)
+            except BaseException as exc:  # noqa: BLE001
+                # distinguish the cancel path from real errors so the agent
+                # can decide whether to retry.
+                if event is not None and event.is_set():
+                    result = {"ok": False, "error": "cancelled by user", "cancelled": True}
+                    log_event(
+                        "toolkit.run_processing.end",
+                        alg_id=alg_id,
+                        elapsed_ms=int((time.perf_counter() - start) * 1000),
+                        ok=False,
+                        cancelled=True,
+                    )
+                    return result
+                name = type(exc).__name__
+                # Pull a "cleaner" message out of QGIS-specific exception types
+                # when available.
+                msg = str(exc)
+                result = {"ok": False, "error": f"{name}: {msg}"}
+                log_event(
+                    "toolkit.run_processing.end",
+                    alg_id=alg_id,
+                    elapsed_ms=int((time.perf_counter() - start) * 1000),
+                    ok=False,
+                    cancelled=False,
+                    error_type=name,
+                )
+                return result
 
         # processing likely mutated the canvas; mark dirty for the dock.
         self._canvas_dirty = True
@@ -1390,8 +1386,7 @@ class QgisToolkit:
             task_setup_timeout=task_setup_timeout,
         )
 
-        event, owner = self._cancel.register()
-        try:
+        with self._cancel.scope() as (event, owner):
             result = run_processing_algorithm_task(
                 executor,
                 alg_id,
@@ -1399,9 +1394,6 @@ class QgisToolkit:
                 cancel=event,
                 main_thread_timeout=task_setup_timeout,
             )
-        finally:
-            if owner:
-                self._cancel.release(event)
 
         if isinstance(result, dict) and result.get("ok"):
             self._canvas_dirty = True
@@ -2392,8 +2384,7 @@ class QgisToolkit:
         from qgis.core import QgsFeatureRequest
         req = QgsFeatureRequest().setFlags(_no_geometry_flag())
         req.setSubsetOfAttributes(attr_names, layer.fields())
-        event, owner = self._cancel.register()
-        try:
+        with self._cancel.scope() as (event, owner):
             values = {}
             display_labels = {}
             feature_iter = layer.getFeatures(req)
@@ -2416,9 +2407,6 @@ class QgisToolkit:
                 # Yield to the event loop every 100 features to prevent UI freeze
                 if i % EVENT_PUMP_INTERVAL == 0:
                     QCoreApplication.processEvents()
-        finally:
-            if owner:
-                self._cancel.release(event)
 
         # Sort by count
         sorted_items = sorted(values.items(), key=lambda x: x[1], reverse=True)[:20]  # top 20

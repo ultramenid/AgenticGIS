@@ -16,22 +16,23 @@ from qgis.PyQt.QtWidgets import (
 
 from .message_bubble import _md_to_html, _show_code_context_menu
 
-# Design tokens
-_CANVAS      = "#141414"
-_SURFACE     = "#1c1c1c"
-_SURFACE_2   = "#232323"
-_BORDER      = "#2b2b2b"
-_BORDER_SOFT = "#222222"
-_TEXT        = "#e8e8e8"
-_TEXT_2      = "#9a9a9a"
-_TEXT_3      = "#6f6f6f"
-_TEXT_4      = "#4a4a4a"
-_ACCENT      = "#e8e8e8"
-_ACCENT_DIM  = "#9a9a9a"
-_ACCENT_HOV  = "#ffffff"
-_WARN        = "#d99a3c"
-_SUCCESS     = "#5aa86f"
-_DANGER      = "#d05a5a"
+from .theme import (
+    DOCK_CANVAS as _CANVAS,
+    DOCK_SURFACE as _SURFACE,
+    DOCK_SURFACE_2 as _SURFACE_2,
+    DOCK_BORDER as _BORDER,
+    DOCK_BORDER_SOFT as _BORDER_SOFT,
+    DOCK_TEXT as _TEXT,
+    DOCK_TEXT_2 as _TEXT_2,
+    DOCK_TEXT_3 as _TEXT_3,
+    DOCK_TEXT_4 as _TEXT_4,
+    DOCK_ACCENT as _ACCENT,
+    DOCK_ACCENT_DIM as _ACCENT_DIM,
+    DOCK_ACCENT_HOV as _ACCENT_HOV,
+    DOCK_WARN as _WARN,
+    DOCK_SUCCESS as _SUCCESS,
+    DOCK_DANGER as _DANGER,
+)
 
 _SPINNER_FRAMES = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
 
@@ -419,6 +420,30 @@ class AgentTurnBubble(QFrame):
 
     # ── Core public API ───────────────────────────────────────────────────
 
+    def _refresh_text_geometry(self) -> None:
+        """Force Qt to remeasure rich text after streamed/final HTML changes."""
+        if self._outer is not None and self.width() > 0:
+            margins = self._outer.contentsMargins()
+            label_w = self.width() - margins.left() - margins.right()
+            if label_w > 0:
+                self.text_lbl.setFixedWidth(label_w)
+
+        label_h = self.text_lbl.heightForWidth(self.text_lbl.width())
+        if label_h > 0:
+            self.text_lbl.setMinimumHeight(label_h)
+
+        self.text_lbl.updateGeometry()
+        if self._outer is not None:
+            self._outer.invalidate()
+        self.updateGeometry()
+
+        parent = self.parentWidget()
+        if parent is not None:
+            layout = parent.layout()
+            if layout is not None:
+                layout.invalidate()
+            parent.updateGeometry()
+
     def _show_text_context_menu(self, pos) -> None:
         _show_code_context_menu(self, self.text_lbl, pos, self._stream_text)
 
@@ -447,6 +472,7 @@ class AgentTurnBubble(QFrame):
         self._stream_html = _md_to_html(text) if text else ""
         cursor = f'<span style="color:{_TEXT_3};font-weight:300;">|</span>'
         self.text_lbl.setText(self._stream_html + cursor)
+        self._refresh_text_geometry()
 
     def set_progress_text(self, text: str) -> None:
         clean = (text or "").strip()
@@ -468,6 +494,7 @@ class AgentTurnBubble(QFrame):
         self._stream_text = text
         self._stream_html = _md_to_html(text) if text else ""
         self.text_lbl.setText(self._stream_html)
+        self._refresh_text_geometry()
         self.setStyleSheet(f"""
             AgentTurnBubble {{
                 background: {_SURFACE};
@@ -482,6 +509,7 @@ class AgentTurnBubble(QFrame):
         self._stop_progress()
         self._ticker.hide_ticker()
         self.text_lbl.setText(self._stream_html)
+        self._refresh_text_geometry()
         for group in self._groups.values():
             group.force_finalize()
 
@@ -501,6 +529,7 @@ class AgentTurnBubble(QFrame):
         self._stream_text = ""
         self._stream_html = ""
         self.text_lbl.setText("")
+        self.text_lbl.setMinimumHeight(0)
         self.updateGeometry()
 
     def has_content(self) -> bool:
@@ -530,6 +559,7 @@ class AgentTurnBubble(QFrame):
         body = body.replace(">", f">{prefix}", 1)
         self._stream_html = body
         self.text_lbl.setText(body)
+        self._refresh_text_geometry()
 
     def set_user_decision(self, text: str) -> None:
         clean = (text or "").strip()

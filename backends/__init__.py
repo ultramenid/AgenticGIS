@@ -6,8 +6,8 @@ from .base import AgentBackend, AgentEvent, EventType
 def build_backend(config, toolkit, executor, server_provider=None):
     """Construct the backend selected in ``config``.
 
-    ``server_provider`` is a zero-arg callable returning a running MCP server's
-    base URL; only the CLI-tool backend needs it.
+    ``server_provider`` is retained for older callers; CLI-tool mode now uses
+    the in-process toolkit/executor path instead of the MCP bridge.
     """
     from .. import config as config_mod
     from . import providers
@@ -16,7 +16,7 @@ def build_backend(config, toolkit, executor, server_provider=None):
     if mode in (config_mod.MODE_CLI_TOOL, config_mod.MODE_SUBSCRIPTION):
         from .cli_backend import CliToolBackend
 
-        return CliToolBackend(config, server_provider)
+        return CliToolBackend(config, toolkit, executor, server_provider)
 
     # API-key and custom endpoint modes are format-aware:
     # pick the Anthropic or OpenAI-compatible in-process loop.

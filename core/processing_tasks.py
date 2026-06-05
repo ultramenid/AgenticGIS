@@ -18,19 +18,8 @@ from qgis.core import (
     QgsTask,
 )
 
+from .cancellation import cancel_requested as _cancel_requested
 from .dev_logging import log_event
-
-
-def _cancel_requested(cancel):
-    if cancel is None:
-        return False
-    if callable(cancel):
-        return bool(cancel())
-    if hasattr(cancel, "isCanceled"):
-        return bool(cancel.isCanceled())
-    if hasattr(cancel, "is_set"):
-        return bool(cancel.is_set())
-    return False
 
 
 def _stringify_results(results):

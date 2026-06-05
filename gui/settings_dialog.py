@@ -6,9 +6,12 @@ Three connection modes:
   3. CLI Agent     — delegate to an installed local agent CLI.
 """
 
+import os
+
 from qgis.PyQt.QtCore import Qt, QThread, pyqtSignal
-from qgis.PyQt.QtGui import QColor, QFont
+from qgis.PyQt.QtGui import QColor, QFont, QPalette
 from qgis.PyQt.QtWidgets import (
+    QApplication,
     QComboBox,
     QDialog,
     QFileDialog,
@@ -25,6 +28,7 @@ from qgis.PyQt.QtWidgets import (
     QSizePolicy,
     QStackedWidget,
     QTabBar,
+    QToolTip,
     QVBoxLayout,
     QWidget,
 )
@@ -32,22 +36,22 @@ from qgis.PyQt.QtWidgets import (
 from .. import config as config_mod
 from ..backends.cli_backend import CLI_AGENT_CATALOG
 from ..backends import providers
-
-# ── Design tokens (matches ask_user_card.py) ──────────────────────────────────
-_SURFACE     = "#1f1f1d"
-_SURFACE_2   = "#262521"
-_SURFACE_HOV = "#2d2b25"
-_INPUT_BG    = "#191918"
-_BORDER      = "#4a4234"
-_BORDER_SOFT = "#343129"
-_TEXT        = "#eeeeea"
-_TEXT_2      = "#bbb7ad"
-_TEXT_3      = "#7d786d"
-_ACCENT      = "#e7dfcf"
-_ACCENT_HOV  = "#f2eadb"
-_WARN        = "#d99a3c"
-_SUCCESS     = "#5aad6b"
-_DANGER      = "#e05c5c"
+from .theme import (
+    DIALOG_SURFACE as _SURFACE,
+    DIALOG_SURFACE_2 as _SURFACE_2,
+    DIALOG_SURFACE_HOV as _SURFACE_HOV,
+    DIALOG_INPUT_BG as _INPUT_BG,
+    DIALOG_BORDER as _BORDER,
+    DIALOG_BORDER_SOFT as _BORDER_SOFT,
+    DIALOG_TEXT as _TEXT,
+    DIALOG_TEXT_2 as _TEXT_2,
+    DIALOG_TEXT_3 as _TEXT_3,
+    DIALOG_ACCENT as _ACCENT,
+    DIALOG_ACCENT_HOV as _ACCENT_HOV,
+    DIALOG_WARN as _WARN,
+    DIALOG_SUCCESS as _SUCCESS,
+    DIALOG_DANGER as _DANGER,
+)
 
 # ── Mode / agent constants ────────────────────────────────────────────────────
 _MODE_LABELS = [
@@ -81,6 +85,14 @@ _DIALOG_SS = (
     f"}}"
     f"QScrollBar::add-line:vertical,"
     f"QScrollBar::sub-line:vertical {{ height: 0; }}"
+)
+
+_TOOLTIP_SS = (
+    f"QToolTip {{"
+    f"  background-color: {_SURFACE_2}; color: {_TEXT};"
+    f"  border: 1px solid {_BORDER}; border-radius: 4px;"
+    f"  padding: 6px 8px;"
+    f"}}"
 )
 
 _INPUT_SS = (
@@ -182,6 +194,19 @@ def _cmb(widget):
     widget.setFont(_mono(10))
     widget.setStyleSheet(_COMBO_SS)
     return widget
+
+
+def _install_tooltip_palette():
+    palette = QToolTip.palette()
+    for group in (QPalette.Active, QPalette.Inactive, QPalette.Disabled):
+        palette.setColor(group, QPalette.ToolTipBase, QColor(_SURFACE_2))
+        palette.setColor(group, QPalette.ToolTipText, QColor(_TEXT))
+    QToolTip.setPalette(palette)
+    QToolTip.setFont(_mono(9))
+    app = QApplication.instance()
+    if app is not None and "QToolTip" not in app.styleSheet():
+        existing = app.styleSheet().rstrip()
+        app.setStyleSheet((existing + "\n" if existing else "") + _TOOLTIP_SS)
 
 
 class _ModelPickerWidget(QWidget):
@@ -308,7 +333,7 @@ class _ModelPickerWidget(QWidget):
             self._open_popup()
 
     def _open_popup(self):
-        popup = QFrame(None, Qt.Popup | Qt.FramelessWindowHint)
+        popup = QFrame(self.window(), Qt.Popup | Qt.FramelessWindowHint)
         popup.setObjectName("ModelPopup")
         popup.setStyleSheet(self._POPUP_SS)
         popup.setFixedWidth(max(self._btn.width(), 300))
@@ -340,7 +365,7 @@ class _ModelPickerWidget(QWidget):
 
         search.textChanged.connect(self._rebuild_list)
         search.returnPressed.connect(self._commit_search)
-        lst.itemClicked.connect(self._pick_item)
+        lst.itemPressed.connect(self._pick_item)
         lst.itemActivated.connect(self._pick_item)
 
     def _close_popup(self):
@@ -612,6 +637,7 @@ class SettingsDialog(QDialog):
         self.setMinimumWidth(560)
         self.setMinimumHeight(660)
         self.resize(580, 760)
+        _install_tooltip_palette()
         self.setStyleSheet(_DIALOG_SS)
         self._build_ui()
         self._load()
@@ -1183,8 +1209,12 @@ class SettingsDialog(QDialog):
         found = 0
         for row in self._cli_scan_rows:
             found += 1 if row.get("installed") else 0
-            status = "found" if row.get("installed") else ("missing" if scanned else "not scanned")
-            item = QListWidgetItem(f"{row['label']}  ·  {status}")
+            if row.get("installed") and (scanned or row.get("_selected_probe")):
+                status = "found"
+            else:
+                status = "missing" if scanned else "not scanned"
+            active = "  ·  active" if row.get("id") == selected else ""
+            item = QListWidgetItem(f"{row['label']}  ·  {status}{active}")
             item.setData(Qt.UserRole, row["id"])
             item.setForeground(QColor(_TEXT if row.get("installed") or not scanned else _TEXT_3))
             self.cli_agent_list.addItem(item)
@@ -1198,10 +1228,26 @@ class SettingsDialog(QDialog):
         self._update_cli_agent_detail()
 
     def _seed_cli_agents(self):
+        from ..backends.cli_backend import _resolve_binary
+
         selected = self.config.get("cli_tool") or "claude"
         self._cli_scan_performed = False
+        selected_path = _resolve_binary(
+            selected,
+            self.config.get("cli_path") or "",
+        )
         self._cli_scan_rows = [
-            dict(agent, path="", real_path="", installed=False, _catalog_index=index)
+            dict(
+                agent,
+                path=selected_path if agent["id"] == selected and selected_path else "",
+                real_path=(
+                    os.path.realpath(selected_path)
+                    if agent["id"] == selected and selected_path else ""
+                ),
+                installed=bool(agent["id"] == selected and selected_path),
+                _catalog_index=index,
+                _selected_probe=agent["id"] == selected,
+            )
             for index, agent in enumerate(CLI_AGENT_CATALOG)
         ]
         self._fill_cli_agent_list(selected, scanned=False)
@@ -1229,7 +1275,8 @@ class SettingsDialog(QDialog):
         self.cli_agent_warning.setVisible(bool(warning))
 
         scanned = getattr(self, "_cli_scan_performed", False)
-        detected = row.get("path", "") if scanned else ""
+        selected_probe = bool(row.get("_selected_probe"))
+        detected = row.get("path", "") if (scanned or selected_probe) else ""
         real_path = row.get("real_path", "")
         self._syncing_cli_path = True
         try:
@@ -1243,7 +1290,7 @@ class SettingsDialog(QDialog):
         self.cli_resolved_path.setText(real_path if show_resolved else "")
         self.cli_resolved_path.setVisible(show_resolved)
 
-        installed = bool(row.get("installed")) if scanned else False
+        installed = bool(row.get("installed")) if (scanned or selected_probe) else False
         has_path = bool(self.cli_path_edit.text().strip())
         self.cli_test_btn.setEnabled(installed or has_path)
         self.cli_auth_btn.setEnabled(installed or has_path)
@@ -1257,7 +1304,7 @@ class SettingsDialog(QDialog):
         binary = _resolve_binary(agent_id, path)
         if not binary:
             return None
-        backend = CliToolBackend(self.config, lambda: None)
+        backend = CliToolBackend(self.config, None, None)
         backend.tool = agent_id
         backend.binary = binary
         return backend

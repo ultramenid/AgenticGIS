@@ -5,6 +5,10 @@ A backend's ``send`` runs on a worker thread and reports progress by calling
 Stop button can interrupt a long agent loop.
 """
 
+import json
+import os
+import threading
+
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from itertools import count
@@ -40,6 +44,14 @@ class AgentBackend(ABC):
     #: Human-readable label shown in the dock status area.
     label = "agent"
 
+    def __init__(self, config, toolkit, executor):
+        self.config = config
+        self.toolkit = toolkit
+        self.executor = executor
+        self._cached_tool_list = None
+        self._active_client = None
+        self._active_client_lock = threading.Lock()
+
     @abstractmethod
     def send(
         self,
@@ -55,9 +67,20 @@ class AgentBackend(ABC):
         Streaming output is delivered through ``emit``.
         """
 
+    def _provider(self):
+        from . import providers
+        pid = self.config.get("provider")
+        return None if pid == "custom" else providers.get_provider(pid)
+
     def validate(self) -> Optional[str]:
-        """Return an error string if the backend is not usable yet
-        (missing key, missing binary, ...), else ``None``."""
+        p = self._provider()
+        key = (self.config.get("api_key") or os.environ.get(p["key_env"], "")) if p else self.config.get("custom_api_key")
+        label = p["label"] if p else "Custom endpoint"
+        if not key:
+            return (
+                f"No API key set for {label}. "
+                f"Add one in Settings (or set {p['key_env'] if p else 'the provider key env'})."
+            )
         return None
 
     def export_session_state(self) -> Dict[str, Any]:
@@ -67,6 +90,75 @@ class AgentBackend(ABC):
     def import_session_state(self, state: Dict[str, Any]) -> None:
         """Restore backend-owned continuation state for the active chat session."""
         return None
+
+    def cancel_current_request(self) -> None:
+        with self._active_client_lock:
+            client = self._active_client
+        if client is None:
+            return
+        try:
+            client.cancel_current_request()
+        except Exception:
+            pass
+
+    # Hook for shared compaction — must be overridden.
+    def _system_arg(self):
+        """Return the ``system`` value the LLM client expects.
+
+        Anthropic backends return a list of blocks; OpenAI backends return a
+        plain string.  Called by the shared ``_compact_history`` helper.
+        """
+        raise NotImplementedError
+
+    def _compact_history(self, messages, emit, should_stop=None):
+        """Summarize old messages and return a trimmed list.
+
+        Keeps the KEEP_TAIL most recent messages verbatim. Everything older is
+        replaced by a summary user/assistant pair so the model retains context
+        without consuming the full window.
+        """
+        if len(messages) <= _COMPACTION_KEEP_TAIL:
+            return messages
+        head = messages[:-_COMPACTION_KEEP_TAIL]
+        tail = messages[-_COMPACTION_KEEP_TAIL:]
+        sum_messages = list(head) + [
+            {
+                "role": "user",
+                "content": (
+                    "Summarize the conversation above in bullet points. "
+                    "Keep: layer IDs, key findings, tool results, decisions made. "
+                    "Be concise — max 300 words."
+                ),
+            }
+        ]
+        try:
+            client = self._active_client or self._client()
+            model = self.config.get("model")
+            content, _ = client.stream_message(
+                model=model,
+                max_tokens=1024,
+                system=self._system_arg(),
+                tools=self._tool_list(),
+                messages=sum_messages,
+                on_text=lambda _t: None,
+                should_stop=should_stop or (lambda: False),
+            )
+            summary = "".join(
+                b.get("text", "") for b in content if b.get("type") == "text"
+            ).strip()
+        except Exception:
+            return messages
+        if not summary:
+            return messages
+        compacted = [
+            {"role": "user", "content": f"[Earlier conversation summary]\n\n{summary}"},
+            {
+                "role": "assistant",
+                "content": "Understood. Continuing with full context.",
+            },
+        ] + list(tail)
+        emit(AgentEvent(EventType.COMPACTION, {}))
+        return compacted
 
 
 # ── Context compaction helpers ─────────────────────────────────────────────
@@ -142,3 +234,44 @@ def agent_iteration_steps(max_iterations: Any):
         return range(int(max_iterations))
     except (TypeError, ValueError):
         return range(0)
+
+
+MAX_TOKENS = 4096
+
+_VISUALIZATION_TOOLS = {"create_chart": "chart", "get_layer_statistics": "stats"}
+
+
+def _dispatch_one_tool(toolkit, executor, name, tool_input, emit, should_stop):
+    from ..core import tools as tools_mod
+
+    emit(AgentEvent(EventType.TOOL_USE, {"name": name, "input": tool_input}))
+    result = None
+    is_error = False
+    is_cancelled = False
+    try:
+        result = tools_mod.dispatch(toolkit, executor, name, tool_input, should_stop=should_stop)
+        if isinstance(result, dict):
+            is_error = result.get("ok") is False
+            is_cancelled = bool(result.get("cancelled"))
+        else:
+            is_error = True
+        payload = json.dumps(result, default=str)
+        if len(payload) > 200_000:
+            payload = payload[:200_000] + "\n... [output truncated]"
+    except Exception as exc:
+        payload = f"Tool error: {type(exc).__name__}: {exc}"
+        is_error = True
+    emit(AgentEvent(EventType.TOOL_RESULT, {
+        "name": name,
+        "result": payload,
+        "is_error": is_error,
+        "cancelled": is_cancelled,
+    }))
+    if should_stop() or is_cancelled:
+        return payload, is_error, is_cancelled, result
+    if name in _VISUALIZATION_TOOLS and isinstance(result, dict) and result.get("ok"):
+        emit(AgentEvent(EventType.VISUALIZATION, {
+            "type": _VISUALIZATION_TOOLS[name],
+            "data": result,
+        }))
+    return payload, is_error, is_cancelled, result

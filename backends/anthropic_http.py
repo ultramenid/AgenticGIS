@@ -134,6 +134,10 @@ class AnthropicHttpClient:
                     pass
                 self._conn = None
 
+    def cancel_current_request(self):
+        """Best-effort cancellation of the active HTTP stream."""
+        self._close_conn()
+
     def stream_message(self, model, max_tokens, system, tools, messages,
                        on_text, should_stop, timeout=600):
         payload = json.dumps({

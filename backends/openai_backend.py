@@ -10,10 +10,12 @@ import os
 
 from ..core import tools as tools_mod
 from .base import (
+    MAX_TOKENS,
     _COMPACTION_KEEP_TAIL,
     AgentBackend,
     AgentEvent,
     EventType,
+    _dispatch_one_tool,
     agent_iteration_steps,
     should_compact,
     unlimited_iterations,
@@ -225,27 +227,10 @@ Avoid it for data analysis:
 If a run_pyqgis result includes a "slow_ms" key, the last call was slow.
 Switch to a structured tool for the same operation on the next step."""
 
-MAX_TOKENS = 4096
-
-
 class OpenAIBackend(AgentBackend):
     label = "API (OpenAI-compatible)"
 
-    def __init__(self, config, toolkit, executor):
-        self.config = config
-        self.toolkit = toolkit
-        self.executor = executor
-        self._cached_tool_list = None
-
     # ------------------------------------------------------------------ #
-    def _provider(self):
-        from . import providers
-
-        pid = self.config.get("provider")
-        if pid == "custom":
-            return None
-        return providers.get_provider(pid)
-
     def _client(self):
         p = self._provider()
         if p:
@@ -254,25 +239,16 @@ class OpenAIBackend(AgentBackend):
         else:
             api_key = self.config.get("custom_api_key") or ""
             base_url = self.config.get("custom_base_url")
-        return OpenAIHttpClient(api_key=api_key or None, base_url=base_url)
-
-    def validate(self):
-        p = self._provider()
-        if p:
-            key = self.config.get("api_key") or os.environ.get(p["key_env"], "")
-            label = p["label"]
-        else:
-            key = self.config.get("custom_api_key")
-            label = "Custom endpoint"
-        if not key:
-            return (
-                f"No API key set for {label}. "
-                f"Add one in Settings (or set {p['key_env'] if p else 'the provider key env'})."
-            )
-        return None
+        client = OpenAIHttpClient(api_key=api_key or None, base_url=base_url)
+        with self._active_client_lock:
+            self._active_client = client
+        return client
 
     def _system_text(self):
         return self.config.get("system_prompt") or DEFAULT_SYSTEM_PROMPT
+
+    def _system_arg(self):
+        return self._system_text()
 
     def _tool_list(self):
         if self._cached_tool_list is None:
@@ -280,51 +256,6 @@ class OpenAIBackend(AgentBackend):
                 tools_mod.TOOL_SPECS
             )
         return self._cached_tool_list
-
-    def _compact_history(self, messages, emit):
-        """Summarize old messages and return a trimmed list."""
-        if len(messages) <= _COMPACTION_KEEP_TAIL:
-            return messages
-        head = messages[:-_COMPACTION_KEEP_TAIL]
-        tail = messages[-_COMPACTION_KEEP_TAIL:]
-        sum_messages = list(head) + [
-            {
-                "role": "user",
-                "content": (
-                    "Summarize the conversation above in bullet points. "
-                    "Keep: layer IDs, key findings, tool results, decisions made. "
-                    "Be concise — max 300 words."
-                ),
-            }
-        ]
-        try:
-            client = self._client()
-            model = self.config.get("model")
-            content, _ = client.stream_message(
-                model=model,
-                max_tokens=1024,
-                system=self._system_text(),
-                tools=self._tool_list(),
-                messages=sum_messages,
-                on_text=lambda _t: None,
-                should_stop=lambda: False,
-            )
-            summary = "".join(
-                b.get("text", "") for b in content if b.get("type") == "text"
-            ).strip()
-        except Exception:
-            return messages
-        if not summary:
-            return messages
-        compacted = [
-            {"role": "user", "content": f"[Earlier conversation summary]\n\n{summary}"},
-            {
-                "role": "assistant",
-                "content": "Understood. Continuing with full context.",
-            },
-        ] + list(tail)
-        emit(AgentEvent(EventType.COMPACTION, {}))
-        return compacted
 
     # ------------------------------------------------------------------ #
     def send(self, message, history, emit, should_stop):
@@ -347,7 +278,7 @@ class OpenAIBackend(AgentBackend):
                 break
 
             if should_compact(messages, model or ""):
-                messages = self._compact_history(messages, emit)
+                messages = self._compact_history(messages, emit, should_stop)
 
             try:
                 content, finish_reason = client.stream_message(
@@ -398,58 +329,15 @@ class OpenAIBackend(AgentBackend):
 
             # Dispatch tools and build tool result messages
             for tc in tool_calls:
+                if should_stop():
+                    return messages
                 name = tc["function"]["name"]
                 args = json.loads(tc["function"]["arguments"])
-                emit(AgentEvent(EventType.TOOL_USE, {"name": name, "input": args}))
-                result = None
-                is_error = False
-                is_cancelled = False
-                try:
-                    result = tools_mod.dispatch(self.toolkit, self.executor, name, args)
-                    if isinstance(result, dict):
-                        is_error = result.get("ok") is False
-                        is_cancelled = bool(result.get("cancelled"))
-                    else:
-                        # Non-dict result is a contract violation; treat as
-                        # an error so the model and UI see the failure
-                        # rather than silently accepting a string.
-                        is_error = True
-                        is_cancelled = False
-                    payload = json.dumps(result, default=str)
-                except Exception as exc:  # noqa: BLE001
-                    payload = f"Tool error: {type(exc).__name__}: {exc}"
-                    is_error = True
-                emit(
-                    AgentEvent(
-                        EventType.TOOL_RESULT,
-                        {
-                            "name": name,
-                            "result": payload,
-                            "is_error": is_error,
-                            "cancelled": is_cancelled,
-                        },
-                    )
+                payload, is_error, is_cancelled, _result = _dispatch_one_tool(
+                    self.toolkit, self.executor, name, args, emit, should_stop
                 )
-                if (
-                    name == "create_chart"
-                    and isinstance(result, dict)
-                    and result.get("ok")
-                ):
-                    emit(
-                        AgentEvent(
-                            EventType.VISUALIZATION, {"type": "chart", "data": result}
-                        )
-                    )
-                elif (
-                    name == "get_layer_statistics"
-                    and isinstance(result, dict)
-                    and result.get("ok")
-                ):
-                    emit(
-                        AgentEvent(
-                            EventType.VISUALIZATION, {"type": "stats", "data": result}
-                        )
-                    )
+                if should_stop() or is_cancelled:
+                    return messages
                 messages.append(
                     OpenAIHttpClient.build_tool_result_message(tc["id"], payload)
                 )

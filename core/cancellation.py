@@ -6,6 +6,7 @@ import the registry from here.
 """
 
 import threading
+from contextlib import contextmanager
 
 
 class CancellationRegistry:
@@ -40,6 +41,15 @@ class CancellationRegistry:
             if self._event is event:
                 self._event = None
 
+    @contextmanager
+    def scope(self):
+        event, owner = self.register()
+        try:
+            yield event, owner
+        finally:
+            if owner:
+                self.release(event)
+
     def cancel(self):
         with self._lock:
             if self._event is not None:
@@ -52,3 +62,15 @@ class CancellationRegistry:
     def event(self):
         with self._lock:
             return self._event
+
+
+def cancel_requested(cancel):
+    if cancel is None:
+        return False
+    if callable(cancel):
+        return bool(cancel())
+    if hasattr(cancel, "isCanceled"):
+        return bool(cancel.isCanceled())
+    if hasattr(cancel, "is_set"):
+        return bool(cancel.is_set())
+    return False
