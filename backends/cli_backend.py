@@ -1309,6 +1309,11 @@ class CliToolBackend(AgentBackend):
             return ""
         if "hookSpecificOutput" in event:
             return ""
+        # Codex exec --json format: agent_message inside item.completed
+        if event.get("type") == "item.completed" and isinstance(event.get("item"), dict):
+            item = event["item"]
+            if item.get("type") == "agent_message":
+                return str(item.get("text") or "").strip()
         etype = str(event.get("type") or event.get("event") or "").lower()
         if event.get("type") == "assistant":
             parts = []
