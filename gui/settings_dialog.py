@@ -746,6 +746,17 @@ class SettingsDialog(QDialog):
         if mode == config_mod.MODE_SUBSCRIPTION:
             mode = config_mod.MODE_CLI_TOOL
         self._pending_connection_mode = mode
+        # Refresh the CLI agent list so the "· active" marker (and the
+        # active-first reorder) reflects the new mode. In API key or
+        # Custom mode no CLI is in use, so the marker is removed.
+        if hasattr(self, "_cli_scan_rows") and hasattr(self, "cli_agent_list"):
+            if self.cli_agent_list.count():
+                selected = self._selected_cli_agent_id()
+            else:
+                selected = self.config.get("cli_tool") or "claude"
+            self._fill_cli_agent_list(
+                selected, scanned=self._cli_scan_performed
+            )
         self._update_connection_tab_labels()
 
     def _active_connection_index(self):
@@ -1222,12 +1233,16 @@ class SettingsDialog(QDialog):
         self.cli_agent_list.blockSignals(True)
         self.cli_agent_list.clear()
         found = 0
-        # Put the active agent on top so users can see which CLI is in use
-        # without having to scan the list for the "· active" marker.
+        # The "· active" marker and the active-first reorder only apply
+        # when CLI Agent is the active connection mode. In API key or
+        # Custom mode no CLI is in use, so no agent should be flagged
+        # active or hoisted to the top.
+        is_cli_mode = self._current_mode() == config_mod.MODE_CLI_TOOL
+        active_id = selected if is_cli_mode else None
         active_row = None
         rest = []
         for row in self._cli_scan_rows:
-            if active_row is None and row.get("id") == selected:
+            if active_row is None and row.get("id") == active_id:
                 active_row = row
             else:
                 rest.append(row)
@@ -1238,7 +1253,7 @@ class SettingsDialog(QDialog):
                 status = "found"
             else:
                 status = "missing" if scanned else "not scanned"
-            active = "  ·  active" if row.get("id") == selected else ""
+            active = "  ·  active" if row.get("id") == active_id else ""
             item = QListWidgetItem(f"{row['label']}  ·  {status}{active}")
             item.setData(Qt.ItemDataRole.UserRole, row["id"])
             item.setForeground(QColor(_TEXT if row.get("installed") or not scanned else _TEXT_3))
