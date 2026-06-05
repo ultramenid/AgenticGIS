@@ -186,3 +186,49 @@ class ClaudeAdapter(CliAdapter):
                     )
             return None
         return None
+
+
+class CodexAdapter(CliAdapter):
+    """Codex CLI — ``exec --json`` event stream."""
+
+    id = "codex"
+    label = "Codex CLI"
+    commands = ("codex",)
+    credential_style = "OpenAI API key or ChatGPT account in Codex"
+
+    auth_status_args = ("login", "status")
+    login_args = ("login",)
+
+    def build_command(self, *, binary, prompt, extra_args, runtime_dir):
+        return [
+            binary, "exec", *extra_args,
+            "--ignore-user-config", "--ignore-rules", "--ephemeral",
+            "--skip-git-repo-check",
+            "--disable", "apps", "--disable", "plugins",
+            "--cd", _empty_runtime_dir("codex-empty-workspace"),
+            "--json", prompt,
+        ]
+
+    def parse_event(self, raw):
+        etype = raw.get("type")
+        if etype == "item.completed":
+            item = raw.get("item") or {}
+            it = item.get("type")
+            if it == "agent_message":
+                return NormalizedEvent(
+                    text=item.get("text", ""), is_final=True,
+                )
+            if it in ("command_execution", "mcp_tool_call"):
+                return NormalizedEvent(tool_calls=[{
+                    "name": item.get("cmd") or item.get("tool") or it,
+                    "arguments": item.get("arguments") or {"cmd": item.get("cmd", "")},
+                    "output": item.get("output") or item.get("stdout") or item.get("result") or "",
+                    "is_error": bool(item.get("exit_code", 0)),
+                }])
+            return None
+        if etype in ("turn.failed", "error"):
+            msg = raw.get("message") or raw.get("error") or raw.get("detail") or ""
+            if isinstance(msg, dict):
+                msg = msg.get("message") or json.dumps(msg, default=str)
+            return NormalizedEvent(is_error=True, text=str(msg))
+        return None
