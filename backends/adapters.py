@@ -232,3 +232,59 @@ class CodexAdapter(CliAdapter):
                 msg = msg.get("message") or json.dumps(msg, default=str)
             return NormalizedEvent(is_error=True, text=str(msg))
         return None
+
+
+class OpenCodeAdapter(CliAdapter):
+    """opencode — ``run`` with ``--format json`` and a runtime config."""
+
+    id = "opencode"
+    label = "OpenCode"
+    commands = ("opencode",)
+    credential_style = "Provider keys in OpenCode config"
+
+    auth_status_args = ("status",)
+    login_args = ("login",)
+
+    def build_command(self, *, binary, prompt, extra_args, runtime_dir):
+        return [
+            binary, "run", prompt, *extra_args,
+            "--pure",
+            "--format", "json",
+        ]
+
+    def env(self) -> dict:
+        config = _opencode_config_json()
+        config_path = _runtime_json_file("opencode-config", config)
+        return {
+            "OPENCODE_CONFIG_CONTENT": config,
+            "OPENCODE_CONFIG": config_path,
+            "OPENCODE_CONFIG_DIR": os.path.dirname(config_path),
+            "OPENCODE_DISABLE_PROJECT_CONFIG": "1",
+            "OPENCODE_PURE": "1",
+            "OPENCODE_ENABLE_EXA": "0",
+        }
+
+    def parse_event(self, raw):
+        # opencode events carry a "part" object that holds the actual payload.
+        part = raw.get("part") or {}
+        if not isinstance(part, dict):
+            return None
+        ptype = part.get("type")
+        if ptype == "text":
+            return NormalizedEvent(text=str(part.get("text") or "").strip())
+        if ptype == "tool":
+            tool_name = part.get("tool", "")
+            state = part.get("state") or {}
+            sid = raw.get("session_id") or raw.get("sessionID") or ""
+            if tool_name == "invalid":
+                tool_name = (state.get("input") or {}).get("name", "")
+            if not tool_name:
+                return None
+            return NormalizedEvent(
+                tool_calls=[{
+                    "name": tool_name,
+                    "arguments": state.get("input") or {},
+                }],
+                session_id=sid,
+            )
+        return None
