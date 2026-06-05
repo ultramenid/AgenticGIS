@@ -991,6 +991,7 @@ class SettingsDialog(QDialog):
         path_row.setSpacing(6)
         self._cli_path_is_override = False
         self._syncing_cli_path = False
+        self._syncing_cli_selection = False
         self.cli_path_edit = _inp(QLineEdit())
         self.cli_path_edit.setPlaceholderText("Auto-detect on PATH (leave empty)")
         self.cli_path_edit.editingFinished.connect(self._scan_cli_agents)
@@ -1165,7 +1166,7 @@ class SettingsDialog(QDialog):
         if path:
             agent_id = _agent_id_for_binary_path(path)
             if agent_id:
-                self._select_cli_agent(agent_id)
+                self._select_cli_agent(agent_id, preserve_path_override=True)
             self._cli_path_is_override = True
             self.cli_path_edit.setText(path)
             self._scan_cli_agents()
@@ -1194,14 +1195,20 @@ class SettingsDialog(QDialog):
                 return row
         return None
 
-    def _select_cli_agent(self, agent_id):
-        for i in range(self.cli_agent_list.count()):
-            item = self.cli_agent_list.item(i)
-            if item.data(Qt.ItemDataRole.UserRole) == agent_id:
-                self.cli_agent_list.setCurrentRow(i)
-                return
-        if self.cli_agent_list.count():
-            self.cli_agent_list.setCurrentRow(0)
+    def _select_cli_agent(self, agent_id, preserve_path_override=False):
+        if preserve_path_override:
+            self._syncing_cli_selection = True
+        try:
+            for i in range(self.cli_agent_list.count()):
+                item = self.cli_agent_list.item(i)
+                if item.data(Qt.ItemDataRole.UserRole) == agent_id:
+                    self.cli_agent_list.setCurrentRow(i)
+                    return
+            if self.cli_agent_list.count():
+                self.cli_agent_list.setCurrentRow(0)
+        finally:
+            if preserve_path_override:
+                self._syncing_cli_selection = False
 
     def _scan_cli_agents(self):
         from ..backends.cli_backend import scan_cli_agents
@@ -1227,7 +1234,7 @@ class SettingsDialog(QDialog):
             item.setForeground(QColor(_TEXT if row.get("installed") or not scanned else _TEXT_3))
             self.cli_agent_list.addItem(item)
         self.cli_agent_list.blockSignals(False)
-        self._select_cli_agent(selected)
+        self._select_cli_agent(selected, preserve_path_override=True)
         if scanned:
             self.cli_scan_status.setText(f"{found} of {len(self._cli_scan_rows)} agents found")
         else:
@@ -1264,7 +1271,8 @@ class SettingsDialog(QDialog):
         self.cli_test_status.setText("")
         self.cli_auth_status.setText("Auth not checked")
         self.cli_auth_status.setStyleSheet(f"color: {_TEXT_3}; background: transparent;")
-        self._cli_path_is_override = False
+        if not getattr(self, "_syncing_cli_selection", False):
+            self._cli_path_is_override = False
         self._update_cli_agent_detail()
         self._update_connection_tab_labels()
 
