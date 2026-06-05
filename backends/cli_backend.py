@@ -1461,9 +1461,12 @@ def _emit_line(line, emit, session_id_holder=None):
         emit(AgentEvent(EventType.TEXT, {"text": line + "\n"}))
         return
     etype = event.get("type")
-    sid = event.get("session_id")
+    # Claude Code uses snake_case session_id; opencode uses camelCase sessionID.
+    sid = event.get("session_id") or event.get("sessionID")
     if sid and session_id_holder is not None:
         session_id_holder[0] = sid
+
+    # ── Claude Code stream-json format ──────────────────────────────────────
     if etype == "assistant":
         for block in event.get("message", {}).get("content", []):
             if block.get("type") == "text":
@@ -1482,10 +1485,38 @@ def _emit_line(line, emit, session_id_holder=None):
                     "is_error": bool(block.get("is_error", False)),
                 }))
     elif etype in ("system", "result"):
-        # Session metadata; nothing to surface to the chat.
         return
+
+    # ── opencode stream format ───────────────────────────────────────────────
+    # Events carry a "part" object that holds the actual payload.
+    elif etype == "text":
+        part = event.get("part") or {}
+        if part.get("type") == "text":
+            text = part.get("text", "")
+            if text:
+                emit(AgentEvent(EventType.TEXT, {"text": text}))
+    elif etype == "tool_use":
+        part = event.get("part") or {}
+        tool_name = part.get("tool", "")
+        state = part.get("state") or {}
+        # Skip internal "invalid" sentinel tool (model called a missing tool).
+        if tool_name and tool_name != "invalid":
+            emit(AgentEvent(EventType.TOOL_USE, {
+                "name": tool_name,
+                "input": state.get("input") or {},
+            }))
+            if state.get("status") == "completed":
+                output = state.get("output", "")
+                emit(AgentEvent(EventType.TOOL_RESULT, {
+                    "name": tool_name,
+                    "result": str(output)[:4000],
+                    "is_error": bool(state.get("error")),
+                }))
+    elif etype in ("step_start", "step_finish"):
+        return  # opencode step markers — no user-visible content
+
     else:
-        # Unknown structured record — surface as raw text so the user
+        # Truly unknown structured record — surface as raw text so the user
         # sees something rather than nothing.
         if event:
             emit(AgentEvent(EventType.TEXT, {"text": line + "\n"}))
