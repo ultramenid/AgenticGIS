@@ -1263,11 +1263,10 @@ class CliToolBackend(AgentBackend):
         )
         _prepend_path(env, node_and_wrapper_dirs)
         env.update(_COMMON_RUNTIME_ENV)
-        profile_env = _agent_profile(self.tool).get("env")
-        if callable(profile_env):
-            env.update(profile_env())
-        elif isinstance(profile_env, dict):
-            env.update(profile_env)
+        from .adapters import get_adapter
+        adapter_env = get_adapter(self.tool).env()
+        if adapter_env:
+            env.update(adapter_env)
         return env
 
     def _runtime_cwd(self):
