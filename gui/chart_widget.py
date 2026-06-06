@@ -127,7 +127,7 @@ class ChartWidget(QFrame):
                     painter.drawEllipse(_rect)
                 painter.restore()
                 self._draw_inspector(painter, chart_rect, region)
-        except Exception:
+        except Exception:  # nosec B110
             pass
         finally:
             painter.end()

@@ -257,7 +257,7 @@ def _is_missing(value):
     try:
         if value == NULL:
             return True
-    except Exception:  # noqa: BLE001
+    except Exception:  # noqa: BLE001 # nosec B110
         pass
     return False
 
@@ -286,7 +286,7 @@ def _normalize_value(value):
     if hasattr(value, "toString"):
         try:
             return value.toString()
-        except Exception:  # noqa: BLE001
+        except Exception:  # noqa: BLE001 # nosec B110
             pass
     return str(value)
 

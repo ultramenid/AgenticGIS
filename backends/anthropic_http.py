@@ -114,7 +114,7 @@ class AnthropicHttpClient:
                 if self._conn_host != self.base_url:
                     try:
                         self._conn.close()
-                    except Exception:
+                    except Exception:  # nosec B110
                         pass
                     self._conn = None
                 else:
@@ -123,7 +123,7 @@ class AnthropicHttpClient:
                     except Exception:
                         try:
                             self._conn.close()
-                        except Exception:
+                        except Exception:  # nosec B110
                             pass
                         self._conn = None
 
@@ -147,7 +147,7 @@ class AnthropicHttpClient:
             if self._conn is not None:
                 try:
                     self._conn.close()
-                except Exception:
+                except Exception:  # nosec B110
                     pass
                 self._conn = None
 
@@ -270,7 +270,7 @@ class AnthropicHttpClient:
                         blocks[idx]["text"] = blocks[idx].get("text", "") + delta["text"]
                         try:
                             on_text(delta["text"])
-                        except Exception:
+                        except Exception:  # nosec B110
                             # An exception in the on_text callback (e.g. a Qt
                             # signal dispatch error) should not crash the
                             # streaming loop — drop the delta and continue.

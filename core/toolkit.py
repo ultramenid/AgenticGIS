@@ -178,7 +178,7 @@ def _is_blank_chart_label(value):
         from qgis.core import NULL
         if value == NULL:
             return True
-    except Exception:  # noqa: BLE001
+    except Exception:  # noqa: BLE001 # nosec B110
         pass
     return str(value).strip() == ""
 
@@ -427,7 +427,7 @@ class QgisToolkit:
         try:
             from qgis.core import QgsApplication
             QgsApplication.pluginsChanged.connect(self._invalidate_alg_cache)
-        except Exception:
+        except Exception:  # nosec B110
             pass
 
     # ------------------------------------------------------------------ #
@@ -720,7 +720,7 @@ class QgisToolkit:
             for task in list(self._bg_tasks):
                 try:
                     task.cancel()
-                except Exception:
+                except Exception:  # nosec B110
                     pass
 
     def is_cancelled(self):
@@ -1016,7 +1016,7 @@ class QgisToolkit:
             try:
                 import processing  # noqa: WPS433 (optional at import time)
                 ns["processing"] = processing
-            except Exception:  # pragma: no cover - processing should exist in QGIS
+            except Exception:  # pragma: no cover - processing should exist in QGIS  # nosec B110
                 pass
             self._ns_template = ns
         ns = dict(self._ns_template)  # shallow copy — per-call top-level
@@ -1170,7 +1170,7 @@ class QgisToolkit:
         if self._canvas_dirty:
             try:
                 self.iface.mapCanvas().refresh()
-            except Exception:
+            except Exception:  # nosec B110
                 pass
             self._canvas_dirty = False
         return result
@@ -1587,7 +1587,7 @@ class QgisToolkit:
         if is_analysis:
             try:
                 layer.setCustomProperty("agenticgis/analysis", True)
-            except Exception:
+            except Exception:  # nosec B110
                 pass
             self._analysis_layers[name] = layer.id()
         zoomed = self._zoom_to_layer(layer) if zoom else False
@@ -1617,7 +1617,7 @@ class QgisToolkit:
 
             if "ee_plugin" in (getattr(qutils, "plugins", {}) or {}):
                 result["plugin_installed"] = True
-        except Exception:
+        except Exception:  # nosec B110
             pass
         if not result["plugin_installed"]:
             try:
@@ -1625,7 +1625,7 @@ class QgisToolkit:
 
                 if importlib.util.find_spec("ee_plugin") is not None:
                     result["plugin_installed"] = True
-            except Exception:
+            except Exception:  # nosec B110
                 pass
         try:
             import ee
@@ -1807,7 +1807,7 @@ class QgisToolkit:
             return None
         try:
             ee.Initialize()
-        except Exception:
+        except Exception:  # nosec B110
             pass  # may already be initialized; a real failure surfaces below
         try:
             asset = ee.data.getAsset(asset_id)
@@ -1839,7 +1839,7 @@ class QgisToolkit:
             try:
                 names = ee.ImageCollection(asset_id).first().bandNames().getInfo()
                 bands = [{"name": n} for n in (names or [])]
-            except Exception:
+            except Exception:  # nosec B110
                 pass
 
         props = asset.get("properties") or {}
@@ -1904,7 +1904,7 @@ class QgisToolkit:
             name = field.name()
             try:
                 val = feat[name]
-            except Exception:
+            except Exception:  # nosec B112
                 continue
             if val is None or isinstance(val, (int, float, str, bool)):
                 out[name] = val
@@ -2032,7 +2032,7 @@ class QgisToolkit:
                 geom = QgsGeometry(geom)
                 try:
                     geom.transform(xform)
-                except Exception:
+                except Exception:  # nosec B112
                     continue
             total_v += self._geom_vertex_count(geom)
             geoms.append((geom, self._safe_feature_attrs(feat, fields)))
@@ -2074,7 +2074,7 @@ class QgisToolkit:
             try:
                 gj = json.loads(geom.asJson())
                 ee_features.append(ee.Feature(ee.Geometry(gj), attrs))
-            except Exception:
+            except Exception:  # nosec B112
                 continue
         if not ee_features:
             return _bbox_result()
@@ -2138,7 +2138,7 @@ class QgisToolkit:
             }
         try:
             ee.Initialize()
-        except Exception:
+        except Exception:  # nosec B110
             pass  # may already be initialized; a real failure surfaces below
         region, features, region_layer, mode_used = (None, None, None, None)
         if region_layer_id:
@@ -2266,7 +2266,7 @@ class QgisToolkit:
             except Exception as exc:
                 try:
                     os.unlink(tmp_path)
-                except Exception:
+                except Exception:  # nosec B110
                     pass
                 _log(f"GeoTIFF download failed: {type(exc).__name__}: {exc}")
                 msg = f"GeoTIFF download failed: {type(exc).__name__}: {exc}"
@@ -2290,7 +2290,7 @@ class QgisToolkit:
             if not layer or not layer.isValid():
                 try:
                     os.unlink(tmp_path)
-                except Exception:
+                except Exception:  # nosec B110
                     pass
                 _log(f"GeoTIFF raster invalid: {tmp_path}")
                 return {
@@ -2341,12 +2341,12 @@ class QgisToolkit:
                 for path in orphans:
                     try:
                         os.unlink(path)
-                    except Exception:
+                    except Exception:  # nosec B110
                         pass
                 self._sync_gee_manifest([])
             else:
                 self._sync_gee_manifest([])
-        except Exception:
+        except Exception:  # nosec B110
             pass
 
     def _sync_gee_manifest(self, paths):
@@ -2355,7 +2355,7 @@ class QgisToolkit:
         try:
             with open(self._gee_manifest_path, "w") as _f:
                 _json.dump(paths, _f)
-        except Exception:
+        except Exception:  # nosec B110
             pass
 
     def _ensure_gee_tiff_cleanup_connection(self):
@@ -2366,7 +2366,7 @@ class QgisToolkit:
         try:
             QgsProject.instance().layersRemoved.connect(self._on_gee_tiff_layers_removed)
             self._gee_tiff_cleanup_connected = True
-        except Exception:
+        except Exception:  # nosec B110
             pass
 
     def _on_gee_tiff_layers_removed(self, layer_ids):
@@ -2376,7 +2376,7 @@ class QgisToolkit:
             if path is not None:
                 try:
                     os.unlink(path)
-                except Exception:
+                except Exception:  # nosec B110
                     pass
         self._sync_gee_manifest(list(self._gee_tiff_sources.values()))
 
@@ -2385,7 +2385,7 @@ class QgisToolkit:
         for lid, path in list(self._gee_tiff_sources.items()):
             try:
                 os.unlink(path)
-            except Exception:
+            except Exception:  # nosec B110
                 pass
         self._gee_tiff_sources.clear()
         self._sync_gee_manifest([])

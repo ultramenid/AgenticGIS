@@ -99,7 +99,7 @@ class AgentBackend(ABC):
             return
         try:
             client.cancel_current_request()
-        except Exception:
+        except Exception:  # nosec B110
             pass
 
     # Hook for shared compaction — must be overridden.

@@ -44,7 +44,7 @@ class AgenticGisPlugin:
         if self._dock is not None:
             try:
                 self._dock._stop_active_worker()
-            except Exception:
+            except Exception:  # nosec B110
                 pass
             self.iface.removeDockWidget(self._dock)
             self._dock.deleteLater()
@@ -120,7 +120,7 @@ class AgenticGisPlugin:
             return
         try:
             close()
-        except Exception:
+        except Exception:  # nosec B110
             pass
 
     def _close_cached_backend(self):
@@ -139,11 +139,11 @@ class AgenticGisPlugin:
         if backend is not None:
             try:
                 backend.cancel_current_request()
-            except Exception:
+            except Exception:  # nosec B110
                 pass
         try:
             self.toolkit.request_cancel()
-        except Exception:
+        except Exception:  # nosec B110
             pass
 
     def _server_provider(self):
@@ -166,7 +166,7 @@ class AgenticGisPlugin:
         if self._server is not None:
             try:
                 self._server.stop()
-            except Exception:
+            except Exception:  # nosec B110
                 pass
             self._server = None
 

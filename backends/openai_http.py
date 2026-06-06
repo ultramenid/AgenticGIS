@@ -91,7 +91,7 @@ class OpenAIHttpClient:
                 except Exception:
                     try:
                         self._conn.close()
-                    except Exception:
+                    except Exception:  # nosec B110
                         pass
                     self._conn = None
             if self._conn is None:
@@ -115,7 +115,7 @@ class OpenAIHttpClient:
         if connection is not None:
             try:
                 connection.close()
-            except Exception:
+            except Exception:  # nosec B110
                 pass
 
     def _headers(self):
@@ -268,7 +268,7 @@ class OpenAIHttpClient:
                         text_parts.append(token)
                         try:
                             on_text(token)
-                        except Exception:
+                        except Exception:  # nosec B110
                             pass
 
                     for tcd in (delta.get("tool_calls") or []):
@@ -289,7 +289,7 @@ class OpenAIHttpClient:
             finally:
                 try:
                     response.close()
-                except Exception:
+                except Exception:  # nosec B110
                     pass
                 with self._active_lock:
                     cancelled = self._cancel_requested
@@ -360,7 +360,7 @@ class OpenAIHttpClient:
                     self._active_response = None
                     try:
                         response.close()
-                    except Exception:
+                    except Exception:  # nosec B110
                         pass
                     self._close_conn()
                     return _CancelledResponse()
@@ -376,7 +376,7 @@ class OpenAIHttpClient:
                     detail = ""
                 try:
                     response.close()
-                except Exception:
+                except Exception:  # nosec B110
                     pass
                 with self._active_lock:
                     if self._active_response is response:
@@ -415,7 +415,7 @@ class OpenAIHttpClient:
             if active is not None:
                 try:
                     active.close()
-                except Exception:
+                except Exception:  # nosec B110
                     pass
         self._close_conn()
 

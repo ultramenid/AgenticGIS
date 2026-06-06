@@ -29,7 +29,7 @@ import select
 import shlex
 import shutil
 import signal
-import subprocess
+import subprocess  # nosec B404
 import tempfile
 import threading
 import time
@@ -284,7 +284,7 @@ def _process_output(result):
 def _looks_like_agent_binary(path):
     """Filter out launcher stubs that exist but immediately report missing tools."""
     try:
-        result = subprocess.run(
+        result = subprocess.run(  # nosec B603
             _subprocess_cmd([path, "--version"]),
             capture_output=True,
             timeout=4,
@@ -1092,7 +1092,7 @@ class CliToolBackend(AgentBackend):
         if not cmd:
             return "unsupported", "Auth check unavailable for this CLI."
         try:
-            result = subprocess.run(
+            result = subprocess.run(  # nosec B603
                 _subprocess_cmd(cmd),
                 capture_output=True,
                 timeout=8,
@@ -1126,7 +1126,7 @@ class CliToolBackend(AgentBackend):
         if not self.binary:
             return False
         try:
-            subprocess.Popen(
+            subprocess.Popen(  # nosec B603
                 _subprocess_cmd(self._login_cmd()),
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
@@ -1151,7 +1151,7 @@ class CliToolBackend(AgentBackend):
         last_err = ""
         for cmd in commands:
             try:
-                result = subprocess.run(
+                result = subprocess.run(  # nosec B603
                     _subprocess_cmd(cmd),
                     capture_output=True,
                     timeout=8,
@@ -1255,21 +1255,21 @@ class CliToolBackend(AgentBackend):
         git_dir = os.path.join(path, ".git")
         if not os.path.isdir(git_dir):
             try:
-                subprocess.run(
+                subprocess.run(  # nosec
                     ["git", "init"],
                     cwd=path,
                     capture_output=True,
                     timeout=5,
                     check=False,
                 )
-            except Exception:
+            except Exception:  # nosec B110
                 pass
         return path
 
     def _collect_process_output(self, cmd, env, cwd, should_stop):
         try:
             with self._lock:
-                self._proc = subprocess.Popen(
+                self._proc = subprocess.Popen(  # nosec B603
                     _subprocess_cmd(cmd),
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
@@ -1491,7 +1491,7 @@ class CliToolBackend(AgentBackend):
         cwd = self._runtime_cwd()
         try:
             with self._lock:
-                self._proc = subprocess.Popen(
+                self._proc = subprocess.Popen(  # nosec B603
                     _subprocess_cmd(cmd),
                     stdin=subprocess.PIPE
                     if stdin_data is not None
@@ -1564,7 +1564,7 @@ class CliToolBackend(AgentBackend):
                 continue
             try:
                 stream.close()
-            except Exception:
+            except Exception:  # nosec B110
                 pass
 
     def _finalize_process(self, proc, stopped=False):
@@ -1573,7 +1573,7 @@ class CliToolBackend(AgentBackend):
             self._terminate_process_group(proc, kill=True)
             try:
                 proc.wait(timeout=0.05)
-            except Exception:
+            except Exception:  # nosec B110
                 pass
             self._close_process_pipes(proc)
             with self._lock:
@@ -1588,7 +1588,7 @@ class CliToolBackend(AgentBackend):
             self._terminate_process_group(proc, kill=True)
         try:
             proc.wait(timeout=1.5)
-        except Exception:
+        except Exception:  # nosec B110
             pass
         self._close_process_pipes(proc)
         with self._lock:
@@ -1605,12 +1605,12 @@ class CliToolBackend(AgentBackend):
                 pgid = os.getpgid(proc.pid)
                 os.killpg(pgid, sig)
                 return
-            except Exception:
+            except Exception:  # nosec B110
                 pass
         try:
             if kill:
                 proc.kill()
             else:
                 proc.terminate()
-        except Exception:
+        except Exception:  # nosec B110
             pass

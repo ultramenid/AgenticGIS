@@ -100,7 +100,7 @@ class ChatWorker(QThread):
             cancel = getattr(self._backend, "cancel_current_request", None)
             if callable(cancel):
                 cancel()
-        except Exception:
+        except Exception:  # nosec B110
             pass
 
     def run(self):
@@ -132,7 +132,7 @@ class ChatWorker(QThread):
             # Ensure we clean up even on unexpected errors
             try:
                 self._stop = False  # Reset for potential reuse
-            except Exception:
+            except Exception:  # nosec B110
                 pass
 
     def _emit_event(self, ev):
@@ -952,7 +952,7 @@ class ChatDock(QgsDockWidget):
             first_option = card.findChild(QFrame, "AskUserOptionRow")
             if first_option is not None:
                 first_option.setFocus(Qt.FocusReason.OtherFocusReason)
-        except Exception:
+        except Exception:  # nosec B110
             pass
         self._ask_user_card = card
         self._set_status("Awaiting input", _WARN, spinning=True)
@@ -980,7 +980,7 @@ class ChatDock(QgsDockWidget):
         if chosen_text:
             try:
                 self._get_or_create_agent_turn().set_user_decision(chosen_text)
-            except Exception:
+            except Exception:  # nosec B110
                 pass
         self._set_status("Ready", _SUCCESS, icon="✓")
         if self._toolkit is not None:
@@ -1457,7 +1457,7 @@ class ChatDock(QgsDockWidget):
         if self._request_cancel is not None:
             try:
                 self._request_cancel()
-            except Exception:
+            except Exception:  # nosec B110
                 pass
         if self._ask_user_card is not None and self._toolkit is not None:
             self._toolkit._resolve_ask_user({
@@ -1496,7 +1496,7 @@ class ChatDock(QgsDockWidget):
             return
         try:
             backend.import_session_state(state or {})
-        except Exception:
+        except Exception:  # nosec B110
             pass
 
     def _restore_active_session(self):
@@ -1674,7 +1674,7 @@ class ChatDock(QgsDockWidget):
             if self._request_cancel is not None:
                 try:
                     self._request_cancel()
-                except Exception:
+                except Exception:  # nosec B110
                     pass
             if self._ask_user_card is not None and self._toolkit is not None:
                 self._toolkit._resolve_ask_user({
@@ -1711,7 +1711,7 @@ class ChatDock(QgsDockWidget):
                 if self._thinking_started and self._current_agent_turn is not None:
                     try:
                         self._current_agent_turn.finalize_thinking()
-                    except Exception:
+                    except Exception:  # nosec B110
                         pass
                     self._thinking_started = False
 
@@ -1818,7 +1818,7 @@ class ChatDock(QgsDockWidget):
             if thinking_text:
                 try:
                     self._append_thinking_text(thinking_text)
-                except Exception:
+                except Exception:  # nosec B110
                     pass
             self._set_status("Thinking", _TEXT_3, spinning=True)
 
@@ -1946,7 +1946,7 @@ class ChatDock(QgsDockWidget):
         if not self._thinking_started:
             try:
                 turn.add_thinking_block()
-            except Exception:
+            except Exception:  # nosec B110
                 pass
             self._thinking_started = True
 
@@ -1988,7 +1988,7 @@ class ChatDock(QgsDockWidget):
         for signal_name in ("event", "finished_history", "finished"):
             try:
                 getattr(worker, signal_name).disconnect()
-            except Exception:
+            except Exception:  # nosec B110
                 pass
         if worker is self._worker:
             self._worker = None

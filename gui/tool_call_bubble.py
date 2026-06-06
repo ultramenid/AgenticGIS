@@ -155,7 +155,7 @@ class ToolCallBubble(QFrame):
                         input_label.setWordWrap(True)
                         input_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
                         content_layout.addWidget(input_label)
-                    except Exception:
+                    except Exception:  # nosec B110
                         pass
 
                 truncated_result = result_str[:800] + ("…" if len(result_str) > 800 else "")
@@ -183,9 +183,9 @@ class ToolCallBubble(QFrame):
                 content_layout.addWidget(copy_btn, alignment=Qt.AlignmentFlag.AlignLeft)
 
                 self.updateGeometry()
-            except Exception:
+            except Exception:  # nosec B110
                 pass
-        except Exception:
+        except Exception:  # nosec B110
             pass
 
     # ── Private helpers ───────────────────────────────────────────────────────

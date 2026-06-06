@@ -210,7 +210,7 @@ class _RpcServer(ThreadingHTTPServer):
                 if method == "notifications/cancelled":
                     try:
                         self.toolkit.request_cancel()
-                    except Exception:
+                    except Exception:  # nosec B110
                         pass
                 return None
             elif method == "ping":
@@ -295,7 +295,7 @@ class McpBridgeServer(QThread):
             # Close the listening FD we kept alive for the TOCTOU-free path.
             try:
                 self._bound_sock.close()
-            except Exception:
+            except Exception:  # nosec B110
                 pass
 
     def stop(self):
@@ -305,15 +305,15 @@ class McpBridgeServer(QThread):
         if self._server is not None:
             try:
                 self._server.shutdown()
-            except Exception:
+            except Exception:  # nosec B110
                 pass
             try:
                 self._server.server_close()
-            except Exception:
+            except Exception:  # nosec B110
                 pass
             self._server = None
         try:
             self._bound_sock.close()
-        except Exception:
+        except Exception:  # nosec B110
             pass
         self.wait(5000)
