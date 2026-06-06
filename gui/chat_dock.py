@@ -18,7 +18,6 @@ from qgis.PyQt.QtWidgets import (
     QDialog,
     QFrame,
     QHBoxLayout,
-    QApplication,
     QLabel,
     QLineEdit,
     QMenu,
@@ -52,11 +51,9 @@ from .theme import (
     DOCK_ACCENT as _ACCENT,
     DOCK_ACCENT_DIM as _ACCENT_DIM,
     DOCK_ACCENT_HOV as _ACCENT_HOV,
-    DOCK_PURPLE as _PURPLE,
     DOCK_WARN as _WARN,
     DOCK_SUCCESS as _SUCCESS,
     DOCK_DANGER as _DANGER,
-    DOCK_CODE_GREEN as _CODE_GREEN,
 )
 _STREAM_COALESCE_INTERVAL_S = 0.030
 _STREAM_COALESCE_MAX_CHARS = 8192
@@ -785,7 +782,8 @@ class ChatDock(QgsDockWidget):
                 elif etype == "stats":
                     self._add_widget(StatsWidget(event.get("data") or {}))
                 elif etype == "error":
-                    self._add_widget(MessageContainer(html.escape(str(event.get("text", ""))), is_user=False, is_error=True))
+                    self._add_widget(MessageContainer(html.escape(
+                        str(event.get("text", ""))), is_user=False, is_error=True))
                 elif etype == "compaction":
                     self._add_compaction_notice()
         finally:
@@ -897,11 +895,11 @@ class ChatDock(QgsDockWidget):
             # Transparent positioning frame. AskUserCard owns the actual
             # surface so we do not render a card inside another card.
             self._ask_card_frame.setObjectName("AskUserOverlayCard")
-            self._ask_card_frame.setStyleSheet(f"""
-                QWidget#AskUserOverlayCard {{
+            self._ask_card_frame.setStyleSheet("""
+                QWidget#AskUserOverlayCard {
                     background-color: transparent;
                     border: none;
-                }}
+                }
             """)
             from qgis.PyQt.QtWidgets import QVBoxLayout as _QV
             card_layout = _QV(self._ask_card_frame)
@@ -1032,7 +1030,8 @@ class ChatDock(QgsDockWidget):
             button.setStyleSheet(self._session_dialog_button_style("wide"))
             card_layout.addWidget(button)
 
-        previous.clicked.connect(lambda: (dialog.accept(), self._switch_to_session(self._session_store.active_session()["id"])))
+        previous.clicked.connect(lambda: (dialog.accept(), self._switch_to_session(
+            self._session_store.active_session()["id"])))
         sessions.clicked.connect(lambda: (dialog.accept(), self._show_session_list()))
         new_session.clicked.connect(lambda: (dialog.accept(), self._new_session_from_menu()))
         dialog.exec()

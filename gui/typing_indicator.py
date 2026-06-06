@@ -9,14 +9,14 @@ from qgis.PyQt.QtWidgets import QHBoxLayout, QLabel, QSizePolicy, QWidget
 
 # Design tokens (must match chat_dock.py)
 _INPUT_BG = "#1c1c1c"
-_BORDER   = "#2b2b2b"
-_TEXT     = "#e8e8e8"
-_TEXT_2   = "#9a9a9a"
-_TEXT_3   = "#6f6f6f"
-_ACCENT   = "#e8e8e8"
+_BORDER = "#2b2b2b"
+_TEXT = "#e8e8e8"
+_TEXT_2 = "#9a9a9a"
+_TEXT_3 = "#6f6f6f"
+_ACCENT = "#e8e8e8"
 
 # Blink states: visible cursor vs blank
-_CURSOR_ON  = "▋"
+_CURSOR_ON = "▋"
 _CURSOR_OFF = " "
 
 

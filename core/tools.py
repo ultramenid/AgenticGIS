@@ -306,19 +306,19 @@ TOOL_SPECS = [
             "\"img = ee.ImageCollection('COPERNICUS/S2_SR_HARMONIZED')"
             ".filterBounds(region).filterDate('2023-01-01','2023-03-01').median(); "
             "result = img.normalizedDifference(['B8','B4']).clip(region)\". "
-             "Pass vis_params for display, e.g. {'min':-0.2,'max':0.8,"
-             "'palette':['blue','white','green']}. "
-             "NOTE: vis_params 'scale' is silently ignored by the "
-             "ee_plugin — use clipToBoundsAndScale or reduceResolution "
-             "in the ee expression code itself to control resolution. "
-             "IMPORTANT: when geometry_mode is 'auto' (default) and the layer is "
-             "too large to send inline, this returns {ok:false, "
-             "needs_decision:true} instead of running. In that case call ask_user "
-             "with the offered options, then call gee_add_layer again with "
-             "geometry_mode set to 'bbox', 'simplify', or 'exact'. "
-             "For faster zoom/pan, set export_format='geotiff' — downloads the "
-             "image as a local GeoTIFF and loads it as a local raster layer "
-             "(instant zoom at the cost of upfront download time)."
+            "Pass vis_params for display, e.g. {'min':-0.2,'max':0.8,"
+            "'palette':['blue','white','green']}. "
+            "NOTE: vis_params 'scale' is silently ignored by the "
+            "ee_plugin — use clipToBoundsAndScale or reduceResolution "
+            "in the ee expression code itself to control resolution. "
+            "IMPORTANT: when geometry_mode is 'auto' (default) and the layer is "
+            "too large to send inline, this returns {ok:false, "
+            "needs_decision:true} instead of running. In that case call ask_user "
+            "with the offered options, then call gee_add_layer again with "
+            "geometry_mode set to 'bbox', 'simplify', or 'exact'. "
+            "For faster zoom/pan, set export_format='geotiff' — downloads the "
+            "image as a local GeoTIFF and loads it as a local raster layer "
+            "(instant zoom at the cost of upfront download time)."
         ),
         "input_schema": {
             "type": "object",
@@ -558,7 +558,10 @@ TOOL_SPECS = [
                 },
                 "verify_ssl": {
                     "type": "boolean",
-                    "description": "Verify remote SSL certificate (default true). Set false for incomplete/self-signed certificates.",
+                    "description": (
+                        "Verify remote SSL certificate (default true). "
+                        "Set false for incomplete/self-signed certificates."
+                    ),
                     "default": True,
                 },
             },

@@ -109,7 +109,7 @@ class _Handler(BaseHTTPRequestHandler):
     def _empty(self, status=202):
         try:
             self._send_headers(status, "application/octet-stream",
-                                content_length=0)
+                               content_length=0)
         except (OSError, socket.timeout):
             pass
 

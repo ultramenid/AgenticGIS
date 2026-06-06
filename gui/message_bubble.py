@@ -23,7 +23,6 @@ from qgis.PyQt.QtWidgets import (
 )
 
 from .theme import (
-    DOCK_CANVAS as _CANVAS,
     DOCK_SURFACE as _SURFACE,
     DOCK_SURFACE_2 as _SURFACE_2,
     DOCK_BORDER as _BORDER,
@@ -31,30 +30,22 @@ from .theme import (
     DOCK_TEXT as _TEXT,
     DOCK_TEXT_2 as _TEXT_2,
     DOCK_TEXT_3 as _TEXT_3,
-    DOCK_TEXT_4 as _TEXT_4,
-    DOCK_ACCENT as _ACCENT,
-    DOCK_ACCENT_DIM as _ACCENT_DIM,
-    DOCK_ACCENT_HOV as _ACCENT_HOV,
-    DOCK_PURPLE as _PURPLE,
-    DOCK_WARN as _WARN,
-    DOCK_SUCCESS as _SUCCESS,
     DOCK_DANGER as _DANGER,
-    DOCK_CODE_GREEN as _CODE_GREEN,
 )
 
 # ── One Dark palette (carbon.sh default theme) ─────────────────────────
 
 # ── One Dark palette (carbon.sh default theme) ─────────────────────────
-_SYN_BG     = "#282c34"
+_SYN_BG = "#282c34"
 _SYN_CHROME = "#21252b"
 _SYN_BORDER = "#3e4451"
-_SYN_TEXT   = "#abb2bf"
-_SYN_CMT    = "#5c6370"   # comments — italic gray
-_SYN_STR    = "#98c379"   # strings  — green
-_SYN_KW     = "#c678dd"   # keywords — purple
-_SYN_NUM    = "#d19a66"   # numbers  — orange
-_SYN_FN     = "#61afef"   # functions/builtins — blue
-_SYN_CONST  = "#56b6c2"   # true/false/None — cyan
+_SYN_TEXT = "#abb2bf"
+_SYN_CMT = "#5c6370"   # comments — italic gray
+_SYN_STR = "#98c379"   # strings  — green
+_SYN_KW = "#c678dd"   # keywords — purple
+_SYN_NUM = "#d19a66"   # numbers  — orange
+_SYN_FN = "#61afef"   # functions/builtins — blue
+_SYN_CONST = "#56b6c2"   # true/false/None — cyan
 
 # Keyword sets for syntax highlighting
 _PY_KW = frozenset({
@@ -207,7 +198,7 @@ def _highlight_code(body: str, lang: str) -> str:
     )
 
     # 2. Comments — language-aware
-    _HASH_LANGS  = {'python', 'py', 'bash', 'sh', 'shell', 'r', 'yaml', 'toml', 'ruby'}
+    _HASH_LANGS = {'python', 'py', 'bash', 'sh', 'shell', 'r', 'yaml', 'toml', 'ruby'}
     _SLASH_LANGS = {'javascript', 'js', 'typescript', 'ts', 'java', 'c', 'cpp',
                     'go', 'rust', 'kotlin', 'swift', 'css', 'scss', 'sql'}
     if lang in _HASH_LANGS:
@@ -542,24 +533,24 @@ class MessageBubble(QFrame):
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
 
         if self.is_error:
-            bg_color      = _SURFACE
-            text_color    = _DANGER
-            border_color  = _DANGER
+            bg_color = _SURFACE
+            text_color = _DANGER
+            border_color = _DANGER
             border_radius = "4px"
         elif self.is_tool:
-            bg_color      = _SURFACE
-            text_color    = _TEXT_2
-            border_color  = _BORDER_SOFT
+            bg_color = _SURFACE
+            text_color = _TEXT_2
+            border_color = _BORDER_SOFT
             border_radius = "4px"
         elif self.is_user:
-            bg_color      = _SURFACE_2
-            text_color    = _TEXT
-            border_color  = _BORDER
+            bg_color = _SURFACE_2
+            text_color = _TEXT
+            border_color = _BORDER
             border_radius = "10px"
         else:
-            bg_color      = _SURFACE
-            text_color    = _TEXT
-            border_color  = _BORDER
+            bg_color = _SURFACE
+            text_color = _TEXT
+            border_color = _BORDER
             border_radius = "4px"
 
         self.setStyleSheet(f"""

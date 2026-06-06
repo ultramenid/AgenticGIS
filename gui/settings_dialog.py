@@ -64,6 +64,7 @@ _FORMAT_LABELS = [
     ("Anthropic-compatible", "anthropic"),
 ]
 
+
 # ── Font helper ───────────────────────────────────────────────────────────────
 def _mono(size=10, weight=QFont.Weight.Normal):
     f = QFont("JetBrains Mono", size)
@@ -183,6 +184,7 @@ _BTN_GHOST_SS = (
     f"QPushButton:disabled {{ color: {_TEXT_3}; border-color: {_BORDER_SOFT}; }}"
 )
 
+
 # ── Widget factories ──────────────────────────────────────────────────────────
 def _inp(widget):
     widget.setFont(_mono(10))
@@ -278,7 +280,6 @@ class _ModelPickerWidget(QWidget):
         is_active = bool(text and text == self._active)
         display = (text + "  ●") if is_active else (text or self._placeholder)
         color = _TEXT if text else _TEXT_3
-        badge_color = _WARN if is_active else "transparent"
         self._btn.setText(display)
         self._btn.setStyleSheet(
             f"QPushButton {{"

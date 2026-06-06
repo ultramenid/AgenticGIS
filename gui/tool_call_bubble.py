@@ -1,7 +1,6 @@
 import json
-import html
 
-from qgis.PyQt.QtCore import Qt, QTimer, QSize
+from qgis.PyQt.QtCore import Qt, QTimer
 from qgis.PyQt.QtGui import QFont, QGuiApplication
 from qgis.PyQt.QtWidgets import (
     QFrame, QHBoxLayout, QVBoxLayout, QLabel,
@@ -9,15 +8,15 @@ from qgis.PyQt.QtWidgets import (
 )
 
 # Design tokens - Monochrome minimal
-_SURFACE     = "#1a1a1a"
-_INPUT_BG    = "#222222"
-_BORDER      = "#3a3a3a"
+_SURFACE = "#1a1a1a"
+_INPUT_BG = "#222222"
+_BORDER = "#3a3a3a"
 _BORDER_SOFT = "#2a2a2a"
-_TEXT        = "#f0f0f0"
-_TEXT_2      = "#b0b0b0"
-_TEXT_3      = "#8a8a8a"
-_DANGER      = "#ff6b6b"
-_SUCCESS     = "#86efac"
+_TEXT = "#f0f0f0"
+_TEXT_2 = "#b0b0b0"
+_TEXT_3 = "#8a8a8a"
+_DANGER = "#ff6b6b"
+_SUCCESS = "#86efac"
 
 _SPINNER_FRAMES = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
 
@@ -121,11 +120,11 @@ class ToolCallBubble(QFrame):
                 self.status_label.setText("!")
                 self.status_label.setStyleSheet(f"color: {_DANGER}; font-size: 10px;")
                 self.setStyleSheet(
-                    f"QFrame#ToolCallBubble {{"
-                    f"  background: #1a0a0a;"
-                    f"  border: 1px solid #7f1d1d;"
-                    f"  border-radius: 10px;"
-                    f"}}"
+                    "QFrame#ToolCallBubble {"
+                    "  background: #1a0a0a;"
+                    "  border: 1px solid #7f1d1d;"
+                    "  border-radius: 10px;"
+                    "}"
                 )
             else:
                 self.state_label.setText("Done")

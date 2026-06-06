@@ -128,7 +128,7 @@ class MainThreadExecutor(QObject):
                     elapsed_ms=int((time.perf_counter() - start) * 1000),
                 )
                 raise TimeoutError(
-                    f"AgenticGIS: main-thread operation was cancelled."
+                    "AgenticGIS: main-thread operation was cancelled."
                 )
             log_event(
                 "main_thread.result",

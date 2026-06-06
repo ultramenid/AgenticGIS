@@ -10,7 +10,6 @@ import os
 
 from ..core import tools as tools_mod
 from .base import (
-    _COMPACTION_KEEP_TAIL,
     MAX_TOKENS,
     AgentBackend,
     AgentEvent,

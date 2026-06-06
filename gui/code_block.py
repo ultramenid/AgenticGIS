@@ -3,10 +3,8 @@
 Pure dark surface, generous padding, SF Mono typography, subtle header.
 """
 
-import html
-
 from qgis.PyQt.QtCore import Qt
-from qgis.PyQt.QtGui import QColor, QFont, QFontMetrics, QSyntaxHighlighter, QTextCharFormat, QTextDocument
+from qgis.PyQt.QtGui import QColor, QFont, QFontMetrics, QSyntaxHighlighter, QTextCharFormat
 from qgis.PyQt.QtWidgets import (
     QFrame,
     QHBoxLayout,
@@ -20,11 +18,11 @@ from qgis.PyQt.QtWidgets import (
 )
 
 # Carbon.sh-inspired palette
-_BG        = "#111111"
+_BG = "#111111"
 _HEADER_BG = "#141414"
-_BORDER    = "#1a1a1a"
-_TEXT      = "#cccccc"
-_TEXT_DIM  = "#555555"
+_BORDER = "#1a1a1a"
+_TEXT = "#cccccc"
+_TEXT_DIM = "#555555"
 
 _MENU_STYLE = """
     QMenu {
@@ -50,11 +48,11 @@ _MENU_STYLE = """
 
 # Syntax colors — GitHub Dark / Carbon muted
 _CLR_KEYWORD = "#ff7b72"
-_CLR_QGIS    = "#d2a8ff"
-_CLR_STRING  = "#a5d6ff"
-_CLR_NUMBER  = "#79c0ff"
+_CLR_QGIS = "#d2a8ff"
+_CLR_STRING = "#a5d6ff"
+_CLR_NUMBER = "#79c0ff"
 _CLR_COMMENT = "#8b949e"
-_CLR_FUNC    = "#d2a8ff"
+_CLR_FUNC = "#d2a8ff"
 
 PYTHON_KEYWORDS = {
     "import", "from", "as", "def", "class", "return", "if", "elif", "else",

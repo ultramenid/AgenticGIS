@@ -8,14 +8,12 @@ QGIS operation is marshaled to the main thread by the executor. The system
 prompt and tool list are prompt-cached to keep multi-turn sessions cheap.
 """
 
-import json
 import os
 
 from ..core import tools as tools_mod
 from .anthropic_http import AnthropicHttpClient, AnthropicHttpError
 from .base import (
     MAX_TOKENS,
-    _COMPACTION_KEEP_TAIL,
     AgentBackend,
     AgentEvent,
     EventType,

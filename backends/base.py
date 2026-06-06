@@ -74,7 +74,8 @@ class AgentBackend(ABC):
 
     def validate(self) -> Optional[str]:
         p = self._provider()
-        key = (self.config.get("api_key") or os.environ.get(p["key_env"], "")) if p else self.config.get("custom_api_key")
+        key = (self.config.get("api_key") or os.environ.get(
+            p["key_env"], "")) if p else self.config.get("custom_api_key")
         label = p["label"] if p else "Custom endpoint"
         if not key:
             return (

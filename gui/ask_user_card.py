@@ -21,18 +21,18 @@ from qgis.PyQt.QtWidgets import (
     QVBoxLayout,
 )
 
-_SURFACE     = "#1f1f1d"
-_SURFACE_2   = "#262521"
+_SURFACE = "#1f1f1d"
+_SURFACE_2 = "#262521"
 _SURFACE_HOV = "#2d2b25"
-_INPUT_BG    = "#191918"
-_BORDER      = "#4a4234"
+_INPUT_BG = "#191918"
+_BORDER = "#4a4234"
 _BORDER_SOFT = "#343129"
-_TEXT        = "#eeeeea"
-_TEXT_2      = "#bbb7ad"
-_TEXT_3      = "#7d786d"
-_ACCENT      = "#e7dfcf"
-_ACCENT_HOV  = "#f2eadb"
-_WARN        = "#d99a3c"
+_TEXT = "#eeeeea"
+_TEXT_2 = "#bbb7ad"
+_TEXT_3 = "#7d786d"
+_ACCENT = "#e7dfcf"
+_ACCENT_HOV = "#f2eadb"
+_WARN = "#d99a3c"
 
 
 def _mono(size, weight=QFont.Weight.Normal):

@@ -14,12 +14,12 @@ from qgis.PyQt.QtGui import QColor, QFont, QFontMetrics, QPainter, QPen, QBrush,
 from qgis.PyQt.QtWidgets import QFrame, QSizePolicy
 
 # Design tokens — darker, softer (match chat_dock.py)
-_SURFACE  = "#161616"
+_SURFACE = "#161616"
 _INPUT_BG = "#1e1e1e"
-_BORDER   = "#2e2e2e"
-_TEXT     = "#ececec"
-_TEXT_2   = "#a0a0a0"
-_TEXT_3   = "#707070"
+_BORDER = "#2e2e2e"
+_TEXT = "#ececec"
+_TEXT_2 = "#a0a0a0"
+_TEXT_3 = "#707070"
 
 # Default A-to-B palette for charts. Custom chart_data["colors"] still wins.
 GRADIENT_START = "#79a883"
@@ -200,10 +200,12 @@ class ChartWidget(QFrame):
         painter.drawRoundedRect(box, 6, 6)
         painter.setFont(font_label)
         painter.setPen(QColor(_TEXT_2))
-        painter.drawText(box.adjusted(10, 6, -10, -22), Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, label)
+        painter.drawText(box.adjusted(10, 6, -10, -22), Qt.AlignmentFlag.AlignLeft |
+                         Qt.AlignmentFlag.AlignVCenter, label)
         painter.setFont(font_value)
         painter.setPen(QColor(_TEXT))
-        painter.drawText(box.adjusted(10, 22, -10, -6), Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, value)
+        painter.drawText(box.adjusted(10, 22, -10, -6), Qt.AlignmentFlag.AlignLeft |
+                         Qt.AlignmentFlag.AlignVCenter, value)
         painter.restore()
 
     def _draw_empty(self, painter, rect):
@@ -279,7 +281,8 @@ class ChartWidget(QFrame):
     def _draw_line(self, painter, rect):
         if len(self.data) < 2:
             return
-        pts = [d for d in self.data[:20] if isinstance(d, dict) and "value" in d and isinstance(d.get("value"), (int, float))]
+        pts = [d for d in self.data[:20] if isinstance(
+            d, dict) and "value" in d and isinstance(d.get("value"), (int, float))]
         if len(pts) < 2:
             return
         max_val = max((p["value"] for p in pts), default=1) or 1
@@ -349,7 +352,8 @@ class ChartWidget(QFrame):
             painter.drawText(last_x - 20, last_y - 14, 40, 12, Qt.AlignmentFlag.AlignCenter, last_val)
 
     def _draw_pie(self, painter, rect):
-        items = [d for d in self.data[:7] if isinstance(d, dict) and "value" in d and isinstance(d.get("value"), (int, float))]
+        items = [d for d in self.data[:7] if isinstance(
+            d, dict) and "value" in d and isinstance(d.get("value"), (int, float))]
         if not items:
             self._draw_empty(painter, rect)
             return

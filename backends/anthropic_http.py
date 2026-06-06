@@ -41,6 +41,7 @@ def _safe_urlopen(request, **kwargs):
         )
     return urllib.request.urlopen(request, **kwargs)  # nosec B310
 
+
 DEFAULT_BASE_URL = "https://api.anthropic.com"
 ANTHROPIC_VERSION = "2023-06-01"
 

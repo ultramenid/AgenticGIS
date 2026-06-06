@@ -514,13 +514,9 @@ class QgisToolkit:
                 label = item.strip()
                 desc = ""
             elif isinstance(item, dict):
-                raw_label = (
-                    item.get("label")
-                    or item.get("title")
-                    or item.get("name")
-                    or item.get("value")
-                    or item.get("choice")
-                )
+                raw_label = (item.get("label") or item.get("title") or
+                             item.get("name") or item.get("value") or
+                             item.get("choice"))
                 label = str(raw_label).strip() if raw_label is not None else ""
                 raw_desc = item.get("description") or item.get("detail") or item.get("help") or ""
                 desc = str(raw_desc).strip() if raw_desc is not None else ""
@@ -630,8 +626,8 @@ class QgisToolkit:
         if tool_name == "run_pyqgis":
             code = args.get("code") or ""
             if (
-                "ALLOW_EXTERNAL_ACCESS = True" in code
-                or "ALLOW_EXTERNAL_ACCESS=True" in code
+                "ALLOW_EXTERNAL_ACCESS = True" in code or
+                "ALLOW_EXTERNAL_ACCESS=True" in code
             ):
                 return None
             for match in self._STRING_LITERAL_RE.finditer(code):
@@ -1128,10 +1124,12 @@ class QgisToolkit:
             elif "result" in ns:
                 result["result"] = repr(ns["result"])
         except KeyboardInterrupt:
-            return {"ok": False, "error": "run_pyqgis: interrupted by user", "stdout": out.getvalue(), "stderr": err.getvalue()}
+            return {"ok": False, "error": "run_pyqgis: interrupted by user",
+                    "stdout": out.getvalue(), "stderr": err.getvalue()}
         except SystemExit:
-            return {"ok": False, "error": "run_pyqgis: code called sys.exit()", "stdout": out.getvalue(), "stderr": err.getvalue()}
-        except BaseException as exc:  # noqa: BLE001 — report back to the agent, never crash QGIS
+            return {"ok": False, "error": "run_pyqgis: code called sys.exit()",
+                    "stdout": out.getvalue(), "stderr": err.getvalue()}
+        except BaseException:  # noqa: BLE001 — report back to the agent, never crash QGIS
             result["ok"] = False
             result["error"] = traceback.format_exc()
         finally:
@@ -2186,7 +2184,6 @@ class QgisToolkit:
     def _add_ee_as_geotiff(self, ee, obj, name, region, scale, region_layer, zoom):
         """Download an EE image as GeoTIFF and load as a local raster layer."""
         import json as _json
-        import urllib.request as _urllib
 
         try:
             from qgis.core import QgsMessageLog
@@ -2332,6 +2329,7 @@ class QgisToolkit:
                 _json.dump(paths, _f)
         except Exception:
             pass
+
     def _ensure_gee_tiff_cleanup_connection(self):
         """Connect to QgsProject.layersRemoved once so that when a GeoTIFF
         layer is removed from the project its backing temp file is deleted."""
@@ -2612,7 +2610,7 @@ class QgisToolkit:
         if layer is None:
             return {"ok": False, "error": f"No layer with id {layer_id!r}"}
         if not isinstance(layer, QgsVectorLayer):
-            return {"ok": False, "error": f"Layer is not a vector layer"}
+            return {"ok": False, "error": "Layer is not a vector layer"}
 
         data = []
         field_idx = layer.fields().indexFromName(field_name)
@@ -2682,7 +2680,7 @@ class QgisToolkit:
         if layer is None:
             return {"ok": False, "error": f"No layer with id {layer_id!r}"}
         if not isinstance(layer, QgsVectorLayer):
-            return {"ok": False, "error": f"Layer is not a vector layer"}
+            return {"ok": False, "error": "Layer is not a vector layer"}
 
         stats = {
             "layer_name": layer.name(),

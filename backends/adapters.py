@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import json
 import os
-import platform
 import tempfile
 from typing import Callable, ClassVar, Optional, Sequence
 

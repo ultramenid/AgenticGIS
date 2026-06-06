@@ -3,7 +3,6 @@
 Shows key metrics in styled card format within the chat.
 """
 
-from qgis.PyQt.QtCore import Qt
 from qgis.PyQt.QtGui import QFont
 from qgis.PyQt.QtWidgets import (
     QFrame,
@@ -11,17 +10,16 @@ from qgis.PyQt.QtWidgets import (
     QLabel,
     QSizePolicy,
     QVBoxLayout,
-    QWidget,
 )
 
 # Design tokens — darker, softer (match chat_dock.py)
-_SURFACE  = "#161616"
+_SURFACE = "#161616"
 _INPUT_BG = "#1e1e1e"
-_BORDER   = "#2e2e2e"
-_TEXT     = "#ececec"
-_TEXT_2   = "#a0a0a0"
-_TEXT_3   = "#707070"
-_DANGER   = "#e57373"
+_BORDER = "#2e2e2e"
+_TEXT = "#ececec"
+_TEXT_2 = "#a0a0a0"
+_TEXT_3 = "#707070"
+_DANGER = "#e57373"
 
 
 class StatsWidget(QFrame):

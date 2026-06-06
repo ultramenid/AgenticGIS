@@ -17,7 +17,6 @@ from qgis.PyQt.QtWidgets import (
 from .message_bubble import _md_to_html, _show_code_context_menu
 
 from .theme import (
-    DOCK_CANVAS as _CANVAS,
     DOCK_SURFACE as _SURFACE,
     DOCK_SURFACE_2 as _SURFACE_2,
     DOCK_BORDER as _BORDER,
@@ -26,9 +25,6 @@ from .theme import (
     DOCK_TEXT_2 as _TEXT_2,
     DOCK_TEXT_3 as _TEXT_3,
     DOCK_TEXT_4 as _TEXT_4,
-    DOCK_ACCENT as _ACCENT,
-    DOCK_ACCENT_DIM as _ACCENT_DIM,
-    DOCK_ACCENT_HOV as _ACCENT_HOV,
     DOCK_WARN as _WARN,
     DOCK_SUCCESS as _SUCCESS,
     DOCK_DANGER as _DANGER,
