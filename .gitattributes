@@ -1,0 +1,2 @@
+# Exclude internal docs from release archives (git archive, GitHub ZIPs)
+QGIS_COMPATIBILITY_RULES.md export-ignore
