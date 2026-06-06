@@ -17,11 +17,27 @@ Reliability hardening
 import json
 import threading
 import urllib.error
+import urllib.parse
 import urllib.request
 
 
 class OpenAIHttpError(Exception):
     pass
+
+
+def _safe_urlopen(request, **kwargs):
+    """Wrap ``urllib.request.urlopen`` and reject non-HTTP(S) schemes.
+
+    This prevents accidental ``file:/`` or custom-scheme access when
+    user-provided URLs reach the HTTP layer (Bandit B310).
+    """
+    url = request.full_url if hasattr(request, "full_url") else str(request)
+    parsed = urllib.parse.urlparse(url)
+    if parsed.scheme not in ("http", "https"):
+        raise urllib.error.URLError(
+            f"Refusing to open non-HTTP(S) URL: {parsed.scheme}://{parsed.netloc}"
+        )
+    return urllib.request.urlopen(request, **kwargs)
 
 
 # Default per-stream timeout. Bounded so a stalled SSE cannot hold the
@@ -66,7 +82,7 @@ class OpenAIHttpClient:
                 f"{self.base_url}{path}", headers=self._headers(), method="GET"
             )
             try:
-                response = urllib.request.urlopen(request, timeout=timeout)
+                response = _safe_urlopen(request, timeout=timeout)  # noqa: B310
                 body = response.read().decode("utf-8", "replace")
                 data = json.loads(body)
                 items = data.get("data") if isinstance(data, dict) else data
@@ -126,7 +142,7 @@ class OpenAIHttpClient:
 
         response = None
         try:
-            response = urllib.request.urlopen(request, timeout=effective_timeout)
+            response = _safe_urlopen(request, timeout=effective_timeout)  # noqa: B310
             with self._active_lock:
                 self._active_response = response
                 # Cancel was called while urlopen() was blocking — close immediately.

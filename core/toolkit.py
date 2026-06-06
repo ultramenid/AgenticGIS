@@ -46,6 +46,38 @@ from .layer_analysis import analyze_vector_layer
 from .processing_tasks import run_processing_algorithm_task
 
 
+# ── Safe HTTP helpers (defense against non-HTTP(S) schemes) ──────────────
+def _safe_urlopen(request, **kwargs):
+    """Wrap ``urllib.request.urlopen`` and reject non-HTTP(S) schemes.
+
+    This prevents accidental ``file:/`` or custom-scheme access when
+    user-provided URLs reach the HTTP layer (Bandit B310).
+    """
+    import urllib.error
+    import urllib.parse
+    import urllib.request
+
+    url = request.full_url if hasattr(request, "full_url") else str(request)
+    parsed = urllib.parse.urlparse(url)
+    if parsed.scheme not in ("http", "https"):
+        raise urllib.error.URLError(
+            f"Refusing to open non-HTTP(S) URL: {parsed.scheme}://{parsed.netloc}"
+        )
+    return urllib.request.urlopen(request, **kwargs)
+
+
+def _safe_download(url, dest_path, timeout=60):
+    """Download *url* to *dest_path* using only HTTP(S) schemes."""
+    import shutil
+    import urllib.error
+    import urllib.request
+
+    req = urllib.request.Request(url, method="GET")
+    with _safe_urlopen(req, timeout=timeout) as resp:  # noqa: B310
+        with open(dest_path, "wb") as fh:
+            shutil.copyfileobj(resp, fh)
+
+
 # --------------------------------------------------------------------------- #
 # Cancellation                                                                 #
 # --------------------------------------------------------------------------- #
@@ -1084,7 +1116,9 @@ class QgisToolkit:
 
                 try:
                     sys.settrace(_cancel_trace)
-                    exec(compile(code, "<agenticgis>", "exec"), ns)  # noqa: S102
+                    # Intentional user-code execution (PyQGIS escape hatch).
+                    # Guarded by _dangerous_calls_blocked() above.  # noqa: B102,S102
+                    exec(compile(code, "<agenticgis>", "exec"), ns)
                 finally:
                     sys.settrace(old_trace)
             if _cancel_check():
@@ -1631,7 +1665,7 @@ class QgisToolkit:
             url, method="GET", headers={"User-Agent": "AgenticGIS"}
         )
         try:
-            with urllib.request.urlopen(req, timeout=20) as resp:
+            with _safe_urlopen(req, timeout=20) as resp:  # noqa: B310
                 raw = resp.read(2_000_000)
         except urllib.error.HTTPError as exc:
             log_event("toolkit.gee_dataset_info.error", id=ds, status=exc.code)
@@ -2105,7 +2139,9 @@ class QgisToolkit:
             "result": None,
         }
         try:
-            exec(compile(code, "<gee_add_layer>", "exec"), ns)  # noqa: S102
+            # Intentional user-code execution (Earth Engine expression).
+            # The tool description warns users that arbitrary code runs here.  # noqa: B102,S102
+            exec(compile(code, "<gee_add_layer>", "exec"), ns)
         except Exception as exc:  # noqa: BLE001
             return {
                 "ok": False,
@@ -2201,7 +2237,7 @@ class QgisToolkit:
             tmp_path = tmp.name
             tmp.close()
             try:
-                _urllib.urlretrieve(url, tmp_path)
+                _safe_download(url, tmp_path)
             except Exception as exc:
                 try:
                     os.unlink(tmp_path)
@@ -2482,9 +2518,10 @@ class QgisToolkit:
 
         start = time.perf_counter()
         req = urllib.request.Request(url, method="GET")
-        ssl_context = ssl._create_unverified_context() if not verify_ssl else None
+        # verify_ssl is user-controlled (web_fetch tool parameter).
+        ssl_context = ssl._create_unverified_context() if not verify_ssl else None  # noqa: B413
         try:
-            with urllib.request.urlopen(req, timeout=30, context=ssl_context) as resp:
+            with _safe_urlopen(req, timeout=30, context=ssl_context) as resp:  # noqa: B310
                 status = resp.getcode()
                 headers = dict(resp.headers)
                 content_type = headers.get("Content-Type", "")

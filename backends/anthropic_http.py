@@ -26,6 +26,21 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
+
+def _safe_urlopen(request, **kwargs):
+    """Wrap ``urllib.request.urlopen`` and reject non-HTTP(S) schemes.
+
+    This prevents accidental ``file:/`` or custom-scheme access when
+    user-provided URLs reach the HTTP layer (Bandit B310).
+    """
+    url = request.full_url if hasattr(request, "full_url") else str(request)
+    parsed = urllib.parse.urlparse(url)
+    if parsed.scheme not in ("http", "https"):
+        raise urllib.error.URLError(
+            f"Refusing to open non-HTTP(S) URL: {parsed.scheme}://{parsed.netloc}"
+        )
+    return urllib.request.urlopen(request, **kwargs)
+
 DEFAULT_BASE_URL = "https://api.anthropic.com"
 ANTHROPIC_VERSION = "2023-06-01"
 
@@ -68,7 +83,7 @@ class AnthropicHttpClient:
             f"{self.base_url}/v1/models", headers=self._headers(), method="GET"
         )
         try:
-            response = urllib.request.urlopen(request, timeout=timeout)
+            response = _safe_urlopen(request, timeout=timeout)  # noqa: B310
             data = json.loads(response.read().decode("utf-8", "replace"))
         except urllib.error.HTTPError as exc:
             try:
