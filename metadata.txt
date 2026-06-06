@@ -14,3 +14,4 @@ tags=ai,agent,chat,llm,automation,pyqgis,assistant
 experimental=True
 deprecated=False
 hasProcessingProvider=no
+icon=resources/icon.png
