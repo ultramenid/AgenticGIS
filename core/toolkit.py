@@ -707,9 +707,21 @@ class QgisToolkit:
     # Cancellation helpers                                                #
     # ------------------------------------------------------------------ #
     def request_cancel(self):
-        """Called by the dock's Stop button. Flips the active token."""
+        """Called by the dock's Stop button. Flips the active token and
+        directly cancels any pending QgsTask background workers."""
         self._cancel.cancel()
+        self._cancel_all_bg_tasks()
         log_event("toolkit.cancel.requested")
+
+    def _cancel_all_bg_tasks(self):
+        """Cancel any remaining QgsTask workers immediately."""
+        self._ensure_background_task_state()
+        with self._bg_task_lock:
+            for task in list(self._bg_tasks):
+                try:
+                    task.cancel()
+                except Exception:
+                    pass
 
     def is_cancelled(self):
         return self._cancel.is_cancelled()
