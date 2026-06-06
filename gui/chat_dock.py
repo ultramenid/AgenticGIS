@@ -1926,10 +1926,8 @@ class ChatDock(QgsDockWidget):
         elif kind == "final":
             turn.set_streaming_text(self._current_text)
 
-        if (
-            kind in ("tool", "final")
-            and not self._ttft_first_ui_render_logged
-        ):
+        is_emit_kind = kind in ("tool", "final")
+        if is_emit_kind and not self._ttft_first_ui_render_logged:
             self._ttft_first_ui_render_logged = True
             log_ttft_event(
                 "first_ui_render",
