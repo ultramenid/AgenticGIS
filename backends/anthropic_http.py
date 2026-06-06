@@ -39,7 +39,7 @@ def _safe_urlopen(request, **kwargs):
         raise urllib.error.URLError(
             f"Refusing to open non-HTTP(S) URL: {parsed.scheme}://{parsed.netloc}"
         )
-    return urllib.request.urlopen(request, **kwargs)
+    return urllib.request.urlopen(request, **kwargs)  # nosec B310
 
 DEFAULT_BASE_URL = "https://api.anthropic.com"
 ANTHROPIC_VERSION = "2023-06-01"
@@ -83,7 +83,7 @@ class AnthropicHttpClient:
             f"{self.base_url}/v1/models", headers=self._headers(), method="GET"
         )
         try:
-            response = _safe_urlopen(request, timeout=timeout)  # noqa: B310
+            response = _safe_urlopen(request, timeout=timeout)  # nosec B310
             data = json.loads(response.read().decode("utf-8", "replace"))
         except urllib.error.HTTPError as exc:
             try:

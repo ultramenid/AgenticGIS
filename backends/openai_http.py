@@ -37,7 +37,7 @@ def _safe_urlopen(request, **kwargs):
         raise urllib.error.URLError(
             f"Refusing to open non-HTTP(S) URL: {parsed.scheme}://{parsed.netloc}"
         )
-    return urllib.request.urlopen(request, **kwargs)
+    return urllib.request.urlopen(request, **kwargs)  # nosec B310
 
 
 # Default per-stream timeout. Bounded so a stalled SSE cannot hold the
@@ -82,7 +82,7 @@ class OpenAIHttpClient:
                 f"{self.base_url}{path}", headers=self._headers(), method="GET"
             )
             try:
-                response = _safe_urlopen(request, timeout=timeout)  # noqa: B310
+                response = _safe_urlopen(request, timeout=timeout)  # nosec B310
                 body = response.read().decode("utf-8", "replace")
                 data = json.loads(body)
                 items = data.get("data") if isinstance(data, dict) else data
@@ -142,7 +142,7 @@ class OpenAIHttpClient:
 
         response = None
         try:
-            response = _safe_urlopen(request, timeout=effective_timeout)  # noqa: B310
+            response = _safe_urlopen(request, timeout=effective_timeout)  # nosec B310
             with self._active_lock:
                 self._active_response = response
                 # Cancel was called while urlopen() was blocking — close immediately.
