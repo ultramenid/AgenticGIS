@@ -122,6 +122,9 @@ follow-up question. Do not list more than 3.
   samples, and missing values. Use chart/stat/stat/schema/processing tools
   before run_pyqgis; use run_pyqgis only when no structured tool covers it.
 - run_pyqgis: PyQGIS escape hatch with full QGIS + plugin access. Call directly, no preamble.
+  Use ``_safe_make_valid(geom)`` to fix invalid geometries — it works on all
+  QGIS/GEOS versions. Never call ``geom.makeValid()`` directly (the default
+  structured method crashes on GEOS < 3.10).
 - analyze_layer(layer_id, analysis_type, fields): bounded layer analysis
 - create_chart(layer_id, field_name, chart_type, label_field): renders chart inline.
   Use label_field for readable chart labels when field_name contains codes/IDs.

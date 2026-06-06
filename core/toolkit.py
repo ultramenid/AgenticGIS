@@ -1083,6 +1083,26 @@ class QgisToolkit:
         ns["_make_layer_cache"] = _make_layer_cache
         ns["QgsVectorLayerCache"] = QgsVectorLayerCache
 
+        # Geometry validation helper: safe makeValid across all QGIS/GEOS versions.
+        # QGIS 3.28+ defaults to the Structured method which requires GEOS 3.10+.
+        # This wrapper uses Original (works on all GEOS versions) with fallbacks.
+        def _safe_make_valid(geom):
+            """Fix invalid geometry across all QGIS/GEOS versions.
+
+            Uses ``Qgis.GeometryValidityMethod.Original`` (compatible with GEOS
+            < 3.10) and falls back to the classic buffer(0) trick if
+            ``makeValid`` is unavailable or fails outright.
+            """
+            try:
+                from qgis.core import Qgis
+                return geom.makeValid(Qgis.GeometryValidityMethod.Original)
+            except (TypeError, AttributeError):
+                return geom.makeValid()
+            except Exception:
+                return geom.buffer(0, 0)
+
+        ns["_safe_make_valid"] = _safe_make_valid
+
         out, err = io.StringIO(), io.StringIO()
         result = {"ok": True, "stdout": "", "stderr": "", "result": None, "error": None}
         if not isinstance(code, str) or not code.strip():
