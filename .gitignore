@@ -38,3 +38,4 @@ Thumbs.db
 # Internal development — not for public release
 dev/
 docs/
+QGIS_COMPATIBILITY_RULES.md
