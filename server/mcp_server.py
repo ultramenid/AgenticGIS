@@ -86,9 +86,7 @@ class _Handler(BaseHTTPRequestHandler):
         if "text/event-stream" in accept:
             body = json.dumps(rpc_response).encode("utf-8")
             self._send_headers(200, "text/event-stream", content_length=len(body),
-                               extra_headers={
-                                   "Cache-Control": "no-cache",
-                               })
+                               extra_headers={"Cache-Control": "no-cache"})
             try:
                 self.wfile.write(b"event: message\r\ndata: " + body + b"\r\n\r\n")
             except (OSError, socket.timeout):
