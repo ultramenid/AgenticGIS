@@ -514,9 +514,11 @@ class QgisToolkit:
                 label = item.strip()
                 desc = ""
             elif isinstance(item, dict):
-                raw_label = (item.get("label") or item.get("title") or
-                             item.get("name") or item.get("value") or
-                             item.get("choice"))
+                raw_label = None
+                for _k in ("label", "title", "name", "value", "choice"):
+                    raw_label = item.get(_k)
+                    if raw_label:
+                        break
                 label = str(raw_label).strip() if raw_label is not None else ""
                 raw_desc = item.get("description") or item.get("detail") or item.get("help") or ""
                 desc = str(raw_desc).strip() if raw_desc is not None else ""
@@ -625,10 +627,7 @@ class QgisToolkit:
 
         if tool_name == "run_pyqgis":
             code = args.get("code") or ""
-            if (
-                "ALLOW_EXTERNAL_ACCESS = True" in code or
-                "ALLOW_EXTERNAL_ACCESS=True" in code
-            ):
+            if "ALLOW_EXTERNAL_ACCESS = True" in code or "ALLOW_EXTERNAL_ACCESS=True" in code:
                 return None
             for match in self._STRING_LITERAL_RE.finditer(code):
                 value = match.group("value")
@@ -1757,10 +1756,7 @@ class QgisToolkit:
             "bands": bands[:80],
             "properties": schema,
             "url": url,
-            "catalog_page": (
-                "https://developers.google.com/earth-engine/datasets/catalog/"
-                + fname
-            ),
+            "catalog_page": f"https://developers.google.com/earth-engine/datasets/catalog/{fname}",
         }
 
     def _gee_asset_info_via_ee(self, asset_id):
@@ -2221,7 +2217,7 @@ class QgisToolkit:
                         if attempt < _max_retries - 1:
                             _scale = int(_scale * 2)
                             _log(
-                                f"Request too large ({_scale//2}m → {_scale}m), "
+                                f"Request too large ({_scale // 2}m → {_scale}m), "
                                 f"retrying…"
                             )
                             continue
@@ -2389,8 +2385,7 @@ class QgisToolkit:
             "needs_decision": True,
             "reason": reason,
             "message": (
-                detail
-                + " Ask the user how to proceed, then call gee_add_layer again "
+                detail + " Ask the user how to proceed, then call gee_add_layer again "
                 "with geometry_mode set to 'bbox' (bounding box, fastest), "
                 "'simplify' (reduce detail), or 'exact' (use full detail; may be "
                 "slow or rejected). You can also raise max_vertices/max_features."

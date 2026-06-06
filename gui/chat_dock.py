@@ -135,10 +135,11 @@ class ChatWorker(QThread):
                 self._coalesce_type = ev.type
                 self._coalesce_text += delta
                 now = time.monotonic()
-                if (
+                is_coalesce_ready = (
                     len(self._coalesce_text) >= _STREAM_COALESCE_MAX_CHARS
                     or now - self._last_coalesce_flush >= _STREAM_COALESCE_INTERVAL_S
-                ):
+                )
+                if is_coalesce_ready:
                     self._flush_coalesced_event(now)
                 return
 
@@ -499,11 +500,7 @@ class ChatDock(QgsDockWidget):
     def showEvent(self, event):
         super().showEvent(event)
         self.input.setFocus(Qt.FocusReason.OtherFocusReason)
-        if (
-            self._show_startup_picker
-            and not self._startup_picker_shown
-            and self._session_store.had_existing_sessions
-        ):
+        if self._show_startup_picker and not self._startup_picker_shown and self._session_store.had_existing_sessions:
             self._startup_picker_shown = True
             QTimer.singleShot(0, self._show_startup_session_picker)
 
@@ -536,14 +533,7 @@ class ChatDock(QgsDockWidget):
         return super().eventFilter(obj, event)
 
     def _newline_modifier(self, modifiers):
-        return bool(
-            modifiers & (
-                Qt.KeyboardModifier.ShiftModifier
-                | Qt.KeyboardModifier.AltModifier
-                | Qt.KeyboardModifier.MetaModifier
-                | Qt.KeyboardModifier.ControlModifier
-            )
-        )
+        return bool(modifiers & (Qt.ShiftModifier | Qt.AltModifier | Qt.MetaModifier | Qt.ControlModifier))
 
     def _remember_prompt(self, message):
         message = message.strip() if isinstance(message, str) else ""
@@ -1723,8 +1713,7 @@ class ChatDock(QgsDockWidget):
             # heuristic for forward-compat with any third-party backend.
             is_err = ev.data.get("is_error")
             if is_err is None:
-                is_err = (str(result).startswith("Error")
-                          or str(result).startswith("error"))
+                is_err = str(result).startswith("Error") or str(result).startswith("error")
             is_cancelled = bool(ev.data.get("cancelled"))
             if self._current_tool_row is not None:
                 self._current_tool_row.set_result(str(result), is_err)

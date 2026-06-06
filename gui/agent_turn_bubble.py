@@ -529,12 +529,7 @@ class AgentTurnBubble(QFrame):
         self.updateGeometry()
 
     def has_content(self) -> bool:
-        return (
-            bool(self._groups)
-            or bool(self._stream_text)
-            or bool(self._progress_text)
-            or self._ticker.isVisible()
-        )
+        return bool(self._groups) or bool(self._stream_text) or bool(self._progress_text) or self._ticker.isVisible()
 
     def _stop_progress(self) -> None:
         if self._progress_timer.isActive():
