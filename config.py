@@ -10,7 +10,7 @@ _GROUP = "AgenticGIS"
 
 # Connection modes the user can pick in the Settings dialog.
 MODE_CLI_TOOL = "cli_tool"          # use an installed, already-logged-in agent CLI
-MODE_API_KEY = "api_key"            # talk to the provider API directly with a key
+MODE_API_KEY = "api_key"            # talk to the provider API directly  # pragma: allowlist secret
 MODE_CUSTOM = "custom"              # any OpenAI-compatible or Anthropic-compatible endpoint
 MODE_SUBSCRIPTION = "subscription"  # legacy alias for older CLI-agent settings
 
