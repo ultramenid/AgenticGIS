@@ -11,6 +11,7 @@ Optional path override:
 
 import json
 import os
+import secrets
 import threading
 import time
 from contextlib import contextmanager
@@ -101,6 +102,27 @@ def log_event(event, **fields):
                 handle.write(line + "\n")
     except Exception:
         # Logging must never affect QGIS/plugin behavior.
+        return
+
+
+def new_trace_id():
+    """Return a short opaque identifier for correlating one user send."""
+    return secrets.token_hex(4)
+
+
+def log_ttft_event(stage, trace_id, started_at):
+    """Record one content-free TTFT milestone using monotonic elapsed time."""
+    if not trace_id or started_at is None:
+        return
+    try:
+        elapsed_ms = max(0, int((time.monotonic() - started_at) * 1000))
+        log_event(
+            f"ttft.{stage}",
+            trace_id=str(trace_id),
+            elapsed_ms=elapsed_ms,
+        )
+    except Exception:
+        # Instrumentation must never affect QGIS/plugin behavior.
         return
 
 

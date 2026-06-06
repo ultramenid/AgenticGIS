@@ -5,6 +5,9 @@ bridge) and the chat dock, and rebuilds the active backend whenever settings
 change.
 """
 
+import hashlib
+import json
+
 from qgis.PyQt.QtWidgets import QAction
 
 from . import config as config_mod
@@ -22,6 +25,8 @@ class AgenticGisPlugin:
         self._action = None
         self._dock = None
         self._server = None
+        self._cached_backend = None
+        self._cached_backend_fingerprint = None
 
     # ------------------------------------------------------------------ #
     # QGIS plugin lifecycle                                              #
@@ -44,6 +49,7 @@ class AgenticGisPlugin:
             self.iface.removeDockWidget(self._dock)
             self._dock.deleteLater()
             self._dock = None
+        self._close_cached_backend()
         if self._action is not None:
             self.iface.removeToolBarIcon(self._action)
             self.iface.removePluginMenu("AgenticGIS", self._action)
@@ -75,15 +81,66 @@ class AgenticGisPlugin:
     # Backend + MCP bridge                                                #
     # ------------------------------------------------------------------ #
     def _get_backend(self):
-        return build_backend(
+        fingerprint = self._backend_settings_fingerprint()
+        fingerprint_matches = self._cached_backend_fingerprint == fingerprint
+        if self._cached_backend is not None and fingerprint_matches:
+            return self._cached_backend
+
+        backend = build_backend(
             self.config, self.toolkit, self.executor, self._server_provider
         )
+        old_backend = self._cached_backend
+        self._cached_backend = backend
+        self._cached_backend_fingerprint = fingerprint
+        if old_backend is not None:
+            self._close_backend(old_backend)
+        return backend
+
+    def _backend_settings_fingerprint(self):
+        """Return a stable digest of the settings used to build a backend."""
+        if hasattr(self.config, "all"):
+            settings = self.config.all()
+        else:
+            settings = {
+                name: self.config.get(name)
+                for name in sorted(config_mod.DEFAULTS)
+            }
+        serialized = json.dumps(
+            settings,
+            sort_keys=True,
+            separators=(",", ":"),
+            default=repr,
+        ).encode("utf-8")
+        return hashlib.sha256(serialized).hexdigest()
+
+    @staticmethod
+    def _close_backend(backend):
+        close = getattr(backend, "close", None)
+        if close is None:
+            return
+        try:
+            close()
+        except Exception:
+            pass
+
+    def _close_cached_backend(self):
+        backend = self._cached_backend
+        self._cached_backend = None
+        self._cached_backend_fingerprint = None
+        if backend is not None:
+            self._close_backend(backend)
 
     def request_cancel(self):
         """Called by the dock's Stop button — flips the toolkit's cancel token
         so a long-running main-thread operation (run_pyqgis, processing.run,
         create_chart, get_layer_statistics) can stop cooperatively.
         """
+        backend = self._cached_backend
+        if backend is not None:
+            try:
+                backend.cancel_current_request()
+            except Exception:
+                pass
         try:
             self.toolkit.request_cancel()
         except Exception:

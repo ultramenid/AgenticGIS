@@ -30,6 +30,7 @@ from qgis.PyQt.QtWidgets import (
 )
 
 from ..backends.base import AgentEvent, EventType
+from ..core.dev_logging import log_ttft_event, new_trace_id
 from ..core.qt_compat import QUEUED_CONNECTION
 from ..core.session_store import DEFAULT_SESSION_NAME, SessionStore
 from .agent_turn_bubble import AgentTurnBubble, _SPINNER_FRAMES
@@ -70,11 +71,22 @@ class ChatWorker(QThread):
     event = pyqtSignal(object)
     finished_history = pyqtSignal(object)
 
-    def __init__(self, backend, message, history, parent=None):
+    def __init__(
+        self,
+        backend,
+        message,
+        history,
+        parent=None,
+        trace_id=None,
+        trace_started_at=None,
+    ):
         super().__init__(parent)
         self._backend = backend
         self._message = message
         self._history = history
+        self._trace_id = trace_id
+        self._trace_started_at = trace_started_at
+        self._first_text_received = False
         self._stop = False
         self._coalesce_type = None
         self._coalesce_text = ""
@@ -92,6 +104,11 @@ class ChatWorker(QThread):
             pass
 
     def run(self):
+        log_ttft_event(
+            "worker_started",
+            trace_id=self._trace_id,
+            started_at=self._trace_started_at,
+        )
         try:
             history = self._backend.send(
                 self._message, self._history, self._emit_event, lambda: self._stop
@@ -130,6 +147,24 @@ class ChatWorker(QThread):
         if ev.type in (EventType.TEXT, EventType.THINKING):
             delta = ev.data.get("text", "")
             if delta:
+                if ev.type == EventType.TEXT and not self._first_text_received:
+                    self._first_text_received = True
+                    log_ttft_event(
+                        "first_text_received",
+                        trace_id=self._trace_id,
+                        started_at=self._trace_started_at,
+                    )
+                    self._flush_coalesced_event()
+                    try:
+                        self.event.emit(ev)
+                    except RuntimeError:
+                        return
+                    log_ttft_event(
+                        "first_text_emitted",
+                        trace_id=self._trace_id,
+                        started_at=self._trace_started_at,
+                    )
+                    return
                 if self._coalesce_type is not None and self._coalesce_type != ev.type:
                     self._flush_coalesced_event()
                 self._coalesce_type = ev.type
@@ -213,6 +248,9 @@ class ChatDock(QgsDockWidget):
         self._pending_stream_kind = None
         self._pending_stream_scroll = False
         self._last_stream_render_at = 0.0
+        self._ttft_trace_id = None
+        self._ttft_started_at = None
+        self._ttft_first_ui_render_logged = False
         self._thinking_text = ""           # accumulated thinking/progress text
         self._thinking_started = False     # whether add_thinking_block was called this turn
         self._current_text_truncated = False
@@ -1546,6 +1584,8 @@ class ChatDock(QgsDockWidget):
         if not message:
             return
 
+        trace_id = new_trace_id()
+        trace_started_at = time.monotonic()
         backend = self._get_backend()
         if backend is None:
             self._add_user_message("No backend configured. Open Settings.")
@@ -1555,6 +1595,14 @@ class ChatDock(QgsDockWidget):
             self._add_user_message(err)
             return
 
+        self._ttft_trace_id = trace_id
+        self._ttft_started_at = trace_started_at
+        self._ttft_first_ui_render_logged = False
+        log_ttft_event(
+            "send_accepted",
+            trace_id=trace_id,
+            started_at=trace_started_at,
+        )
         self._remember_prompt(message)
         self.input.clear()
         self._resize_input()
@@ -1589,7 +1637,13 @@ class ChatDock(QgsDockWidget):
         self._set_status("Thinking", _TEXT_3, spinning=True)
         self._set_tool_progress("Thinking...")
 
-        self._worker = ChatWorker(backend, message, self._history)
+        self._worker = ChatWorker(
+            backend,
+            message,
+            self._history,
+            trace_id=trace_id,
+            trace_started_at=trace_started_at,
+        )
         self._worker.event.connect(self._on_event)
         self._worker.finished_history.connect(
             lambda history, worker=self._worker: self._on_finished(history, worker)
@@ -1872,6 +1926,16 @@ class ChatDock(QgsDockWidget):
         elif kind == "final":
             turn.set_streaming_text(self._current_text)
 
+        if (
+            kind in ("tool", "final")
+            and not self._ttft_first_ui_render_logged
+        ):
+            self._ttft_first_ui_render_logged = True
+            log_ttft_event(
+                "first_ui_render",
+                trace_id=self._ttft_trace_id,
+                started_at=self._ttft_started_at,
+            )
         self._last_stream_render_at = now if now is not None else time.monotonic()
         if should_scroll:
             self._scroll_to_bottom()

@@ -1,24 +1,27 @@
-"""Minimal OpenAI-compatible Chat Completions client on stdlib urllib.
+"""Minimal OpenAI-compatible Chat Completions client on the Python stdlib.
 
 Supports streaming (SSE) and tool-calling so the same tool-use loop in
 ``api_backend.py`` works whether the wire format is Anthropic or OpenAI.
 
 Reliability hardening
 ---------------------
-* Each stream opens with a bounded socket timeout and closes the response
-  on ``should_stop()`` so a half-closed SSE cannot leave the worker
-  blocked until the timeout fires.
+* Streaming uses a reusable ``http.client`` connection to avoid repeated
+  DNS, TCP, and TLS setup across turns and tool loops.
 * Mid-stream ``read()`` errors are caught and the loop exits cleanly,
   preserving any text already collected.
 * Token budget guard prevents runaway streams from holding the worker
   indefinitely.
 """
 
+import http.client
 import json
+import socket
 import threading
 import urllib.error
 import urllib.parse
 import urllib.request
+
+from ..core.dev_logging import log_event
 
 
 class OpenAIHttpError(Exception):
@@ -54,9 +57,66 @@ class OpenAIHttpClient:
         self.extra_headers = extra_headers or {}
         self.org = org
         self.timeout = timeout
+        self._parsed_base_url = self._parse_base_url(self.base_url)
+        self._conn = None
+        self._conn_lock = threading.Lock()
+        self._request_lock = threading.Lock()
         self._active_response = None
+        self._active_connection = None
         self._active_lock = threading.Lock()
         self._cancel_requested = False
+
+    @staticmethod
+    def _parse_base_url(base_url):
+        parsed = urllib.parse.urlparse(base_url)
+        if parsed.scheme not in ("http", "https") or not parsed.hostname:
+            raise ValueError("OpenAI base URL must be an absolute HTTP(S) URL")
+        if parsed.query or parsed.fragment:
+            raise ValueError("OpenAI base URL must not contain a query or fragment")
+        return parsed
+
+    def _chat_path(self):
+        path = (self._parsed_base_url.path or "").rstrip("/")
+        if path.endswith("/chat/completions"):
+            return path or "/v1/chat/completions"
+        if path.endswith("/v1"):
+            return f"{path}/chat/completions"
+        return f"{path}/v1/chat/completions" or "/v1/chat/completions"
+
+    def _ensure_conn(self, timeout):
+        with self._conn_lock:
+            if self._conn is not None:
+                try:
+                    self._conn.sock.getpeername()
+                except Exception:
+                    try:
+                        self._conn.close()
+                    except Exception:
+                        pass
+                    self._conn = None
+            if self._conn is None:
+                parsed = self._parsed_base_url
+                connection_class = (
+                    http.client.HTTPSConnection
+                    if parsed.scheme == "https"
+                    else http.client.HTTPConnection
+                )
+                self._conn = connection_class(
+                    parsed.hostname,
+                    port=parsed.port,
+                    timeout=timeout,
+                )
+            return self._conn
+
+    def _close_conn(self):
+        with self._conn_lock:
+            connection = self._conn
+            self._conn = None
+        if connection is not None:
+            try:
+                connection.close()
+            except Exception:
+                pass
 
     def _headers(self):
         headers = {
@@ -129,105 +189,115 @@ class OpenAIHttpClient:
             "stream_options": {"include_usage": True},
         }
         data = json.dumps(payload).encode("utf-8")
+        log_event(
+            "transport.request_serialized",
+            transport="openai",
+            bytes=len(data),
+            model=model,
+        )
 
         headers = self._headers()
-        headers["Connection"] = "keep-alive"
-        request = urllib.request.Request(
-            f"{self.base_url}/v1/chat/completions",
-            data=data, headers=headers, method="POST",
-        )
+        headers["Content-Length"] = str(len(data))
 
         with self._active_lock:
             self._cancel_requested = False
 
-        response = None
-        try:
-            response = _safe_urlopen(request, timeout=effective_timeout)  # nosec B310
-            with self._active_lock:
-                self._active_response = response
-                # Cancel was called while urlopen() was blocking — close immediately.
-                if self._cancel_requested:
-                    self._active_response = None
-                    try:
-                        response.close()
-                    except Exception:
-                        pass
-                    return [], "stop"
-        except urllib.error.HTTPError as exc:
+        with self._request_lock:
+            response = self._open_stream(data, headers, effective_timeout)
+            text_parts = []
+            tool_calls = {}
+            finish_reason = None
+            stopped = False
+            first_event_logged = False
+            first_text_logged = False
+            stream_error = False
+            done_received = False
+
             try:
-                detail = exc.read().decode("utf-8", "replace")
-            except Exception:
-                detail = ""
-            raise OpenAIHttpError(f"HTTP {exc.code}: {detail[:600]}") from exc
-        except urllib.error.URLError as exc:
-            raise OpenAIHttpError(f"Connection error: {exc.reason}") from exc
+                while True:
+                    if should_stop():
+                        stopped = True
+                        break
+                    try:
+                        raw = response.readline()
+                    except (http.client.HTTPException, OSError, TimeoutError):
+                        stream_error = True
+                        break
+                    if not raw:
+                        break
+                    try:
+                        line = raw.decode("utf-8", "replace").strip()
+                    except Exception:
+                        stream_error = True
+                        break
+                    if done_received:
+                        continue
+                    if not line or not line.startswith("data:"):
+                        continue
+                    data_text = line[len("data:"):].strip()
+                    if data_text == "[DONE]":
+                        done_received = True
+                        continue
+                    if not data_text:
+                        continue
+                    try:
+                        event = json.loads(data_text)
+                    except json.JSONDecodeError:
+                        continue
+                    if not first_event_logged:
+                        log_event(
+                            "transport.first_stream_event",
+                            transport="openai",
+                        )
+                        first_event_logged = True
+                    self._log_cache_usage(event)
+                    choices = event.get("choices") or [{}]
+                    choice = choices[0]
+                    delta = choice.get("delta", {})
+                    if choice.get("finish_reason"):
+                        finish_reason = choice["finish_reason"]
 
-        text_parts = []
-        tool_calls = {}        # index -> {id, type, function: {name, arguments}}
-        finish_reason = None
-        stopped = False
+                    token = delta.get("content")
+                    if token:
+                        if not first_text_logged:
+                            log_event(
+                                "transport.first_text",
+                                transport="openai",
+                            )
+                            first_text_logged = True
+                        text_parts.append(token)
+                        try:
+                            on_text(token)
+                        except Exception:
+                            pass
 
-        try:
-            for raw in response:
-                if should_stop():
-                    stopped = True
-                    break
+                    for tcd in (delta.get("tool_calls") or []):
+                        idx = tcd.get("index", 0)
+                        if idx not in tool_calls:
+                            tool_calls[idx] = {
+                                "id": tcd.get("id", ""),
+                                "type": tcd.get("type", "function"),
+                                "function": {"name": "", "arguments": ""},
+                            }
+                        fn = tcd.get("function", {})
+                        if fn.get("name"):
+                            tool_calls[idx]["function"]["name"] = fn["name"]
+                        if fn.get("arguments"):
+                            tool_calls[idx]["function"]["arguments"] += fn[
+                                "arguments"
+                            ]
+            finally:
                 try:
-                    line = raw.decode("utf-8", "replace").strip()
+                    response.close()
                 except Exception:
-                    break
-                if not line or not line.startswith("data: "):
-                    continue
-                data_text = line[len("data: "):].strip()
-                if data_text == "[DONE]":
-                    break
-                if not data_text:
-                    continue
-                try:
-                    event = json.loads(data_text)
-                except json.JSONDecodeError:
-                    continue
-                choices = event.get("choices") or [{}]
-                choice = choices[0]
-                delta = choice.get("delta", {})
-                if choice.get("finish_reason"):
-                    finish_reason = choice["finish_reason"]
-
-                # text delta
-                token = delta.get("content")
-                if token:
-                    text_parts.append(token)
-                    try:
-                        on_text(token)
-                    except Exception:
-                        # A callback failure should not break the stream.
-                        pass
-
-                # tool_call deltas
-                for tcd in (delta.get("tool_calls") or []):
-                    idx = tcd.get("index", 0)
-                    if idx not in tool_calls:
-                        tool_calls[idx] = {
-                            "id": tcd.get("id", ""),
-                            "type": tcd.get("type", "function"),
-                            "function": {"name": "", "arguments": ""},
-                        }
-                    fn = tcd.get("function", {})
-                    if fn.get("name"):
-                        tool_calls[idx]["function"]["name"] = fn["name"]
-                    if fn.get("arguments"):
-                        tool_calls[idx]["function"]["arguments"] += fn["arguments"]
-        finally:
-            # close the response on every exit path (should_stop, error,
-            # natural end) so a half-closed peer doesn't leave the worker
-            # blocked until the OS-level timeout fires.
-            try:
-                response.close()
-            except Exception:
-                pass
-            with self._active_lock:
-                if self._active_response is response:
-                    self._active_response = None
+                    pass
+                with self._active_lock:
+                    cancelled = self._cancel_requested
+                    if self._active_response is response:
+                        self._active_response = None
+                    self._active_connection = None
+                if stopped or cancelled or stream_error:
+                    self._close_conn()
 
         blocks = []
         if text_parts:
@@ -246,7 +316,7 @@ class OpenAIHttpClient:
                 "input": parsed,
             })
 
-        if stopped:
+        if stopped or cancelled:
             # The caller checks finish_reason; force a non-tool finish so
             # the agent loop ends the turn rather than waiting for a
             # completion the user already cancelled.
@@ -254,17 +324,104 @@ class OpenAIHttpClient:
 
         return blocks, finish_reason
 
+    def _open_stream(self, data, headers, timeout):
+        last_error = None
+        for attempt in range(2):
+            connection = self._ensure_conn(timeout)
+            with self._active_lock:
+                self._active_connection = connection
+                cancelled = self._cancel_requested
+            if cancelled:
+                self._close_conn()
+                return _CancelledResponse()
+            try:
+                connection.request(
+                    "POST",
+                    self._chat_path(),
+                    body=data,
+                    headers=headers,
+                )
+                response = connection.getresponse()
+            except (OSError, http.client.HTTPException, socket.timeout) as exc:
+                last_error = exc
+                with self._active_lock:
+                    self._active_connection = None
+                    cancelled = self._cancel_requested
+                self._close_conn()
+                if cancelled:
+                    return _CancelledResponse()
+                if attempt == 0:
+                    continue
+                raise OpenAIHttpError(f"Connection error: {exc}") from exc
+
+            with self._active_lock:
+                self._active_response = response
+                if self._cancel_requested:
+                    self._active_response = None
+                    try:
+                        response.close()
+                    except Exception:
+                        pass
+                    self._close_conn()
+                    return _CancelledResponse()
+            log_event(
+                "transport.headers",
+                transport="openai",
+                status=response.status,
+            )
+            if response.status >= 400:
+                try:
+                    detail = response.read(600).decode("utf-8", "replace")
+                except Exception:
+                    detail = ""
+                try:
+                    response.close()
+                except Exception:
+                    pass
+                with self._active_lock:
+                    if self._active_response is response:
+                        self._active_response = None
+                    if self._active_connection is connection:
+                        self._active_connection = None
+                self._close_conn()
+                raise OpenAIHttpError(
+                    f"HTTP {response.status}: {detail[:600]}"
+                )
+            return response
+        raise OpenAIHttpError(f"Connection error: {last_error}")
+
+    @staticmethod
+    def _log_cache_usage(event):
+        usage = event.get("usage")
+        if not isinstance(usage, dict):
+            return
+        details = usage.get("prompt_tokens_details") or usage.get(
+            "input_tokens_details"
+        )
+        if isinstance(details, dict) and "cached_tokens" in details:
+            log_event(
+                "transport.cache_usage",
+                transport="openai",
+                cached_tokens=details.get("cached_tokens"),
+            )
+
     def cancel_current_request(self):
         """Best-effort cancellation of the active streaming response."""
         with self._active_lock:
             self._cancel_requested = True
             response = self._active_response
-        if response is None:
-            return
-        try:
-            response.close()
-        except Exception:
-            pass
+            connection = self._active_connection
+        for active in (response, connection):
+            if active is not None:
+                try:
+                    active.close()
+                except Exception:
+                    pass
+        self._close_conn()
+
+    def close(self):
+        """Close the active response and reusable connection."""
+        self.cancel_current_request()
 
     @staticmethod
     def _build_messages(system, messages):
@@ -350,3 +507,15 @@ class OpenAIHttpClient:
             "tool_use_id": tool_use_id,
             "content": content if isinstance(content, str) else json.dumps(content, default=str),
         }
+
+
+class _CancelledResponse:
+    status = 200
+
+    @staticmethod
+    def readline():
+        return b""
+
+    @staticmethod
+    def close():
+        return None

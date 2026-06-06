@@ -315,17 +315,32 @@ class OpenAIBackend(AgentBackend):
 
     # ------------------------------------------------------------------ #
     def _client(self):
-        p = self._provider()
-        if p:
-            api_key = self.config.get("api_key") or os.environ.get(p["key_env"], "")
-            base_url = (self.config.get("api_base_url") or "").strip() or p["base_url"]
-        else:
-            api_key = self.config.get("custom_api_key") or ""
-            base_url = self.config.get("custom_base_url")
-        client = OpenAIHttpClient(api_key=api_key or None, base_url=base_url)
         with self._active_client_lock:
-            self._active_client = client
-        return client
+            if self._active_client is None:
+                p = self._provider()
+                if p:
+                    api_key = self.config.get("api_key") or os.environ.get(
+                        p["key_env"], ""
+                    )
+                    configured_url = (
+                        self.config.get("api_base_url") or ""
+                    ).strip()
+                    base_url = configured_url or p["base_url"]
+                else:
+                    api_key = self.config.get("custom_api_key") or ""
+                    base_url = self.config.get("custom_base_url")
+                self._active_client = OpenAIHttpClient(
+                    api_key=api_key or None,
+                    base_url=base_url,
+                )
+            return self._active_client
+
+    def close(self):
+        with self._active_client_lock:
+            client = self._active_client
+            self._active_client = None
+        if client is not None:
+            client.close()
 
     def _system_text(self):
         return self.config.get("system_prompt") or DEFAULT_SYSTEM_PROMPT

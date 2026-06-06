@@ -12,10 +12,8 @@ Reliability hardening
   race on the connection state.
 * The socket is created with a ``timeout`` matching the request timeout,
   so a half-closed SSE stream cannot hang ``readline()`` forever.
-* The drain-to-EOF branch was removed: it added no value for an interactive
-  chat and was the only path that could hang the worker on a peer reset.
-  After every response we just close the connection — the next call opens
-  a fresh one.
+* Fully consumed responses leave the connection reusable; cancellation and
+  transport errors close it so the next request reconnects cleanly.
 """
 
 import http.client
@@ -25,6 +23,8 @@ import threading
 import urllib.error
 import urllib.parse
 import urllib.request
+
+from ..core.dev_logging import log_event
 
 
 def _safe_urlopen(request, **kwargs):
@@ -61,6 +61,7 @@ class AnthropicHttpClient:
         self._conn_host = None
         # serialise access to the connection slot. Cheap uncontended.
         self._conn_lock = threading.Lock()
+        self._cancel_event = threading.Event()
 
     def _headers(self):
         headers = {
@@ -152,10 +153,12 @@ class AnthropicHttpClient:
 
     def cancel_current_request(self):
         """Best-effort cancellation of the active HTTP stream."""
+        self._cancel_event.set()
         self._close_conn()
 
     def stream_message(self, model, max_tokens, system, tools, messages,
                        on_text, should_stop, timeout=600):
+        self._cancel_event.clear()
         payload = json.dumps({
             "model": model,
             "max_tokens": max_tokens,
@@ -164,7 +167,14 @@ class AnthropicHttpClient:
             "messages": messages,
             "stream": True,
             "thinking": {"type": "disabled"},
+            "cache_control": {"type": "ephemeral"},
         }).encode("utf-8")
+        log_event(
+            "transport.request_serialized",
+            transport="anthropic",
+            bytes=len(payload),
+            model=model,
+        )
 
         headers = self._headers()
         headers["Content-Length"] = str(len(payload))
@@ -176,14 +186,23 @@ class AnthropicHttpClient:
         except (OSError, http.client.HTTPException, socket.timeout):  # noqa: F821
             # Stale connection; retry once with a fresh one
             self._close_conn()
+            if self._cancel_event.is_set():
+                return [], "stop"
             conn = self._ensure_conn(timeout)
             try:
                 conn.request("POST", "/v1/messages", body=payload, headers=headers)
                 response = conn.getresponse()
             except (OSError, http.client.HTTPException, socket.timeout):  # noqa: F821
                 self._close_conn()
+                if self._cancel_event.is_set():
+                    return [], "stop"
                 raise
 
+        log_event(
+            "transport.headers",
+            transport="anthropic",
+            status=response.status,
+        )
         if response.status >= 400:
             try:
                 body = response.read(600).decode("utf-8", "replace")
@@ -196,6 +215,9 @@ class AnthropicHttpClient:
         json_buffers = {}
         stop_reason = None
         premature_exit = False
+        stream_error = False
+        first_event_logged = False
+        first_text_logged = False
 
         try:
             while True:
@@ -205,7 +227,7 @@ class AnthropicHttpClient:
                 try:
                     raw = response.readline()
                 except (http.client.HTTPException, OSError, TimeoutError):
-                    # Network went away; treat as a normal end-of-stream.
+                    stream_error = True
                     break
                 if not raw:
                     break
@@ -219,6 +241,13 @@ class AnthropicHttpClient:
                     event = json.loads(data)
                 except json.JSONDecodeError:
                     continue
+                if not first_event_logged:
+                    log_event(
+                        "transport.first_stream_event",
+                        transport="anthropic",
+                    )
+                    first_event_logged = True
+                self._log_cache_usage(event)
                 etype = event.get("type")
 
                 if etype == "content_block_start":
@@ -232,6 +261,12 @@ class AnthropicHttpClient:
                     idx = event["index"]
                     delta = event.get("delta", {})
                     if delta.get("type") == "text_delta":
+                        if not first_text_logged:
+                            log_event(
+                                "transport.first_text",
+                                transport="anthropic",
+                            )
+                            first_text_logged = True
                         blocks[idx]["text"] = blocks[idx].get("text", "") + delta["text"]
                         try:
                             on_text(delta["text"])
@@ -258,10 +293,39 @@ class AnthropicHttpClient:
             # stop trying to drain the socket. The connect-then-close
             # cost is negligible at our call rate, and the drain branch was
             # the only path that could hang on a half-closed peer.
-            if premature_exit:
+            if premature_exit or stream_error:
                 self._close_conn()
 
+        if self._cancel_event.is_set():
+            stop_reason = "stop"
         return self._clean_blocks(blocks), stop_reason
+
+    @staticmethod
+    def _log_cache_usage(event):
+        usage = event.get("usage")
+        if not isinstance(usage, dict):
+            message = event.get("message")
+            usage = message.get("usage") if isinstance(message, dict) else None
+        if not isinstance(usage, dict):
+            return
+        cache_fields = {
+            key: usage.get(key)
+            for key in (
+                "cache_creation_input_tokens",
+                "cache_read_input_tokens",
+            )
+            if key in usage
+        }
+        if cache_fields:
+            log_event(
+                "transport.cache_usage",
+                transport="anthropic",
+                **cache_fields,
+            )
+
+    def close(self):
+        """Close the reusable connection; safe to call more than once."""
+        self._close_conn()
 
     @staticmethod
     def _clean_blocks(blocks):

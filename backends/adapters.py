@@ -55,6 +55,7 @@ class CliAdapter:
     auth_status_args: ClassVar[Sequence[str]] = ()
     login_args: ClassVar[Sequence[str]] = ()
     auth_detail_parser: ClassVar[Optional[Callable[[str, str], str]]] = None
+    supports_continuation: ClassVar[bool] = False
 
     def stdin_prompt(self, prompt: str) -> Optional[str]:
         """Return the prompt to write to stdin, or None to pass on command line.
@@ -69,6 +70,22 @@ class CliAdapter:
         self, *, binary: str, prompt: str, extra_args: list, runtime_dir: str,
     ) -> list:
         return [binary, "-p", prompt, *extra_args]
+
+    def build_continuation_command(
+        self,
+        *,
+        binary: str,
+        prompt: str,
+        extra_args: list,
+        runtime_dir: str,
+        session_id: str,
+    ) -> list:
+        return self.build_command(
+            binary=binary,
+            prompt=prompt,
+            extra_args=extra_args,
+            runtime_dir=runtime_dir,
+        )
 
     def parse_event(self, raw: dict) -> Optional[NormalizedEvent]:
         for key in ("text", "response", "content", "output", "result", "message"):
@@ -208,6 +225,7 @@ class ClaudeAdapter(CliAdapter):
     commands = ("claude",)
     credential_style = "Claude subscription or Anthropic credentials"
     warning = "Provider policy may treat third-party automation differently."
+    supports_continuation = True
 
     auth_status_args = ("auth", "status")
     login_args = ("auth", "login")
@@ -237,7 +255,18 @@ class ClaudeAdapter(CliAdapter):
             "--setting-sources", "local", "--settings", "{}",
             "--disable-slash-commands",
             "--plugin-dir", _empty_runtime_dir("claude-empty-plugins"),
-            "--no-session-persistence",
+        ]
+
+    def build_continuation_command(
+        self, *, binary, prompt, extra_args, runtime_dir, session_id,
+    ):
+        return [
+            binary, "-p", prompt, *extra_args,
+            "--resume", session_id,
+            "--output-format", "stream-json", "--verbose",
+            "--setting-sources", "local", "--settings", "{}",
+            "--disable-slash-commands",
+            "--plugin-dir", _empty_runtime_dir("claude-empty-plugins"),
         ]
 
     def parse_event(self, raw):
@@ -277,6 +306,7 @@ class CodexAdapter(CliAdapter):
     label = "Codex CLI"
     commands = ("codex",)
     credential_style = "OpenAI API key or ChatGPT account in Codex"
+    supports_continuation = True
 
     auth_status_args = ("login", "status")
     login_args = ("login",)
@@ -284,15 +314,29 @@ class CodexAdapter(CliAdapter):
     def build_command(self, *, binary, prompt, extra_args, runtime_dir):
         return [
             binary, "exec", *extra_args,
-            "--ignore-user-config", "--ignore-rules", "--ephemeral",
+            "--ignore-user-config", "--ignore-rules",
             "--skip-git-repo-check",
             "--disable", "apps", "--disable", "plugins",
             "--cd", _empty_runtime_dir("codex-empty-workspace"),
             "--json", prompt,
         ]
 
+    def build_continuation_command(
+        self, *, binary, prompt, extra_args, runtime_dir, session_id,
+    ):
+        return [
+            binary, "exec", "resume", *extra_args,
+            "--ignore-user-config", "--ignore-rules",
+            "--skip-git-repo-check",
+            "--disable", "apps", "--disable", "plugins",
+            "--json", session_id, prompt,
+        ]
+
     def parse_event(self, raw):
         etype = raw.get("type")
+        if etype == "thread.started":
+            session_id = raw.get("thread_id") or raw.get("session_id") or ""
+            return NormalizedEvent(session_id=session_id)
         if etype == "item.completed":
             item = raw.get("item") or {}
             it = item.get("type")

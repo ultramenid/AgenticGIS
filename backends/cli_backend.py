@@ -32,8 +32,10 @@ import signal
 import subprocess
 import tempfile
 import threading
+import time
 
 from ..core import tools as tools_mod
+from ..core.dev_logging import log_event
 from .adapters import (
     ClaudeAdapter,
     CodexAdapter,
@@ -182,6 +184,9 @@ CLI_AGENT_CATALOG = (
 )
 
 _AGENT_BY_ID = {agent["id"]: agent for agent in CLI_AGENT_CATALOG}
+_BINARY_RESOLUTION_CACHE = {}
+_BINARY_RESOLUTION_LOCK = threading.Lock()
+_BINARY_MISS_TTL_SECONDS = 5.0
 
 
 def agent_by_id(agent_id):
@@ -773,7 +778,15 @@ def _candidate_paths(tool, command, system=None):
     return list(_unique_paths(paths))
 
 
-def _resolve_binary(tool, explicit_path):
+def _binary_resolution_key(tool, explicit_path):
+    path = ""
+    if explicit_path:
+        expanded = _expand_candidate_path(explicit_path)
+        path = os.path.normcase(os.path.abspath(expanded))
+    return str(tool or ""), path
+
+
+def _resolve_binary_uncached(tool, explicit_path):
     if explicit_path and _is_usable_file(explicit_path):
         return explicit_path
     agent = agent_by_id(tool)
@@ -793,6 +806,25 @@ def _resolve_binary(tool, explicit_path):
                 if _is_usable_file(path) and _looks_like_agent_binary(path):
                     return path
     return None
+
+
+def _resolve_binary(tool, explicit_path):
+    key = _binary_resolution_key(tool, explicit_path)
+    now = time.monotonic()
+    with _BINARY_RESOLUTION_LOCK:
+        cached = _BINARY_RESOLUTION_CACHE.get(key)
+        if cached is not None:
+            path, cached_at = cached
+            if path:
+                if _is_usable_file(path):
+                    return path
+                _BINARY_RESOLUTION_CACHE.pop(key, None)
+            elif now - cached_at < _BINARY_MISS_TTL_SECONDS:
+                return None
+
+        path = _resolve_binary_uncached(tool, explicit_path)
+        _BINARY_RESOLUTION_CACHE[key] = (path, now)
+        return path
 
 
 def scan_cli_agents(path_overrides=None):
@@ -829,9 +861,10 @@ class NormalizingStream:
         "superpowers",
     )
 
-    def __init__(self, adapter, emit):
+    def __init__(self, adapter, emit, process_id=None):
         self.adapter = adapter
         self.emit = emit
+        self.process_id = process_id
         self.session_id = ""
         self.final_text = None
         self.pending_tool_call = None
@@ -839,6 +872,29 @@ class NormalizingStream:
         self.content_blocks = []
         self.finish_reason = None
         self._text_emitted = False
+        self._first_event_logged = False
+        self._first_text_logged = False
+
+    def _log_first_event(self, event_type):
+        if self._first_event_logged:
+            return
+        self._first_event_logged = True
+        log_event(
+            "cli.stream.first_event",
+            tool=self.adapter.id,
+            pid=self.process_id,
+            event_type=event_type,
+        )
+
+    def _log_first_text(self):
+        if self._first_text_logged:
+            return
+        self._first_text_logged = True
+        log_event(
+            "cli.stream.first_text",
+            tool=self.adapter.id,
+            pid=self.process_id,
+        )
 
     @classmethod
     def _is_startup_noise(cls, raw_bytes: bytes, raw_obj) -> bool:
@@ -856,6 +912,7 @@ class NormalizingStream:
         except (json.JSONDecodeError, UnicodeDecodeError):
             text = raw_bytes.decode("utf-8", "replace").strip()
             if text and not self._is_startup_noise(raw_bytes, {}):
+                self._log_first_event("text")
                 protocol = self.adapter.parse_protocol_text(text)
                 if protocol is not None:
                     for call in protocol.tool_calls:
@@ -873,6 +930,7 @@ class NormalizingStream:
                     if protocol.is_final:
                         self.final_text = protocol.text or self.final_text
                 else:
+                    self._log_first_text()
                     self.emit(AgentEvent(EventType.TEXT, {"text": text}))
                     self.final_text = text
             return
@@ -880,6 +938,7 @@ class NormalizingStream:
             return
         if self._is_startup_noise(raw_bytes, raw):
             return
+        self._log_first_event(raw.get("type") or "unknown")
         norm = self.adapter.parse_event(raw)
         if norm is None:
             sid = raw.get("session_id") or raw.get("sessionID") or ""
@@ -904,6 +963,7 @@ class NormalizingStream:
                 # Suppress duplicate final text when it was already
                 # streamed via deltas (e.g. Codex task_complete).
                 if not (norm.is_final and self._text_emitted):
+                    self._log_first_text()
                     self.emit(AgentEvent(EventType.TEXT, {"text": norm.text}))
                     self._text_emitted = True
         for call in norm.tool_calls:
@@ -974,6 +1034,18 @@ class CliToolBackend(AgentBackend):
     def import_session_state(self, state):
         with self._lock:
             self._session_id = (state or {}).get("session_id") or None
+
+    def _continuation_session_id(self, adapter):
+        if not adapter.supports_continuation:
+            return None
+        with self._lock:
+            return self._session_id
+
+    def _remember_session_id(self, adapter, session_id):
+        if not adapter.supports_continuation or not session_id:
+            return
+        with self._lock:
+            self._session_id = session_id
 
     def cancel_current_request(self):
         """Terminate the active CLI process group immediately."""
@@ -1138,6 +1210,19 @@ class CliToolBackend(AgentBackend):
             f"{json.dumps(messages, default=str)}"
         )
 
+    @staticmethod
+    def _continuation_prompt(messages):
+        if len(messages) == 1:
+            message = messages[0]
+            if message.get("role") == "user" and isinstance(
+                message.get("content"), str
+            ):
+                return message["content"]
+        return (
+            "New conversation messages since the previous CLI turn:\n"
+            f"{json.dumps(messages, default=str)}"
+        )
+
     def _build_command(self, prompt, _base_url=None):
         return get_adapter(self.tool).build_command(
             binary=self.binary,
@@ -1256,7 +1341,9 @@ class CliToolBackend(AgentBackend):
         from ..core import tools as tools_mod
 
         messages = list(history or [])
-        messages.append({"role": "user", "content": message})
+        user_message = {"role": "user", "content": message}
+        messages.append(user_message)
+        new_messages = [user_message]
         max_iters = self.config.get("max_iterations")
         adapter = get_adapter(self.tool)
 
@@ -1266,8 +1353,14 @@ class CliToolBackend(AgentBackend):
                 emit(AgentEvent(EventType.DONE))
                 return messages
 
-            prompt = self._conversation_prompt(messages)
+            if self._continuation_session_id(adapter):
+                prompt = self._continuation_prompt(new_messages)
+            else:
+                prompt = self._conversation_prompt(messages)
             stream = self._run_stream(adapter, prompt, emit, should_stop)
+            self._remember_session_id(
+                adapter, getattr(stream, "session_id", "")
+            )
 
             if stream.pending_tool_call is not None:
                 call = stream.pending_tool_call
@@ -1285,7 +1378,13 @@ class CliToolBackend(AgentBackend):
                     if should_stop() or is_cancelled:
                         emit(AgentEvent(EventType.DONE))
                         return messages
-                    messages.append({"role": "tool", "name": name, "content": payload})
+                    tool_message = {
+                        "role": "tool",
+                        "name": name,
+                        "content": payload,
+                    }
+                    messages.append(tool_message)
+                    new_messages = [tool_message]
                     continue
                 # Non-AgenticGIS tool (e.g. Codex command_execution surfaced
                 # for UI display only). End the turn with the assistant's text.
@@ -1351,16 +1450,14 @@ class CliToolBackend(AgentBackend):
         if poller_stopped:
             self._terminate_process_group(proc, kill=True)
 
-        # Persist the session id for the next turn's --resume.
-        if stream.session_id:
-            self._session_id = stream.session_id
+        # Persist the session id for the next turn's supported continuation.
+        self._remember_session_id(stream.adapter, stream.session_id)
 
         # If stdout was closed before we drained, pick up any leftover
         # partial line.
         if out_buf.strip():
             stream.feed_line(out_buf)
-            if stream.session_id:
-                self._session_id = stream.session_id
+            self._remember_session_id(stream.adapter, stream.session_id)
 
         if err_acc and not poller_stopped:
             try:
@@ -1375,12 +1472,20 @@ class CliToolBackend(AgentBackend):
     def _run_stream(self, adapter, prompt, emit, should_stop):
         """Build the CLI command, spawn the subprocess, run the
         select()-driven reader, and return the populated NormalizingStream."""
-        cmd = adapter.build_command(
-            binary=self.binary,
-            prompt=prompt,
-            extra_args=self.extra_args,
-            runtime_dir=self._runtime_cwd(),
-        )
+        session_id = self._continuation_session_id(adapter)
+        command_args = {
+            "binary": self.binary,
+            "prompt": prompt,
+            "extra_args": self.extra_args,
+            "runtime_dir": self._runtime_cwd(),
+        }
+        if session_id:
+            cmd = adapter.build_continuation_command(
+                session_id=session_id,
+                **command_args,
+            )
+        else:
+            cmd = adapter.build_command(**command_args)
         stdin_data = adapter.stdin_prompt(prompt)
         env = self._runtime_env()
         cwd = self._runtime_cwd()
@@ -1400,6 +1505,12 @@ class CliToolBackend(AgentBackend):
                     close_fds=True,
                     creationflags=_creation_flags(),
                 )
+            log_event(
+                "cli.process.spawn",
+                tool=self.tool,
+                pid=getattr(self._proc, "pid", None),
+                resumed=bool(session_id),
+            )
             if stdin_data is not None:
                 self._proc.stdin.write(stdin_data.encode("utf-8"))
                 self._proc.stdin.close()
@@ -1412,7 +1523,11 @@ class CliToolBackend(AgentBackend):
             stream = NormalizingStream(adapter, emit)
             return stream
         try:
-            stream = NormalizingStream(adapter, emit)
+            stream = NormalizingStream(
+                adapter,
+                emit,
+                process_id=getattr(self._proc, "pid", None),
+            )
             self._collect_into_stream(self._proc, stream, should_stop)
         finally:
             self._finalize_process(self._proc)

@@ -167,6 +167,7 @@ _CONTEXT_WINDOWS = {
     "claude": 200_000,
     "gpt-4o": 128_000,
     "gpt-4-turbo": 128_000,
+    "gpt-4.1": 1_047_576,
     "gpt-4": 8_192,
     "gpt-3.5": 16_385,
     "o1": 200_000,
@@ -177,6 +178,7 @@ _CONTEXT_WINDOWS = {
     "qwen": 128_000,
 }
 _DEFAULT_CONTEXT_WINDOW = 128_000
+_MAX_EFFECTIVE_CONTEXT_WINDOW = 100_000
 _COMPACTION_THRESHOLD = 0.90
 _COMPACTION_KEEP_TAIL = 6   # keep this many recent messages verbatim
 _COMPACTION_FIXED_OVERHEAD = 30_000  # reserved for system prompt + tool schemas
@@ -187,8 +189,8 @@ def context_window_for(model: str) -> int:
     m = (model or "").lower()
     for key, size in _CONTEXT_WINDOWS.items():
         if key in m:
-            return size
-    return _DEFAULT_CONTEXT_WINDOW
+            return min(size, _MAX_EFFECTIVE_CONTEXT_WINDOW)
+    return min(_DEFAULT_CONTEXT_WINDOW, _MAX_EFFECTIVE_CONTEXT_WINDOW)
 
 
 def estimate_message_tokens(messages) -> int:
