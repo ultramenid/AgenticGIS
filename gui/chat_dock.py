@@ -135,11 +135,9 @@ class ChatWorker(QThread):
                 self._coalesce_type = ev.type
                 self._coalesce_text += delta
                 now = time.monotonic()
-                is_coalesce_ready = (
-                    len(self._coalesce_text) >= _STREAM_COALESCE_MAX_CHARS
-                    or now - self._last_coalesce_flush >= _STREAM_COALESCE_INTERVAL_S
-                )
-                if is_coalesce_ready:
+                has_coalesce_max = len(self._coalesce_text) >= _STREAM_COALESCE_MAX_CHARS
+                is_coalesce_stale = now - self._last_coalesce_flush >= _STREAM_COALESCE_INTERVAL_S
+                if has_coalesce_max or is_coalesce_stale:
                     self._flush_coalesced_event(now)
                 return
 
