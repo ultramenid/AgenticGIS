@@ -82,7 +82,7 @@ class CliAdapter:
         """Parse the AgenticGIS tool_calls protocol embedded in text.
 
         The system prompt instructs the CLI to emit a single JSON object
-        of the form ``{"type":"tool_calls","calls":[{...}, ...]}`` when
+        of the form ``{"type":"tool_calls","calls":[...]}`` when
         it needs to call one or more AgenticGIS tools, and to use plain
         text/markdown for final answers. When the LLM follows the
         protocol, the JSON often appears inside the assistant's text
@@ -99,6 +99,22 @@ class CliAdapter:
         if not text:
             return None
         stripped = text.strip()
+
+        # Strip markdown code-block wrappers (```json ... ``` or ``` ... ```).
+        # Handles both pure code blocks and text that contains a code block.
+        if "```" in stripped:
+            lines = stripped.splitlines()
+            inside_block = False
+            block_lines = []
+            for line in lines:
+                if line.strip().startswith("```"):
+                    inside_block = not inside_block
+                    continue
+                if inside_block:
+                    block_lines.append(line)
+            if block_lines:
+                stripped = "\n".join(block_lines).strip()
+
         if not stripped.startswith("{"):
             return None
         try:
@@ -235,6 +251,10 @@ class ClaudeAdapter(CliAdapter):
                 if isinstance(b, dict) and b.get("type") == "text"
             ]
             return NormalizedEvent(text="".join(parts), session_id=sid)
+        if etype == "content_block_delta":
+            delta = raw.get("delta") or {}
+            text = delta.get("text") or delta.get("text_delta", "") if isinstance(delta, dict) else str(delta)
+            return NormalizedEvent(text=str(text))
         if etype == "user":
             for b in (raw.get("message", {}).get("content") or []):
                 if isinstance(b, dict) and b.get("type") == "tool_result":
@@ -289,6 +309,12 @@ class CodexAdapter(CliAdapter):
                     "is_error": bool(item.get("exit_code", 0)),
                 }])
             return None
+        if etype == "task_complete":
+            msg = raw.get("last_agent_message") or raw.get("message") or ""
+            return NormalizedEvent(text=str(msg), is_final=True)
+        if etype == "agent_message_content_delta":
+            delta = raw.get("delta") or ""
+            return NormalizedEvent(text=str(delta))
         if etype in ("turn.failed", "error"):
             msg = raw.get("message") or raw.get("error") or raw.get("detail") or ""
             if isinstance(msg, dict):

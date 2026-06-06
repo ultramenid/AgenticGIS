@@ -835,6 +835,10 @@ class NormalizingStream:
         self.session_id = ""
         self.final_text = None
         self.pending_tool_call = None
+        self.had_error = False
+        self.content_blocks = []
+        self.finish_reason = None
+        self._text_emitted = False
 
     @classmethod
     def _is_startup_noise(cls, raw_bytes: bytes, raw_obj) -> bool:
@@ -885,6 +889,7 @@ class NormalizingStream:
         if norm.session_id:
             self.session_id = norm.session_id
         if norm.is_error:
+            self.had_error = True
             err_text = norm.text[:2000] if norm.text else ""
             self.emit(AgentEvent(EventType.ERROR, {"error": err_text}))
             return
@@ -896,7 +901,11 @@ class NormalizingStream:
             if protocol_event is not None:
                 norm = protocol_event
             else:
-                self.emit(AgentEvent(EventType.TEXT, {"text": norm.text}))
+                # Suppress duplicate final text when it was already
+                # streamed via deltas (e.g. Codex task_complete).
+                if not (norm.is_final and self._text_emitted):
+                    self.emit(AgentEvent(EventType.TEXT, {"text": norm.text}))
+                    self._text_emitted = True
         for call in norm.tool_calls:
             if self.pending_tool_call is None:
                 self.pending_tool_call = call
@@ -1282,6 +1291,12 @@ class CliToolBackend(AgentBackend):
                 # for UI display only). End the turn with the assistant's text.
             if stream.final_text is not None:
                 messages.append({"role": "assistant", "content": stream.final_text})
+            elif not stream.had_error:
+                # No text returned and no tool call — show a visible fallback
+                # so the user knows the CLI completed rather than hung.
+                fallback = "The CLI agent completed without returning a response."
+                emit(AgentEvent(EventType.TEXT, {"text": fallback}))
+                messages.append({"role": "assistant", "content": fallback})
             emit(AgentEvent(EventType.DONE))
             return messages
 

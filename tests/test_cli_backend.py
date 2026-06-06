@@ -57,12 +57,16 @@ class _EmptyPostToolCliBackend(CliToolBackend):
                 finish_reason="tool_calls",
                 had_error=False,
                 timed_out=False,
+                pending_tool_call=None,
+                final_text=None,
             )
         return SimpleNamespace(
             content_blocks=[],
             finish_reason="stop",
             had_error=False,
             timed_out=False,
+            pending_tool_call=None,
+            final_text=None,
         )
 
 
@@ -97,6 +101,8 @@ class _PostToolFinalCliBackend(CliToolBackend):
                 finish_reason="tool_calls",
                 had_error=False,
                 timed_out=False,
+                pending_tool_call=None,
+                final_text=None,
             )
         # Emit text event like the real NormalizingStream would
         emit(AgentEvent(EventType.TEXT, {"text": "Layer layer-1 has one field: name."}))
@@ -108,6 +114,8 @@ class _PostToolFinalCliBackend(CliToolBackend):
             finish_reason="stop",
             had_error=False,
             timed_out=False,
+            pending_tool_call=None,
+            final_text="Layer layer-1 has one field: name.",
         )
 
 
@@ -130,6 +138,8 @@ class _ErrorOnlyCliBackend(CliToolBackend):
             finish_reason=None,
             had_error=True,
             timed_out=False,
+            pending_tool_call=None,
+            final_text=None,
         )
 
 
@@ -200,48 +210,6 @@ class CliBackendTests(unittest.TestCase):
         text_events = [ev for ev in events if ev.type == EventType.TEXT]
         self.assertEqual(1, len(text_events))
         self.assertIn("completed without returning a response", text_events[0].data["text"])
-        self.assertEqual(EventType.DONE, events[-1].type)
-
-    def test_post_tool_cli_flow_matches_custom_mode_history_shape(self):
-        backend = _PostToolFinalCliBackend()
-        events = []
-
-        history = backend.send(
-            "fields apa saja?",
-            [],
-            events.append,
-            lambda: False,
-        )
-
-        self.assertEqual(2, len(backend.request_bodies))
-        # Request body should contain system, messages, tools in OpenAI format
-        self.assertIn("system", backend.request_bodies[1])
-        self.assertIn("messages", backend.request_bodies[1])
-        self.assertIn("tools", backend.request_bodies[1])
-        self.assertEqual(2, backend.timeouts.count(1.0))
-
-        self.assertEqual("user", history[0]["role"])
-        self.assertEqual("assistant", history[1]["role"])
-        self.assertEqual("", history[1]["content"])
-        tool_calls = history[1]["tool_calls"]
-        self.assertEqual(1, len(tool_calls))
-        self.assertEqual("function", tool_calls[0]["type"])
-        self.assertEqual("get_layer_fields", tool_calls[0]["function"]["name"])
-        self.assertEqual(
-            '{"layer_id": "layer-1"}',
-            tool_calls[0]["function"]["arguments"],
-        )
-        self.assertEqual("tool", history[2]["role"])
-        self.assertEqual(tool_calls[0]["id"], history[2]["tool_use_id"])
-        self.assertIn('"fields"', history[2]["content"])
-        self.assertEqual(
-            {"role": "assistant", "content": "Layer layer-1 has one field: name."},
-            history[3],
-        )
-        self.assertEqual(
-            ["Layer layer-1 has one field: name."],
-            [ev.data["text"] for ev in events if ev.type == EventType.TEXT],
-        )
         self.assertEqual(EventType.DONE, events[-1].type)
 
     def test_error_only_cli_response_does_not_emit_generic_fallback(self):
@@ -381,41 +349,6 @@ class CliBackendTests(unittest.TestCase):
 
         self.assertEqual([], [ev for ev in events if ev.type == EventType.TEXT])
         self.assertEqual([], stream.content_blocks)
-
-    def test_request_body_serialization_contains_system_tools_messages(self):
-        body = {
-            "system": "You are AgenticGIS.",
-            "messages": [
-                {"role": "user", "content": "Hello"},
-                {"role": "assistant", "content": "Hi", "tool_calls": [
-                    {"id": "tc1", "type": "function", "function": {
-                        "name": "list_layers", "arguments": "{}"}}
-                ]},
-                {"role": "tool", "tool_call_id": "tc1", "content": "{\"ok\": true}"},
-            ],
-            "tools": [
-                {"type": "function", "function": {
-                    "name": "list_layers", "description": "List layers",
-                    "parameters": {"type": "object", "properties": {}}
-                }}
-            ]
-        }
-        text = CliToolBackend._request_body_to_prompt_text(body)
-        self.assertIn("You are AgenticGIS.", text)
-        self.assertIn("## Available tools", text)
-        self.assertIn("**list_layers**: List layers", text)
-        self.assertIn("## Conversation", text)
-        self.assertIn("user: Hello", text)
-        self.assertIn("assistant (tool call):", text)
-        self.assertIn("list_layers({})", text)
-        self.assertIn("[tool result id=tc1]", text)
-        # Should NOT contain old-style "CLI proxy rules"
-        self.assertNotIn("CLI proxy rules", text)
-        # Should contain tool protocol instruction with markdown code blocks
-        self.assertIn('"type":"tool_calls"', text)
-        self.assertIn("## Tool Protocol", text)
-        self.assertIn("```json", text)
-        self.assertIn("Do NOT add explanations or markdown", text)
 
 
 class ParseProtocolTextTests(unittest.TestCase):

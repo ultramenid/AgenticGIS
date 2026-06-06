@@ -1,2 +1,3 @@
-# Exclude internal docs from release archives (git archive, GitHub ZIPs)
+# Exclude internal docs and tests from release archives (git archive, GitHub ZIPs)
 QGIS_COMPATIBILITY_RULES.md export-ignore
+tests/ export-ignore
