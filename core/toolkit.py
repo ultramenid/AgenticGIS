@@ -2222,6 +2222,166 @@ class QgisToolkit:
             "feature_count": len(ee_features),
         }
 
+    # ------------------------------------------------------------------ #
+    # Background task for GEE layer loading (prevents UI freeze)         #
+    # ------------------------------------------------------------------ #
+    class _GeeAddLayerTask(QgsTask):
+        """QgsTask that runs heavy GEE work off the main thread.
+
+        The task handles: exec(user code), getDownloadId, and file download.
+        Qt-GIS layer creation is left for the main thread after the task
+        finishes.  Progress is reported via ``setProgress`` so QGIS Task
+        Manager shows a progress bar automatically.
+        """
+
+        def __init__(self, description, code, vis_params, name, region,
+                     features, export_format, export_scale):
+            super().__init__(description, QgsTask.CanCancel)
+            self.code = code
+            self.vis_params = vis_params
+            self.name = name
+            self.region = region
+            self.features = features
+            self.export_format = export_format
+            self.export_scale = export_scale
+
+            self.result_data = None          # success payload for caller
+            self.error_msg = None            # failure message for caller
+            self.download_path = None        # temp file path (geotiff mode)
+            self.final_scale = export_scale  # may change on retry
+
+        def run(self):
+            try:
+                import ee  # noqa: F401 (used inside exec)
+                from ee_plugin import Map as EEMap  # noqa: F401
+            except Exception as exc:
+                self.error_msg = f"EE import failed: {exc}"
+                return False
+
+            # 1. Execute user code
+            self.setProgress(10)
+            ns = {
+                "ee": ee,
+                "Map": EEMap,
+                "region": self.region,
+                "features": self.features,
+                "result": None,
+            }
+            try:
+                exec(compile(self.code, "<gee_add_layer>", "exec"), ns)  # nosec B102
+            except Exception as exc:
+                self.error_msg = f"Earth Engine code error: {type(exc).__name__}: {exc}"
+                return False
+
+            obj = ns.get("result")
+            if obj is None:
+                self.error_msg = "Earth Engine code must assign the ee object to `result`."
+                return False
+
+            self.setProgress(30)
+
+            # For map mode we only need the EE object; main thread calls Map.addLayer.
+            if self.export_format != "geotiff":
+                self.result_data = {
+                    "mode": "map",
+                    "obj": obj,
+                    "vis_params": self.vis_params,
+                    "name": self.name,
+                }
+                self.setProgress(90)
+                return True
+
+            # --- geotiff mode ------------------------------------------------
+            import json as _json
+            import tempfile
+
+            try:
+                download_region = None
+                if self.region is not None:
+                    bounds = self.region.bounds(maxError=1).getInfo()["coordinates"][0]
+                    coords = [[pt[0], pt[1]] for pt in bounds]
+                    download_region = _json.dumps(coords)
+            except Exception as exc:
+                self.error_msg = f"Region conversion failed: {exc}"
+                return False
+
+            self.setProgress(40)
+
+            # Retry loop for size-limited exports
+            _scale = self.export_scale
+            for attempt in range(3):
+                if self.isCanceled():
+                    self.error_msg = "Cancelled by user"
+                    return False
+
+                download_params = {
+                    "image": obj,
+                    "scale": _scale,
+                    "crs": "EPSG:3857",
+                    "format": "GEO_TIFF",
+                }
+                if download_region:
+                    download_params["region"] = download_region
+
+                try:
+                    download_id = ee.data.getDownloadId(download_params)
+                    break
+                except Exception as _exc:
+                    msg = str(_exc)
+                    if "request size" in msg or "must be less than or equal" in msg:
+                        if attempt < 2:
+                            _scale = int(_scale * 2)
+                            continue
+                    self.error_msg = f"getDownloadId failed: {msg}"
+                    return False
+            else:
+                self.error_msg = "getDownloadId exhausted retries"
+                return False
+
+            self.final_scale = _scale
+            self.setProgress(50)
+
+            # Download via QNetworkAccessManager (thread-safe)
+            url = ee.data.makeDownloadUrl(download_id)
+            tmp = tempfile.NamedTemporaryFile(suffix=".tif", prefix="gee_", delete=False)
+            self.download_path = tmp.name
+            tmp.close()
+
+            from qgis.PyQt.QtCore import QEventLoop, QUrl
+            from qgis.PyQt.QtNetwork import QNetworkRequest
+            from qgis.core import QgsNetworkAccessManager
+
+            nam = QgsNetworkAccessManager.instance()
+            req = QNetworkRequest(QUrl(url))
+            reply = nam.get(req)
+
+            loop = QEventLoop()
+            reply.finished.connect(loop.quit)
+
+            deadline = time.time() + 120.0  # 2 min per tile
+            while not reply.isFinished() and time.time() < deadline:
+                if self.isCanceled():
+                    reply.abort()
+                    break
+                loop.processEvents()
+                # crude progress: jump from 50 → 90 over the timeout window
+                pct = 50 + min(40, int((120 - (deadline - time.time())) / 120 * 40))
+                self.setProgress(pct)
+                time.sleep(0.05)
+
+            if reply.error() != reply.NoError:
+                self.error_msg = f"Download failed: {reply.errorString()}"
+                reply.deleteLater()
+                return False
+
+            # Write data to temp file
+            with open(self.download_path, "wb") as fh:
+                fh.write(reply.readAll().data())
+            reply.deleteLater()
+
+            self.setProgress(95)
+            return True
+
     def gee_add_layer(
         self,
         code,
@@ -2253,6 +2413,7 @@ class QgisToolkit:
         zoom). ``"geotiff"`` downloads as GeoTIFF and loads as a local raster
         layer (instant zoom/pan, but requires download wait upfront).
         """
+        # Validate EE is available before launching background task.
         try:
             import ee
         except Exception as exc:  # noqa: BLE001
@@ -2273,7 +2434,9 @@ class QgisToolkit:
         try:
             ee.Initialize()
         except Exception:  # nosec B110
-            pass  # may already be initialized; a real failure surfaces below
+            pass
+
+        # Build region / features on the main thread (quick, uses QGIS geometry).
         region, features, region_layer, mode_used = (None, None, None, None)
         if region_layer_id:
             try:
@@ -2290,37 +2453,53 @@ class QgisToolkit:
             features = info.get("features")
             region_layer = info.get("zoom_layer")
             mode_used = info.get("mode_used")
-        ns = {
-            "ee": ee,
-            "Map": EEMap,
-            "iface": self.iface,
-            "region": region,
-            "features": features,
-            "result": None,
-        }
-        try:
-            # Intentional user-code execution (Earth Engine expression).
-            # The tool description warns users that arbitrary code runs here.
-            exec(compile(code, "<gee_add_layer>", "exec"), ns)  # nosec B102
-        except Exception as exc:  # noqa: BLE001
-            return {
-                "ok": False,
-                "error": f"Earth Engine code error: {type(exc).__name__}: {exc}",
-            }
-        obj = ns.get("result")
-        if obj is None:
-            return {
-                "ok": False,
-                "error": "Earth Engine code must assign the ee object to `result`.",
-            }
 
+        # ------------------------------------------------------------------
+        # Launch background task for heavy work (exec code + download).
+        # ------------------------------------------------------------------
+        task = self._GeeAddLayerTask(
+            f"GEE: {name}",
+            code,
+            vis_params,
+            name,
+            region,
+            features,
+            export_format,
+            export_scale,
+        )
+        QgsApplication.taskManager().addTask(task)
+
+        # Wait for task completion while keeping UI responsive.
+        from qgis.PyQt.QtCore import QEventLoop
+        loop = QEventLoop()
+        task.taskCompleted.connect(loop.quit)
+        task.taskTerminated.connect(loop.quit)
+
+        start = time.time()
+        while not task.isFinished() and time.time() - start < 180:  # 3 min timeout
+            loop.processEvents()
+            time.sleep(0.05)
+
+        if not task.isFinished():
+            task.cancel()
+            return {"ok": False, "error": "GEE task timed out after 3 minutes"}
+
+        if task.error_msg:
+            return {"ok": False, "error": task.error_msg}
+
+        # ------------------------------------------------------------------
+        # Back on main thread: create layer and add to project.
+        # ------------------------------------------------------------------
         if export_format == "geotiff":
-            return self._add_ee_as_geotiff(
-                ee, obj, name, region, export_scale, region_layer, zoom
-            )
+            return self._finish_ee_geotiff(task, name, region_layer, zoom)
 
+        # Map mode
         try:
-            EEMap.addLayer(obj, vis_params or {}, name)
+            EEMap.addLayer(
+                task.result_data["obj"],
+                task.result_data["vis_params"] or {},
+                task.result_data["name"],
+            )
         except Exception as exc:  # noqa: BLE001
             return {
                 "ok": False,
@@ -2341,6 +2520,41 @@ class QgisToolkit:
             "layer_id": layer_id,
             "zoomed": zoomed,
             "geometry_mode": mode_used,
+        }
+
+    def _finish_ee_geotiff(self, task, name, region_layer, zoom):
+        """Main-thread finalisation after the background task downloaded the GeoTIFF."""
+        tmp_path = task.download_path
+        if not tmp_path or not os.path.exists(tmp_path):
+            return {"ok": False, "error": "GeoTIFF download completed but temp file is missing"}
+
+        layer = QgsRasterLayer(tmp_path, name, "gdal")
+        if not layer or not layer.isValid():
+            try:
+                os.unlink(tmp_path)
+            except Exception:  # nosec B110
+                pass
+            return {
+                "ok": False,
+                "error": f"Failed to load GeoTIFF as raster layer: {tmp_path}",
+            }
+
+        QgsProject.instance().addMapLayer(layer)
+        layer.setCustomProperty("gee_tiff_source", tmp_path)
+        self._gee_tiff_sources[layer.id()] = tmp_path
+        self._sync_gee_manifest(list(self._gee_tiff_sources.values()))
+        self._ensure_gee_tiff_cleanup_connection()
+        self._canvas_dirty = True
+        layer_id = layer.id()
+        zoomed = False
+        if zoom and region_layer is not None:
+            zoomed = self._zoom_to_layer(region_layer)
+        return {
+            "ok": True,
+            "name": name,
+            "layer_id": layer_id,
+            "zoomed": zoomed,
+            "final_scale": task.final_scale,
         }
 
     def _add_ee_as_geotiff(self, ee, obj, name, region, scale, region_layer, zoom):
