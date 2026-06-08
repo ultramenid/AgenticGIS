@@ -14,7 +14,7 @@ from qgis.PyQt.QtWidgets import (
     QSizePolicy, QVBoxLayout, QWidget,
 )
 
-from .message_bubble import _md_to_html, _show_code_context_menu
+from .message_bubble import _md_inline, _md_to_html, _show_code_context_menu
 
 from .theme import (
     DOCK_SURFACE as _SURFACE,
@@ -360,6 +360,12 @@ class AgentTurnBubble(QFrame):
         self._progress_text = ""
         self._progress_phase = 0
         self._user_decision_lbl = None
+        self._last_stream_text = ""
+        self._last_stream_html = ""
+        self._geo_timer = QTimer(self)
+        self._geo_timer.setInterval(150)
+        self._geo_timer.setSingleShot(True)
+        self._geo_timer.timeout.connect(self._refresh_text_geometry)
 
         self.setFrameShape(QFrame.Shape.NoFrame)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
@@ -465,10 +471,26 @@ class AgentTurnBubble(QFrame):
         if self._ticker.isVisible():
             self._ticker.hide_ticker()
         self._stream_text = text
-        self._stream_html = _md_to_html(text) if text else ""
         cursor = f'<span style="color:{_TEXT_3};font-weight:300;">|</span>'
-        self.text_lbl.setText(self._stream_html + cursor)
-        self._refresh_text_geometry()
+
+        if len(self._last_stream_text) > len(text):
+            self._last_stream_text = ""
+            self._last_stream_html = ""
+            delta = text
+        else:
+            delta = text[len(self._last_stream_text):]
+        self._last_stream_text = text
+
+        if not delta:
+            self.text_lbl.setText(self._last_stream_html + cursor)
+        else:
+            html_delta = _md_inline(delta)
+            self._last_stream_html += html_delta
+            self._stream_html = self._last_stream_html
+            self.text_lbl.setText(self._last_stream_html + cursor)
+
+        if not self._geo_timer.isActive():
+            self._geo_timer.start()
 
     def set_progress_text(self, text: str) -> None:
         clean = (text or "").strip()
@@ -489,6 +511,8 @@ class AgentTurnBubble(QFrame):
         self._ticker.hide_ticker()
         self._stream_text = text
         self._stream_html = _md_to_html(text) if text else ""
+        self._last_stream_text = ""
+        self._last_stream_html = ""
         self.text_lbl.setText(self._stream_html)
         self._refresh_text_geometry()
         self.setStyleSheet(f"""
@@ -504,6 +528,8 @@ class AgentTurnBubble(QFrame):
         """Stop all spinners; mark any still-running tools as timed out."""
         self._stop_progress()
         self._ticker.hide_ticker()
+        self._last_stream_text = ""
+        self._last_stream_html = ""
         self.text_lbl.setText(self._stream_html)
         self._refresh_text_geometry()
         for group in self._groups.values():
@@ -524,6 +550,8 @@ class AgentTurnBubble(QFrame):
         self._stop_progress()
         self._stream_text = ""
         self._stream_html = ""
+        self._last_stream_text = ""
+        self._last_stream_html = ""
         self.text_lbl.setText("")
         self.text_lbl.setMinimumHeight(0)
         self.updateGeometry()

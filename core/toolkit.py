@@ -1247,8 +1247,13 @@ class QgisToolkit:
         try:
             with redirect_stdout(out), redirect_stderr(err):
                 old_trace = sys.gettrace()
+                _instruction_count = 0
 
                 def _cancel_trace(frame, event_name, arg):
+                    nonlocal _instruction_count
+                    _instruction_count += 1
+                    if _instruction_count % 1000 == 0:
+                        QCoreApplication.processEvents()
                     if _cancel_check():
                         raise KeyboardInterrupt
                     return _cancel_trace
@@ -1302,14 +1307,35 @@ class QgisToolkit:
             return network_cache_state()
         return set_network_cache_size(size_mb)
 
+    class _WarmCacheTask(QgsTask):
+        """QgsTask that runs tile preloading off the main thread."""
+
+        def __init__(self, description, layer_id, zoom_levels, max_tiles):
+            super().__init__(description, QgsTask.CanCancel)
+            self.layer_id = layer_id
+            self.zoom_levels = zoom_levels
+            self.max_tiles = max_tiles
+            self.result = None
+
+        def run(self):
+            from .tile_preloader import warm_cache_for_layer
+            self.result = warm_cache_for_layer(
+                self.layer_id,
+                zoom_levels=self.zoom_levels,
+                max_tiles=self.max_tiles,
+            )
+            return True
+
     def warm_cache(self, layer_id, zoom_levels=None, max_tiles=500, **_):
         """Pre-fetch tiles for a loaded layer and store them in the NAM disk cache."""
-        from .tile_preloader import warm_cache_for_layer
-        return warm_cache_for_layer(
+        task = self._WarmCacheTask(
+            f"Warm cache: {layer_id}",
             layer_id,
-            zoom_levels=zoom_levels,
-            max_tiles=max_tiles,
+            zoom_levels,
+            max_tiles,
         )
+        QgsApplication.taskManager().addTask(task)
+        return {"ok": True, "message": "Tile preloading started in background"}
 
     def get_project_state(self, **_):
         project = QgsProject.instance()
@@ -2194,7 +2220,7 @@ class QgisToolkit:
         geoms = []
         total_v = 0
         fields = layer.fields()
-        for feat in layer.getFeatures():
+        for i, feat in enumerate(layer.getFeatures()):
             geom = feat.geometry()
             if geom is None or geom.isEmpty():
                 continue
@@ -2214,6 +2240,8 @@ class QgisToolkit:
                     "max_vertices": max_vertices,
                     "feature_count": feat_count,
                 }
+            if i % 50 == 0:
+                QCoreApplication.processEvents()
 
         if not geoms:
             return _bbox_result()
@@ -2593,124 +2621,6 @@ class QgisToolkit:
             "final_scale": task.final_scale,
         }
 
-    def _add_ee_as_geotiff(self, ee, obj, name, region, scale, region_layer, zoom):
-        """Download an EE image as GeoTIFF and load as a local raster layer."""
-        import json as _json
-
-        try:
-            from qgis.core import QgsMessageLog
-
-            def _log(msg):
-                QgsMessageLog.logMessage(msg, "AgenticGIS", level=0)
-        except Exception:
-            def _log(msg):
-                print(f"[AgenticGIS] {msg}")
-
-        _scale = scale
-
-        try:
-            download_region = None
-            if region is not None:
-                bounds = region.bounds(maxError=1).getInfo()["coordinates"][0]
-                coords = [[pt[0], pt[1]] for pt in bounds]
-                download_region = _json.dumps(coords)
-            _max_retries = 3
-            for attempt in range(_max_retries):
-                download_params = {
-                    "image": obj,
-                    "scale": _scale,
-                    "crs": "EPSG:3857",
-                    "format": "GEO_TIFF",
-                }
-                if download_region:
-                    download_params["region"] = download_region
-                try:
-                    download_id = ee.data.getDownloadId(download_params)
-                    break
-                except Exception as _exc:
-                    msg = str(_exc)
-                    if "request size" in msg or "must be less than or equal" in msg:
-                        if attempt < _max_retries - 1:
-                            _scale = int(_scale * 2)
-                            _log(
-                                f"Request too large ({_scale // 2}m → {_scale}m), "
-                                f"retrying…"
-                            )
-                            continue
-                        raise
-                    raise
-            url = ee.data.makeDownloadUrl(download_id)
-            tmp = tempfile.NamedTemporaryFile(
-                suffix=".tif", prefix="gee_", delete=False
-            )
-            tmp_path = tmp.name
-            tmp.close()
-            try:
-                _safe_download(url, tmp_path)
-            except Exception as exc:
-                try:
-                    os.unlink(tmp_path)
-                except Exception:  # nosec B110
-                    pass
-                _log(f"GeoTIFF download failed: {type(exc).__name__}: {exc}")
-                msg = f"GeoTIFF download failed: {type(exc).__name__}: {exc}"
-                if "400" in str(exc):
-                    msg += (
-                        ". Server rejected the export — the area may be too large "
-                        "even at reduced resolution. Try a smaller region or "
-                        "export_format='map'."
-                    )
-                elif "403" in str(exc) or "401" in str(exc):
-                    msg += (
-                        ". Authentication/authorization error — check GEE "
-                        "authentication."
-                    )
-                return {
-                    "ok": False,
-                    "error": msg,
-                    "final_scale": _scale,
-                }
-            layer = QgsRasterLayer(tmp_path, name, "gdal")
-            if not layer or not layer.isValid():
-                try:
-                    os.unlink(tmp_path)
-                except Exception:  # nosec B110
-                    pass
-                _log(f"GeoTIFF raster invalid: {tmp_path}")
-                return {
-                    "ok": False,
-                    "error": f"Failed to load GeoTIFF as raster layer: {tmp_path}",
-                }
-            _log(f"Download OK → {tmp_path}, loading as raster layer '{name}'")
-            QgsProject.instance().addMapLayer(layer)
-            layer.setCustomProperty("gee_tiff_source", tmp_path)
-            self._gee_tiff_sources[layer.id()] = tmp_path
-            self._sync_gee_manifest(list(self._gee_tiff_sources.values()))
-            self._ensure_gee_tiff_cleanup_connection()
-            self._canvas_dirty = True
-            layer_id = layer.id()
-            zoomed = False
-            if zoom and region_layer is not None:
-                zoomed = self._zoom_to_layer(region_layer)
-            return {
-                "ok": True,
-                "name": name,
-                "layer_id": layer_id,
-                "zoomed": zoomed,
-                "export_format": "geotiff",
-                "source": tmp_path,
-            }
-        except Exception as exc:  # noqa: BLE001
-            _log(f"GeoTIFF export error: {type(exc).__name__}: {exc}")
-            return {
-                "ok": False,
-                "error": (
-                    f"GeoTIFF export failed: {type(exc).__name__}: {exc}. "
-                    "Try export_format='map' instead."
-                ),
-                "final_scale": _scale,
-            }
-
     # ------------------------------------------------------------------ #
     # GeoTIFF temp-file cleanup                                           #
     # ------------------------------------------------------------------ #
@@ -2901,6 +2811,108 @@ class QgisToolkit:
         ok = QgsProject.instance().write()
         return {"ok": bool(ok), "path": QgsProject.instance().fileName() or None}
 
+    class _WebFetchTask(QgsTask):
+        """QgsTask that runs HTTP GET off the main thread."""
+
+        def __init__(self, description, url, max_length, verify_ssl):
+            super().__init__(description, QgsTask.CanCancel)
+            self.url = url
+            self.max_length = max_length
+            self.verify_ssl = verify_ssl
+            self.result = None
+            self.error = None
+
+        def run(self):
+            import urllib.request
+            import json as _json
+            import ssl
+
+            start = time.perf_counter()
+            req = urllib.request.Request(self.url, method="GET")
+            ssl_context = ssl._create_unverified_context() if not self.verify_ssl else None  # nosec B413,B323
+            try:
+                with _safe_urlopen(req, timeout=30, context=ssl_context) as resp:  # nosec B310
+                    status = resp.getcode()
+                    headers = dict(resp.headers)
+                    content_type = headers.get("Content-Type", "")
+                    body = resp.read(self.max_length + 1)
+                    truncated = len(body) > self.max_length
+                    if truncated:
+                        body = body[:self.max_length]
+                    try:
+                        text = body.decode("utf-8")
+                    except UnicodeDecodeError:
+                        try:
+                            text = body.decode("latin-1")
+                        except UnicodeDecodeError:
+                            text = body.decode("utf-8", errors="replace")
+                    result = {
+                        "ok": True,
+                        "status": status,
+                        "url": self.url,
+                        "content_type": content_type,
+                        "length": len(body),
+                        "truncated": truncated,
+                        "body": text,
+                    }
+                    if "json" in content_type.lower():
+                        try:
+                            result["json"] = _json.loads(text)
+                        except ValueError:
+                            pass
+                    log_event(
+                        "toolkit.web_fetch.end",
+                        url=self.url[:200],
+                        status=status,
+                        elapsed_ms=int((time.perf_counter() - start) * 1000),
+                        truncated=truncated,
+                    )
+                    self.result = result
+                    return True
+            except urllib.error.HTTPError as exc:
+                log_event(
+                    "toolkit.web_fetch.error",
+                    url=self.url[:200],
+                    status=exc.code,
+                    elapsed_ms=int((time.perf_counter() - start) * 1000),
+                    error=exc.reason,
+                )
+                self.error = {
+                    "ok": False,
+                    "error": f"HTTP {exc.code}: {exc.reason}",
+                    "status": exc.code,
+                }
+                return False
+            except urllib.error.URLError as exc:
+                reason = str(exc.reason)
+                hint = ""
+                if self.verify_ssl and ("SSL" in reason or "CERTIFICATE" in reason or "VERIFY" in reason):
+                    hint = " (Hint: set verify_ssl=false if the server has an incomplete certificate chain.)"
+                log_event(
+                    "toolkit.web_fetch.error",
+                    url=self.url[:200],
+                    elapsed_ms=int((time.perf_counter() - start) * 1000),
+                    error=reason,
+                )
+                self.error = {
+                    "ok": False,
+                    "error": f"URL error: {reason}{hint}",
+                }
+                return False
+            except Exception as exc:  # noqa: BLE001
+                log_event(
+                    "toolkit.web_fetch.error",
+                    url=self.url[:200],
+                    elapsed_ms=int((time.perf_counter() - start) * 1000),
+                    error_type=type(exc).__name__,
+                    error=str(exc),
+                )
+                self.error = {
+                    "ok": False,
+                    "error": f"{type(exc).__name__}: {exc}",
+                }
+                return False
+
     def web_fetch(self, url, max_length=500000, verify_ssl=True):
         """Fetch a public URL via HTTP GET using the stdlib (urllib).
 
@@ -2921,82 +2933,33 @@ class QgisToolkit:
         max_length = max(1, min(max_length, 1_000_000))
         verify_ssl = False if verify_ssl is False else True
 
-        import urllib.request
-        import json as _json
-        import ssl
+        task = self._WebFetchTask(
+            f"Web fetch: {url[:50]}",
+            url,
+            max_length,
+            verify_ssl,
+        )
+        QgsApplication.taskManager().addTask(task)
 
-        start = time.perf_counter()
-        req = urllib.request.Request(url, method="GET")
-        # verify_ssl is user-controlled (web_fetch tool parameter).
-        ssl_context = ssl._create_unverified_context() if not verify_ssl else None  # nosec B413,B323
-        try:
-            with _safe_urlopen(req, timeout=30, context=ssl_context) as resp:  # nosec B310
-                status = resp.getcode()
-                headers = dict(resp.headers)
-                content_type = headers.get("Content-Type", "")
-                body = resp.read(max_length + 1)
-                truncated = len(body) > max_length
-                if truncated:
-                    body = body[:max_length]
-                try:
-                    text = body.decode("utf-8")
-                except UnicodeDecodeError:
-                    try:
-                        text = body.decode("latin-1")
-                    except UnicodeDecodeError:
-                        text = body.decode("utf-8", errors="replace")
-                result = {
-                    "ok": True,
-                    "status": status,
-                    "url": url,
-                    "content_type": content_type,
-                    "length": len(body),
-                    "truncated": truncated,
-                    "body": text,
-                }
-                if "json" in content_type.lower():
-                    try:
-                        result["json"] = _json.loads(text)
-                    except ValueError:
-                        pass
-                log_event(
-                    "toolkit.web_fetch.end",
-                    url=url[:200],
-                    status=status,
-                    elapsed_ms=int((time.perf_counter() - start) * 1000),
-                    truncated=truncated,
-                )
-                return result
-        except urllib.error.HTTPError as exc:
-            log_event(
-                "toolkit.web_fetch.error",
-                url=url[:200],
-                status=exc.code,
-                elapsed_ms=int((time.perf_counter() - start) * 1000),
-                error=exc.reason,
-            )
-            return {"ok": False, "error": f"HTTP {exc.code}: {exc.reason}", "status": exc.code}
-        except urllib.error.URLError as exc:
-            reason = str(exc.reason)
-            hint = ""
-            if verify_ssl and ("SSL" in reason or "CERTIFICATE" in reason or "VERIFY" in reason):
-                hint = " (Hint: set verify_ssl=false if the server has an incomplete certificate chain.)"
-            log_event(
-                "toolkit.web_fetch.error",
-                url=url[:200],
-                elapsed_ms=int((time.perf_counter() - start) * 1000),
-                error=reason,
-            )
-            return {"ok": False, "error": f"URL error: {reason}{hint}"}
-        except Exception as exc:  # noqa: BLE001
-            log_event(
-                "toolkit.web_fetch.error",
-                url=url[:200],
-                elapsed_ms=int((time.perf_counter() - start) * 1000),
-                error_type=type(exc).__name__,
-                error=str(exc),
-            )
-            return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+        # Wait for task completion while keeping UI responsive.
+        from qgis.PyQt.QtCore import QEventLoop
+        loop = QEventLoop()
+        task.taskCompleted.connect(loop.quit)
+        task.taskTerminated.connect(loop.quit)
+
+        start = time.time()
+        while not task.isFinished() and time.time() - start < 60:  # 1 min timeout
+            loop.processEvents()
+            time.sleep(0.05)
+
+        if not task.isFinished():
+            task.cancel()
+            return {"ok": False, "error": "Web fetch timed out after 1 minute"}
+
+        if task.error:
+            return task.error
+
+        return task.result
 
     def create_chart(self, layer_id, field_name, chart_type="bar", colors=None,
                      label_field=None, value_field=None, aggregate=None):

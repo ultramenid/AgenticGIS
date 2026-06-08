@@ -4,7 +4,7 @@ import json
 import uuid
 from datetime import datetime, timezone
 
-from qgis.PyQt.QtCore import QSettings
+from qgis.PyQt.QtCore import QSettings, QTimer
 
 
 SETTINGS_KEY = "AgenticGIS/sessions_json"
@@ -24,6 +24,10 @@ class SessionStore:
         self._settings = settings or QSettings()
         self._limit = int(limit or 20)
         self.had_existing_sessions = False
+        self._pending_save = None
+        self._save_timer = QTimer()
+        self._save_timer.setSingleShot(True)
+        self._save_timer.timeout.connect(self._flush_scheduled_save)
         self._data = self._load()
         if not self._data.get("sessions"):
             self.create_session(DEFAULT_SESSION_NAME)
@@ -85,6 +89,32 @@ class SessionStore:
     def _persist(self):
         self._normalize()
         self._settings.setValue(SETTINGS_KEY, json.dumps(self._data, separators=(",", ":")))
+
+    def schedule_save(
+        self,
+        session_id,
+        backend_history=None,
+        transcript_events=None,
+        backend_state=None,
+    ):
+        self._pending_save = {
+            "session_id": session_id,
+            "backend_history": backend_history,
+            "transcript_events": transcript_events,
+            "backend_state": backend_state,
+        }
+        self._save_timer.stop()
+        self._save_timer.start(1500)
+
+    def flush_save(self):
+        self._save_timer.stop()
+        self._flush_scheduled_save()
+
+    def _flush_scheduled_save(self):
+        if self._pending_save is None:
+            return
+        self.save_session(**self._pending_save)
+        self._pending_save = None
 
     def list_sessions(self):
         self._normalize()

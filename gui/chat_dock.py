@@ -814,31 +814,41 @@ class ChatDock(QgsDockWidget):
 
     def _restore_transcript(self, events):
         self._restoring_transcript = True
-        try:
-            self._clear_live_ui()
-            for event in events or []:
-                etype = event.get("type") if isinstance(event, dict) else None
-                if etype == "user":
-                    self._add_widget(MessageContainer(event.get("text", ""), sender_name="You", is_user=True))
-                elif etype == "agent_turn":
-                    self._restore_agent_turn(event)
-                elif etype == "chart":
-                    self._add_widget(ChartWidget(event.get("data") or {}))
-                elif etype == "stats":
-                    self._add_widget(StatsWidget(event.get("data") or {}))
-                elif etype == "error":
-                    self._add_widget(MessageContainer(html.escape(
-                        str(event.get("text", ""))), is_user=False, is_error=True))
-                elif etype == "compaction":
-                    self._add_compaction_notice()
-        finally:
-            self._restoring_transcript = False
-            self._typing_widget = None
-            self._current_agent_turn = None
-            self._current_tool_row = None
-            self._current_turn_event = None
-            self._pending_tool = None
-            self._streaming = False
+        self._clear_live_ui()
+        self._pending_restore_events = list(events or [])
+        self._restore_transcript_batch()
+
+    def _restore_transcript_batch(self):
+        batch_size = 20
+        for _ in range(batch_size):
+            if not self._pending_restore_events:
+                self._finish_restore()
+                return
+            event = self._pending_restore_events.pop(0)
+            etype = event.get("type") if isinstance(event, dict) else None
+            if etype == "user":
+                self._add_widget(MessageContainer(event.get("text", ""), sender_name="You", is_user=True))
+            elif etype == "agent_turn":
+                self._restore_agent_turn(event)
+            elif etype == "chart":
+                self._add_widget(ChartWidget(event.get("data") or {}))
+            elif etype == "stats":
+                self._add_widget(StatsWidget(event.get("data") or {}))
+            elif etype == "error":
+                self._add_widget(MessageContainer(html.escape(
+                    str(event.get("text", ""))), is_user=False, is_error=True))
+            elif etype == "compaction":
+                self._add_compaction_notice()
+        QTimer.singleShot(0, self._restore_transcript_batch)
+
+    def _finish_restore(self):
+        self._restoring_transcript = False
+        self._typing_widget = None
+        self._current_agent_turn = None
+        self._current_tool_row = None
+        self._current_turn_event = None
+        self._pending_tool = None
+        self._streaming = False
 
     def _restore_agent_turn(self, event):
         turn = self._add_agent_turn_widget()
@@ -1321,7 +1331,7 @@ class ChatDock(QgsDockWidget):
         name = self._prompt_session_name("New session", "")
         if name is None:
             return
-        self._save_current_session()
+        self._save_current_session(immediate=True)
         session = self._session_store.create_session(name)
         self._switch_to_session(session["id"], save_current=False)
 
@@ -1484,15 +1494,18 @@ class ChatDock(QgsDockWidget):
             })
         return True
 
-    def _save_current_session(self):
+    def _save_current_session(self, immediate=False):
         if not self._active_session_id:
             return
-        self._session_store.save_session(
-            self._active_session_id,
-            backend_history=list(self._history),
-            transcript_events=list(self._transcript_events),
-            backend_state=self._export_backend_state(),
-        )
+        if immediate:
+            self._session_store.flush_save()
+        else:
+            self._session_store.schedule_save(
+                self._active_session_id,
+                backend_history=list(self._history),
+                transcript_events=list(self._transcript_events),
+                backend_state=self._export_backend_state(),
+            )
 
     def _export_backend_state(self):
         try:
@@ -1529,7 +1542,7 @@ class ChatDock(QgsDockWidget):
 
     def _switch_to_session(self, session_id, save_current=True):
         if save_current and session_id != self._active_session_id:
-            self._save_current_session()
+            self._save_current_session(immediate=True)
         self._stop_active_worker()
         if not self._session_store.set_active_session(session_id):
             return False
@@ -1546,11 +1559,15 @@ class ChatDock(QgsDockWidget):
         return True
 
     def _clear_transcript_widgets(self):
-        while self.transcript_layout.count() > 1:
-            item = self.transcript_layout.takeAt(0)
-            w = item.widget()
-            if w is not None:
-                w.deleteLater()
+        self.transcript_widget.hide()
+        try:
+            while self.transcript_layout.count() > 1:
+                item = self.transcript_layout.takeAt(0)
+                w = item.widget()
+                if w is not None:
+                    w.deleteLater()
+        finally:
+            self.transcript_widget.show()
 
     def _clear(self):
         self._stop_active_worker()
@@ -1558,7 +1575,7 @@ class ChatDock(QgsDockWidget):
         self._transcript_events = []
         self._current_turn_event = None
         self._clear_live_ui()
-        self._save_current_session()
+        self._save_current_session(immediate=True)
 
     def _clear_live_ui(self):
         worker_was_active = self._worker is not None
@@ -1850,12 +1867,14 @@ class ChatDock(QgsDockWidget):
             self._hide_typing()
             self._finish_streaming()
             self._add_error_message(str(ev.data.get("error", "")))
+            self._save_current_session(immediate=True)
 
         elif ev.type == EventType.DONE:
             self._flush_stream_render()
             self._hide_typing()
             self._finish_streaming()
             self._finalize_current_turn_event()
+            self._save_current_session(immediate=True)
             self._streaming = False
             self._thinking_started = False
             self._thinking_text = ""
@@ -1984,7 +2003,7 @@ class ChatDock(QgsDockWidget):
         if worker is not None and self._worker is not None and worker is not self._worker:
             return
         self._history = history if history is not None else self._history
-        self._save_current_session()
+        self._save_current_session(immediate=True)
         # NOTE: do NOT call _finish_streaming here — the DONE event handler
         # already finalized the turn and reset _current_agent_turn to None.
         # Calling it again would re-create an empty turn and call

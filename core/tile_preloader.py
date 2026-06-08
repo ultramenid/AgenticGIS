@@ -9,16 +9,15 @@ Stdlib + PyQGIS only.
 """
 
 import math
-import time
+import urllib.error
+import urllib.parse
+import urllib.request
 
-from qgis.PyQt.QtCore import QEventLoop, QUrl
-from qgis.PyQt.QtNetwork import QNetworkRequest
 from qgis.core import (
     QgsCoordinateReferenceSystem,
     QgsCoordinateTransform,
     QgsCsException,
     QgsMessageLog,
-    QgsNetworkAccessManager,
     QgsProject,
 )
 
@@ -188,42 +187,41 @@ def warm_cache_for_layer(layer_id, zoom_levels=None, max_tiles=500, feedback=Non
     if total == 0:
         return {"ok": True, "fetched": 0, "total": 0, "skipped": 0}
 
-    # Fetch tiles
-    nam = QgsNetworkAccessManager.instance()
+    # Fetch tiles using urllib (safe for background threads)
     fetched = 0
     skipped = 0
 
     _log(f"Starting preload for '{layer.name()}': {total} tiles, zooms {zoom_levels}")
 
-    for z, x, y in tiles:
-        if feedback is not None and feedback.isCanceled():
+    for i, (z, x, y) in enumerate(tiles):
+        is_canceled = getattr(feedback, "isCanceled", lambda: False)
+        if feedback is not None and is_canceled():
             _log("Cancelled by feedback")
             break
 
+        if feedback is not None and hasattr(feedback, "setProgress"):
+            progress = min(
+                100.0, (i / total) * 100.0
+            )
+            feedback.setProgress(progress)
+
         url = _build_tile_url(url_template, z, x, y)
-        if not url.startswith(("http://", "https://")):
+        parsed = urllib.parse.urlparse(url)
+        if parsed.scheme not in ("http", "https"):
             skipped += 1
             continue
 
-        req = QNetworkRequest(QUrl(url))
-        reply = nam.get(req)
-
-        # Synchronous-ish wait with event-loop processing (keeps UI alive-ish)
-        loop = QEventLoop()
-        reply.finished.connect(loop.quit)
-        # Use a simple polling approach instead of nested event loops to avoid
-        # dead-locking in some QGIS contexts.
-        deadline = time.time() + 5.0
-        while not reply.isFinished() and time.time() < deadline:
-            loop.processEvents()
-            time.sleep(0.01)
-
-        if reply.error() == reply.NoError:
+        try:
+            req = urllib.request.Request(url, method="GET")
+            with urllib.request.urlopen(
+                req, timeout=5.0
+            ) as resp:  # nosec B310
+                # Read the body to ensure the response is fully fetched
+                resp.read()
             fetched += 1
-        else:
+        except Exception as exc:
+            _log(f"Tile fetch failed for {url}: {exc}")
             skipped += 1
-
-        reply.deleteLater()
 
     _log(f"Preload finished: {fetched} fetched, {skipped} skipped / {total} total")
     return {"ok": True, "fetched": fetched, "total": total, "skipped": skipped}

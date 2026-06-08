@@ -3,6 +3,7 @@
 from collections import Counter
 import math
 
+from qgis.PyQt.QtCore import QCoreApplication
 from qgis.core import NULL, QgsFeatureRequest, QgsWkbTypes
 
 try:
@@ -66,13 +67,16 @@ def analyze_vector_layer(
     if scan_limit:
         request.setLimit(scan_limit + 1)
 
-    for feature in layer.getFeatures(request):
+    for i, feature in enumerate(layer.getFeatures(request)):
         if _is_canceled(feedback):
             result["canceled"] = True
             break
         if result["scanned_features"] >= scan_limit:
             result["truncated"] = True
             break
+
+        if i % 50 == 0:
+            QCoreApplication.processEvents()
 
         row = _feature_row(feature, field_names)
         result["scanned_features"] += 1
