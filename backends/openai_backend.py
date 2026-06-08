@@ -217,41 +217,33 @@ Do NOT skip step 1 (inspection) and jump to code.
   Pass is_analysis=true on add_layer for derived result layers (reused, kept; no forced zoom by default).
   remove_layer and clear_layers only unload layers from the QGIS project; they never delete source files.
 
-## Remote sensing & Google Earth Engine
+## Remote sensing & Google Earth Engine — MANDATORY WORKFLOW
 
-When the request points to satellite imagery, remote sensing, Earth Engine /
-GEE, NDVI or other spectral indices, land cover, change detection, or image
-collections, drive it through Earth Engine. These are principles, not a fixed
-script — adapt the order and steps to the actual request:
+When the user asks for satellite imagery, remote sensing, NDVI, spectral
+indices, land cover, change detection, timelapse, GIF, or ANY Earth Engine
+work, you MUST follow the EXACT sequence below. Do NOT skip steps. Do NOT
+stop early. Do NOT output explanatory text between steps — only tool calls.
 
-- **Confirm readiness.** Ensure GEE is usable (gee_status) before any EE call.
-  If it is not ready, relay the setup steps it reports and stop.
-- **Discover, never memorize.** Treat any dataset id, band name, scale/offset,
-  date range, or mask threshold you "know" as a hint to VERIFY, not a fact. For
-  every dataset you intend to use (the imagery AND any companion mask), call
-  gee_dataset_info and build the code from what it actually returns — its real
-  band_names, gee:scale/offset, date_range, and `deprecated` flag. If a dataset
-  is flagged deprecated or is missing, find the current replacement (another
-  gee_dataset_info lookup, or web_fetch the Earth Engine catalog) — do not fall
-  back to a remembered id. Derive the cloud/shadow masking and compositing from
-  the quality bands the dataset actually exposes, not from a fixed recipe or
-  hardcoded constants.
-- **Build the expression.** Assign the final ee object to `result`. When
-  region_layer_id is given, its TRUE geometry is `region` (ee.Geometry) and its
-  features are `features` (ee.FeatureCollection, for per-feature work); it is
-  also the zoom target. Pass vis_params (min/max/palette/bands) for display.
-  ``export_format`` defaults to ``'geotiff'`` (local download, instant zoom);
-  use ``'map'`` only for a quick preview. Choose ``export_scale`` to fit the
-  area. GEE tools are gated by their own permission prompt — do NOT call
-  ask_user for GEE permission yourself.
-- **Reuse before recomputing.** If a loaded QGIS layer already holds the data
-  the user needs, derive from it with QGIS tools (clip / extract / filter via
-  run_processing — find the exact algorithm id with list_processing_algorithms,
-  do not assume it) instead of re-running the GEE pipeline. Re-run GEE only for
-  genuinely new bands, dates, algorithms, or data not already loaded.
-- **Then analyze.** Once the layer is on the canvas, interpret it with
-  analyze_layer, get_layer_statistics, create_chart, and run_pyqgis. Ask the
-  user when the request is ambiguous instead of guessing the field or analysis.
+### MANDATORY sequence for ALL GEE requests
+
+STEP 1 — gee_status: Confirm GEE plugin + Earth Engine auth are ready.
+STEP 2 — gee_dataset_info: Get live band names, scale/offset, date_range,
+         and cloud-mask bands for EVERY dataset you will use.
+STEP 3 — THE MAIN ACTION (choose ONE based on request):
+         - STATIC image / layer  → gee_add_layer
+         - GIF / animation / timelapse → gee_animation
+         NEVER skip this step. The dataset info from Step 2 is raw
+         metadata, NOT a deliverable. Step 3 is the actual deliverable.
+STEP 4 — Post-process: analyze_layer, get_layer_statistics, create_chart
+         (only if the user asked for analysis after the layer/GIF).
+
+**ABSOLUTE RULES:**
+- After Step 2, IMMEDIATELY call Step 3. Do NOT explain, do NOT summarize
+  the dataset info, do NOT say "Preparing answer".
+- The tool chain is: gee_status → gee_dataset_info → gee_add_layer OR
+  gee_animation. Breaking this chain is a FAILURE.
+- If the user asks for a GIF and you have not called gee_animation, you
+  are NOT done. Call it now.
 
 ### Methodology: How GEE output is formed
 
@@ -270,13 +262,6 @@ exact pipeline. Include it in the Methodology block (section 4 above):
    zoom) or streams WMS tiles. gee_animation renders a GIF inline in chat.
 5. **POST-PROCESS** — Once loaded, use analyze_layer, get_layer_statistics,
    or create_chart to interpret the result.
-
-CRITICAL: NEVER stop after step 1 or 2. If the user asked for a GIF, call
-gee_animation IMMEDIATELY after gee_dataset_info — do not pause, do not
-say "Preparing answer", do not ask for confirmation. The dataset info is an
-internal prerequisite, not a deliverable. The workflow is: gee_status →
-gee_dataset_info → gee_add_layer (or gee_animation) → analyze. Do not
-break this chain.
 
 ### Animations / timelapses
 

@@ -270,7 +270,10 @@ TOOL_SPECS = [
             "'projects/<project>/assets/<name>' or 'users/<user>/<asset>'): when "
             "the id is not in the public catalog it is resolved via the "
             "authenticated Earth Engine API (result has source='asset'; requires "
-            "gee_status to report authenticated)."
+            "gee_status to report authenticated). "
+            "CRITICAL: after calling gee_dataset_info, IMMEDIATELY call gee_add_layer "
+            "or gee_animation next. Do NOT stop, do NOT explain the metadata, do NOT "
+            "ask the user for confirmation — this lookup is a prerequisite, not a result."
         ),
         "input_schema": {
             "type": "object",
@@ -418,10 +421,15 @@ TOOL_SPECS = [
         "description": (
             "Produce an animated GIF TIMELAPSE from an Earth Engine "
             "ImageCollection via getVideoThumbURL and show it inline in the "
-            "chat. Use for change-over-time / timelapse / animation / GIF "
-            "requests. Only use after gee_status confirms GEE is ready. The "
-            "`code` runs with `ee`, `Map` (ee_plugin), `region` (an ee.Geometry "
-            "built from region_layer_id) and `features` in scope, and MUST "
+            "chat. Use for any request whose intent is to visualize change "
+            "over time, sequence frames, or create a timelapse/GIF. Match "
+            "semantic intent, not exact wording. Only use after gee_status "
+            "confirms GEE is ready AND after gee_dataset_info has been "
+            "called for all datasets you need. Do not use run_pyqgis to "
+            "create GIFs. "
+            "The `code` runs "
+            "with `ee`, `Map` (ee_plugin), `region` (an ee.Geometry built "
+            "from region_layer_id) and `features` in scope, and MUST "
             "assign an ee.ImageCollection to a variable named `result` — one "
             "frame per image. Typically filterDate over the period with one "
             "composite per step, or .map(lambda img: img.visualize(**vis)) to "
@@ -486,6 +494,17 @@ TOOL_SPECS = [
                         "dimensions x frames under the 6,553,600-pixel cap."
                     ),
                     "default": 480,
+                },
+                "frame_labels": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": (
+                        "Optional per-frame caption list, one label per frame, "
+                        "in playback order (e.g. [\"2020\", \"2021\", ...]). "
+                        "Shown as an overlay in the chat widget. Never "
+                        "hardcode: derive from the actual date sequence "
+                        "generated in the code."
+                    ),
                 },
             },
             "required": ["code"],
