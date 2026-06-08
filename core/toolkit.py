@@ -1736,58 +1736,186 @@ class QgisToolkit:
     # ------------------------------------------------------------------ #
     # Google Earth Engine (ee_plugin) integration                        #
     # ------------------------------------------------------------------ #
-    def gee_status(self, **_kwargs):
-        """Report whether the GEE QGIS plugin is installed and authenticated."""
-        result = {
-            "ok": True,
-            "plugin_installed": False,
-            "ee_available": False,
-            "initialized": False,
-            "authenticated": False,
-            "message": "",
-        }
-        try:
-            import qgis.utils as qutils
+    class _GeeStatusTask(QgsTask):
+        """Background task for ee.Initialize() + auth test."""
 
-            if "ee_plugin" in (getattr(qutils, "plugins", {}) or {}):
-                result["plugin_installed"] = True
-        except Exception:  # nosec B110
-            pass
-        if not result["plugin_installed"]:
+        def __init__(self):
+            super().__init__("GEE: Checking status", QgsTask.CanCancel)
+            self.result = {
+                "ok": True,
+                "plugin_installed": False,
+                "ee_available": False,
+                "initialized": False,
+                "authenticated": False,
+                "message": "",
+            }
+
+        def run(self):
             try:
-                import importlib.util
+                import qgis.utils as qutils
 
-                if importlib.util.find_spec("ee_plugin") is not None:
-                    result["plugin_installed"] = True
+                if "ee_plugin" in (getattr(qutils, "plugins", {}) or {}):
+                    self.result["plugin_installed"] = True
             except Exception:  # nosec B110
                 pass
-        try:
-            import ee
-        except Exception:
-            result["message"] = (
-                "Earth Engine API (ee) is not importable in this QGIS Python. "
-                "Install the 'Google Earth Engine' plugin from the QGIS Plugin "
-                "Manager (Plugins > Manage and Install Plugins), then restart QGIS."
-            )
-            return result
-        result["ee_available"] = True
-        try:
-            ee.Initialize()
-            result["initialized"] = True
+            if not self.result["plugin_installed"]:
+                try:
+                    import importlib.util
+
+                    if importlib.util.find_spec("ee_plugin") is not None:
+                        self.result["plugin_installed"] = True
+                except Exception:  # nosec B110
+                    pass
             try:
-                _ = ee.Number(1).getInfo()
-                result["authenticated"] = True
-                result["message"] = "Earth Engine is installed, authenticated, and ready."
+                import ee
+            except Exception:
+                self.result["message"] = (
+                    "Earth Engine API (ee) is not importable in this QGIS Python. "
+                    "Install the 'Google Earth Engine' plugin from the QGIS Plugin "
+                    "Manager (Plugins > Manage and Install Plugins), then restart QGIS."
+                )
+                return True  # task finished, but ee not available
+            self.result["ee_available"] = True
+            try:
+                ee.Initialize()
+                self.result["initialized"] = True
+                try:
+                    _ = ee.Number(1).getInfo()
+                    self.result["authenticated"] = True
+                    self.result["message"] = (
+                        "Earth Engine is installed, authenticated, and ready."
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    self.result["message"] = (
+                        f"Initialized, but a test call failed: {exc}"
+                    )
             except Exception as exc:  # noqa: BLE001
-                result["message"] = f"Initialized, but a test call failed: {exc}"
-        except Exception as exc:  # noqa: BLE001
-            result["message"] = (
-                "Earth Engine is not authenticated/initialized. In the QGIS Python "
-                "console run: import ee; ee.Authenticate(); "
-                "ee.Initialize(project='YOUR_CLOUD_PROJECT'). "
-                f"Detail: {type(exc).__name__}: {exc}"
+                self.result["message"] = (
+                    "Earth Engine is not authenticated/initialized. In the QGIS Python "
+                    "console run: import ee; ee.Authenticate(); "
+                    "ee.Initialize(project='YOUR_CLOUD_PROJECT'). "
+                    f"Detail: {type(exc).__name__}: {exc}"
+                )
+            return True
+
+    class _GeeDatasetInfoTask(QgsTask):
+        """Background task for fetching GEE dataset STAC metadata."""
+
+        def __init__(self, dataset_id, ee_stac_base):
+            super().__init__(f"GEE: {dataset_id}", QgsTask.CanCancel)
+            self.dataset_id = dataset_id
+            self.ee_stac_base = ee_stac_base
+            self.result = None
+            self.error_msg = None
+
+        def run(self):
+            ds = self.dataset_id.strip().strip("/")
+            first = ds.split("/")[0]
+            fname = ds.replace("/", "_")
+            url = f"{self.ee_stac_base}/{first}/{fname}.json"
+
+            import json as _json
+            import urllib.error
+            import urllib.request
+
+            req = urllib.request.Request(
+                url, method="GET", headers={"User-Agent": "AgenticGIS"}
             )
-        return result
+            try:
+                with _safe_urlopen(req, timeout=20) as resp:  # nosec B310
+                    raw = resp.read(2_000_000)
+            except urllib.error.HTTPError as exc:
+                if exc.code == 404:
+                    self.result = self._fallback_via_ee(ds)
+                    return self.result is not None
+                self.error_msg = f"HTTP {exc.code} fetching dataset info."
+                return False
+            except Exception as exc:  # noqa: BLE001
+                self.error_msg = f"Network error: {type(exc).__name__}: {exc}"
+                return False
+
+            try:
+                data = _json.loads(raw)
+            except _json.JSONDecodeError as exc:
+                self.error_msg = f"Invalid JSON from STAC catalog: {exc}"
+                return False
+
+            self.result = self._parse_stac(data, ds)
+            return True
+
+        def _fallback_via_ee(self, dataset_id):
+            try:
+                import ee
+                ee.Initialize()
+                info = ee.data.getAsset(dataset_id)
+                if info:
+                    return {
+                        "ok": True,
+                        "source": "asset",
+                        "id": dataset_id,
+                        "type": info.get("type", "UNKNOWN"),
+                        "title": info.get("title", dataset_id),
+                        "deprecated": False,
+                        "bands": [],
+                        "properties": {},
+                        "date_range": None,
+                    }
+            except Exception:  # nosec B110
+                pass
+            self.error_msg = (
+                f"No Earth Engine dataset found with id '{dataset_id}'."
+            )
+            return None
+
+        def _parse_stac(self, data, dataset_id):
+            # Same logic as original gee_dataset_info but simplified
+            bands = []
+            for b in data.get("summaries", {}).get("eo:bands", []):
+                bands.append({
+                    "name": b.get("name"),
+                    "description": b.get("description", ""),
+                    "gsd": b.get("gsd"),
+                    "scale": b.get("gee:scale"),
+                    "offset": b.get("gee:offset"),
+                    "data_type": b.get("gee:bitmask", {}).get("first_bit") or b.get("type"),
+                })
+            date_range = None
+            temporal = data.get("extent", {}).get("temporal", {})
+            if temporal:
+                interval = temporal.get("interval", [])
+                if len(interval) >= 2:
+                    date_range = [str(interval[0]), str(interval[1])]
+
+            return {
+                "ok": True,
+                "source": "stac",
+                "id": dataset_id,
+                "title": data.get("title", dataset_id),
+                "type": data.get("gee:type", data.get("type", "UNKNOWN")),
+                "deprecated": data.get("gee:status") == "deprecated",
+                "band_names": [b["name"] for b in bands if b.get("name")],
+                "bands": bands,
+                "properties": data.get("summaries", {}).get("gee:properties", {}),
+                "date_range": date_range,
+            }
+
+    def gee_status(self, **_kwargs):
+        """Report whether the GEE QGIS plugin is installed and authenticated."""
+        task = self._GeeStatusTask()
+        QgsApplication.taskManager().addTask(task)
+        # Wait with UI processing
+        from qgis.PyQt.QtCore import QEventLoop
+        loop = QEventLoop()
+        task.taskCompleted.connect(loop.quit)
+        task.taskTerminated.connect(loop.quit)
+        start = time.time()
+        while not task.isFinished() and time.time() - start < 15:
+            loop.processEvents()
+            time.sleep(0.05)
+        if not task.isFinished():
+            task.cancel()
+            return {"ok": False, "error": "GEE status check timed out after 15s"}
+        return task.result
 
     # STAC catalog file layout:
     #   catalog/<FIRST_SEGMENT>/<ID_WITH_SLASHES_AS_UNDERSCORES>.json
@@ -1814,116 +1942,24 @@ class QgisToolkit:
                     "'COPERNICUS/S2_SR_HARMONIZED'."
                 ),
             }
-        ds = dataset_id.strip().strip("/")
-        first = ds.split("/")[0]
-        fname = ds.replace("/", "_")
-        url = f"{self._EE_STAC_BASE}/{first}/{fname}.json"
 
-        import urllib.error
-        import urllib.request
-        import json as _json
-
-        start = time.perf_counter()
-        req = urllib.request.Request(
-            url, method="GET", headers={"User-Agent": "AgenticGIS"}
-        )
-        try:
-            with _safe_urlopen(req, timeout=20) as resp:  # nosec B310
-                raw = resp.read(2_000_000)
-        except urllib.error.HTTPError as exc:
-            log_event("toolkit.gee_dataset_info.error", id=ds, status=exc.code)
-            if exc.code == 404:
-                # Not in the public catalog — try it as a user / cloud-project
-                # asset via the authenticated Earth Engine API.
-                fallback = self._gee_asset_info_via_ee(ds)
-                if fallback is not None:
-                    return fallback
-                return {
-                    "ok": False,
-                    "error": (
-                        f"No Earth Engine dataset found with id '{dataset_id}'. "
-                        "If this is a public dataset, check the exact id in the "
-                        "Earth Engine Data Catalog (ids are case-sensitive, e.g. "
-                        "'COPERNICUS/S2_SR_HARMONIZED'). If it is your own asset "
-                        "(e.g. 'projects/<project>/assets/<name>'), make sure "
-                        "Earth Engine is authenticated (run gee_status) and the "
-                        "asset is readable by your account."
-                    ),
-                    "url": url,
-                }
-            return {
-                "ok": False,
-                "error": f"HTTP {exc.code} fetching dataset metadata.",
-                "url": url,
-            }
-        except Exception as exc:  # noqa: BLE001
-            log_event("toolkit.gee_dataset_info.error", id=ds, error=str(exc))
-            return {
-                "ok": False,
-                "error": f"Failed to fetch dataset metadata: {type(exc).__name__}: {exc}",
-                "url": url,
-            }
-        try:
-            d = _json.loads(raw.decode("utf-8"))
-        except Exception as exc:  # noqa: BLE001
-            return {
-                "ok": False,
-                "error": f"Could not parse dataset metadata: {exc}",
-                "url": url,
-            }
-
-        summaries = d.get("summaries", {}) or {}
-        bands = []
-        for b in summaries.get("eo:bands", []) or []:
-            desc = b.get("description") or ""
-            bands.append(
-                {
-                    "name": b.get("name"),
-                    "description": desc[:200],
-                    "gsd": b.get("gsd"),
-                    "center_wavelength": b.get("center_wavelength"),
-                    "scale": b.get("gee:scale"),
-                    "offset": b.get("gee:offset"),
-                }
-            )
-        schema = []
-        for s in (summaries.get("gee:schema", []) or [])[:60]:
-            sdesc = s.get("description") or ""
-            schema.append(
-                {
-                    "name": s.get("name"),
-                    "type": s.get("type"),
-                    "description": sdesc[:160],
-                }
-            )
-        temporal = (d.get("extent", {}) or {}).get("temporal", {}) or {}
-        interval = temporal.get("interval") or []
-        date_range = interval[0] if interval else None
-        status = d.get("gee:status")
-        deprecated = bool(d.get("deprecated")) or status == "deprecated"
-
-        log_event(
-            "toolkit.gee_dataset_info.end",
-            id=ds,
-            bands=len(bands),
-            elapsed_ms=int((time.perf_counter() - start) * 1000),
-        )
-        return {
-            "ok": True,
-            "source": "catalog",
-            "id": d.get("id", ds),
-            "title": d.get("title"),
-            "type": d.get("gee:type"),
-            "status": status,
-            "deprecated": deprecated,
-            "date_range": date_range,
-            "interval": d.get("gee:interval"),
-            "band_names": [b["name"] for b in bands],
-            "bands": bands[:80],
-            "properties": schema,
-            "url": url,
-            "catalog_page": f"https://developers.google.com/earth-engine/datasets/catalog/{fname}",
-        }
+        # Run heavy network fetch in background so the UI stays responsive.
+        task = self._GeeDatasetInfoTask(dataset_id, self._EE_STAC_BASE)
+        QgsApplication.taskManager().addTask(task)
+        from qgis.PyQt.QtCore import QEventLoop
+        loop = QEventLoop()
+        task.taskCompleted.connect(loop.quit)
+        task.taskTerminated.connect(loop.quit)
+        start = time.time()
+        while not task.isFinished() and time.time() - start < 25:
+            loop.processEvents()
+            time.sleep(0.05)
+        if not task.isFinished():
+            task.cancel()
+            return {"ok": False, "error": "GEE dataset info timed out after 25s"}
+        if task.error_msg:
+            return {"ok": False, "error": task.error_msg}
+        return task.result
 
     def _gee_asset_info_via_ee(self, asset_id):
         """Resolve a user / cloud-project asset's metadata via the authenticated
