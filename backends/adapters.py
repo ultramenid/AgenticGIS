@@ -131,12 +131,27 @@ class CliAdapter:
             if block_lines:
                 stripped = "\n".join(block_lines).strip()
 
-        if not stripped.startswith("{"):
+        # Try to find and parse the tool_calls protocol JSON anywhere in
+        # the text. Claude may emit extra text around the JSON, so we
+        # search for the {"type":"tool_calls" pattern rather than
+        # requiring the whole text to be valid JSON.
+        if "{" not in stripped:
             return None
+        idx = stripped.find('{"type"')
+        if idx == -1:
+            return None
+        candidate = stripped[idx:]
         try:
-            payload = json.loads(stripped)
+            payload = json.loads(candidate)
         except (json.JSONDecodeError, ValueError):
-            return None
+            # Try to find the next occurrence if first parse fails
+            idx2 = stripped.find('{"type"', idx + 1)
+            if idx2 == -1:
+                return None
+            try:
+                payload = json.loads(stripped[idx2:])
+            except (json.JSONDecodeError, ValueError):
+                return None
         if not isinstance(payload, dict):
             return None
         if payload.get("type") != "tool_calls":
