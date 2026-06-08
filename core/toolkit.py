@@ -18,7 +18,6 @@ its slot.
 import io
 import os
 import re
-import sys
 import tempfile
 import threading
 import time
@@ -1246,25 +1245,9 @@ class QgisToolkit:
                     "stdout": "", "stderr": ""}
         try:
             with redirect_stdout(out), redirect_stderr(err):
-                old_trace = sys.gettrace()
-                _instruction_count = 0
-
-                def _cancel_trace(frame, event_name, arg):
-                    nonlocal _instruction_count
-                    _instruction_count += 1
-                    if _instruction_count % 1000 == 0:
-                        QCoreApplication.processEvents()
-                    if _cancel_check():
-                        raise KeyboardInterrupt
-                    return _cancel_trace
-
-                try:
-                    sys.settrace(_cancel_trace)
-                    # Intentional user-code execution (PyQGIS escape hatch).
-                    # Guarded by _dangerous_calls_blocked() above.
-                    exec(compile(code, "<agenticgis>", "exec"), ns)  # nosec B102
-                finally:
-                    sys.settrace(old_trace)
+                # Intentional user-code execution (PyQGIS escape hatch).
+                # Guarded by _dangerous_calls_blocked() above.
+                exec(compile(code, "<agenticgis>", "exec"), ns)  # nosec B102
             if _cancel_check():
                 result["ok"] = False
                 result["error"] = "run_pyqgis: cancelled by user"
@@ -2808,108 +2791,6 @@ class QgisToolkit:
         ok = QgsProject.instance().write()
         return {"ok": bool(ok), "path": QgsProject.instance().fileName() or None}
 
-    class _WebFetchTask(QgsTask):
-        """QgsTask that runs HTTP GET off the main thread."""
-
-        def __init__(self, description, url, max_length, verify_ssl):
-            super().__init__(description, QgsTask.CanCancel)
-            self.url = url
-            self.max_length = max_length
-            self.verify_ssl = verify_ssl
-            self.result = None
-            self.error = None
-
-        def run(self):
-            import urllib.request
-            import json as _json
-            import ssl
-
-            start = time.perf_counter()
-            req = urllib.request.Request(self.url, method="GET")
-            ssl_context = ssl._create_unverified_context() if not self.verify_ssl else None  # nosec B413,B323
-            try:
-                with _safe_urlopen(req, timeout=30, context=ssl_context) as resp:  # nosec B310
-                    status = resp.getcode()
-                    headers = dict(resp.headers)
-                    content_type = headers.get("Content-Type", "")
-                    body = resp.read(self.max_length + 1)
-                    truncated = len(body) > self.max_length
-                    if truncated:
-                        body = body[:self.max_length]
-                    try:
-                        text = body.decode("utf-8")
-                    except UnicodeDecodeError:
-                        try:
-                            text = body.decode("latin-1")
-                        except UnicodeDecodeError:
-                            text = body.decode("utf-8", errors="replace")
-                    result = {
-                        "ok": True,
-                        "status": status,
-                        "url": self.url,
-                        "content_type": content_type,
-                        "length": len(body),
-                        "truncated": truncated,
-                        "body": text,
-                    }
-                    if "json" in content_type.lower():
-                        try:
-                            result["json"] = _json.loads(text)
-                        except ValueError:
-                            pass
-                    log_event(
-                        "toolkit.web_fetch.end",
-                        url=self.url[:200],
-                        status=status,
-                        elapsed_ms=int((time.perf_counter() - start) * 1000),
-                        truncated=truncated,
-                    )
-                    self.result = result
-                    return True
-            except urllib.error.HTTPError as exc:
-                log_event(
-                    "toolkit.web_fetch.error",
-                    url=self.url[:200],
-                    status=exc.code,
-                    elapsed_ms=int((time.perf_counter() - start) * 1000),
-                    error=exc.reason,
-                )
-                self.error = {
-                    "ok": False,
-                    "error": f"HTTP {exc.code}: {exc.reason}",
-                    "status": exc.code,
-                }
-                return False
-            except urllib.error.URLError as exc:
-                reason = str(exc.reason)
-                hint = ""
-                if self.verify_ssl and ("SSL" in reason or "CERTIFICATE" in reason or "VERIFY" in reason):
-                    hint = " (Hint: set verify_ssl=false if the server has an incomplete certificate chain.)"
-                log_event(
-                    "toolkit.web_fetch.error",
-                    url=self.url[:200],
-                    elapsed_ms=int((time.perf_counter() - start) * 1000),
-                    error=reason,
-                )
-                self.error = {
-                    "ok": False,
-                    "error": f"URL error: {reason}{hint}",
-                }
-                return False
-            except Exception as exc:  # noqa: BLE001
-                log_event(
-                    "toolkit.web_fetch.error",
-                    url=self.url[:200],
-                    elapsed_ms=int((time.perf_counter() - start) * 1000),
-                    error_type=type(exc).__name__,
-                    error=str(exc),
-                )
-                self.error = {
-                    "ok": False,
-                    "error": f"{type(exc).__name__}: {exc}",
-                }
-                return False
-
     def web_fetch(self, url, max_length=500000, verify_ssl=True):
         """Fetch a public URL via HTTP GET using the stdlib (urllib).
 
@@ -2930,33 +2811,81 @@ class QgisToolkit:
         max_length = max(1, min(max_length, 1_000_000))
         verify_ssl = False if verify_ssl is False else True
 
-        task = self._WebFetchTask(
-            f"Web fetch: {url[:50]}",
-            url,
-            max_length,
-            verify_ssl,
-        )
-        QgsApplication.taskManager().addTask(task)
+        import urllib.request
+        import json as _json
+        import ssl
 
-        # Wait for task completion while keeping UI responsive.
-        from qgis.PyQt.QtCore import QEventLoop
-        loop = QEventLoop()
-        task.taskCompleted.connect(loop.quit)
-        task.taskTerminated.connect(loop.quit)
-
-        start = time.time()
-        while not task.isFinished() and time.time() - start < 60:  # 1 min timeout
-            loop.processEvents()
-            time.sleep(0.05)
-
-        if not task.isFinished():
-            task.cancel()
-            return {"ok": False, "error": "Web fetch timed out after 1 minute"}
-
-        if task.error:
-            return task.error
-
-        return task.result
+        start = time.perf_counter()
+        req = urllib.request.Request(url, method="GET")
+        ssl_context = ssl._create_unverified_context() if not verify_ssl else None  # nosec B413,B323
+        try:
+            with _safe_urlopen(req, timeout=30, context=ssl_context) as resp:  # nosec B310
+                status = resp.getcode()
+                headers = dict(resp.headers)
+                content_type = headers.get("Content-Type", "")
+                body = resp.read(max_length + 1)
+                truncated = len(body) > max_length
+                if truncated:
+                    body = body[:max_length]
+                try:
+                    text = body.decode("utf-8")
+                except UnicodeDecodeError:
+                    try:
+                        text = body.decode("latin-1")
+                    except UnicodeDecodeError:
+                        text = body.decode("utf-8", errors="replace")
+                result = {
+                    "ok": True,
+                    "status": status,
+                    "url": url,
+                    "content_type": content_type,
+                    "length": len(body),
+                    "truncated": truncated,
+                    "body": text,
+                }
+                if "json" in content_type.lower():
+                    try:
+                        result["json"] = _json.loads(text)
+                    except ValueError:
+                        pass
+                log_event(
+                    "toolkit.web_fetch.end",
+                    url=url[:200],
+                    status=status,
+                    elapsed_ms=int((time.perf_counter() - start) * 1000),
+                    truncated=truncated,
+                )
+                return result
+        except urllib.error.HTTPError as exc:
+            log_event(
+                "toolkit.web_fetch.error",
+                url=url[:200],
+                status=exc.code,
+                elapsed_ms=int((time.perf_counter() - start) * 1000),
+                error=exc.reason,
+            )
+            return {"ok": False, "error": f"HTTP {exc.code}: {exc.reason}", "status": exc.code}
+        except urllib.error.URLError as exc:
+            reason = str(exc.reason)
+            hint = ""
+            if verify_ssl and ("SSL" in reason or "CERTIFICATE" in reason or "VERIFY" in reason):
+                hint = " (Hint: set verify_ssl=false if the server has an incomplete certificate chain.)"
+            log_event(
+                "toolkit.web_fetch.error",
+                url=url[:200],
+                elapsed_ms=int((time.perf_counter() - start) * 1000),
+                error=reason,
+            )
+            return {"ok": False, "error": f"URL error: {reason}{hint}"}
+        except Exception as exc:  # noqa: BLE001
+            log_event(
+                "toolkit.web_fetch.error",
+                url=url[:200],
+                elapsed_ms=int((time.perf_counter() - start) * 1000),
+                error_type=type(exc).__name__,
+                error=str(exc),
+            )
+            return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
 
     def create_chart(self, layer_id, field_name, chart_type="bar", colors=None,
                      label_field=None, value_field=None, aggregate=None):
