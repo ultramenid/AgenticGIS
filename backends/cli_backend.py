@@ -941,6 +941,24 @@ class NormalizingStream:
         self._log_first_event(raw.get("type") or "unknown")
         norm = self.adapter.parse_event(raw)
         if norm is None:
+            # Fallback: check if raw JSON is the tool_calls protocol
+            protocol = self.adapter.parse_protocol_text(decoded)
+            if protocol is not None:
+                for call in protocol.tool_calls:
+                    if self.pending_tool_call is None:
+                        self.pending_tool_call = call
+                    self.emit(
+                        AgentEvent(
+                            EventType.TOOL_USE,
+                            {
+                                "name": call["name"],
+                                "input": call.get("arguments", {}),
+                            },
+                        )
+                    )
+                if protocol.is_final:
+                    self.final_text = protocol.text or self.final_text
+                return
             sid = raw.get("session_id") or raw.get("sessionID") or ""
             if sid:
                 self.session_id = sid

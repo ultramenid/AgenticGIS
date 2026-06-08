@@ -325,6 +325,20 @@ class ClaudeAdapter(CliAdapter):
                         session_id=sid,
                     )
             return None
+        # Handle raw tool_calls protocol JSON (Claude CLI may emit this directly)
+        if etype == "tool_calls":
+            calls = raw.get("calls", [])
+            tool_calls = []
+            for c in calls:
+                if isinstance(c, dict):
+                    name = c.get("name")
+                    if isinstance(name, str) and name:
+                        tool_calls.append({
+                            "name": name,
+                            "arguments": c.get("arguments", {}) or {},
+                        })
+            if tool_calls:
+                return NormalizedEvent(tool_calls=tool_calls)
         return None
 
 
