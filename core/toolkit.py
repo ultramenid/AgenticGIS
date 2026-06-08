@@ -1276,6 +1276,18 @@ class QgisToolkit:
     # ------------------------------------------------------------------ #
     # Introspection helpers                                              #
     # ------------------------------------------------------------------ #
+    def configure_network_cache(self, size_mb=None, **_):
+        """Enable/adjust or report QGIS's shared network (WMS/WMTS/XYZ) cache.
+
+        With no size_mb, reports the current cache state. With size_mb, sets
+        the maximum cache size in MB (> 0 enables caching, 0 disables). Runs on
+        the main thread, which is where the network access manager lives.
+        """
+        from .network_cache import network_cache_state, set_network_cache_size
+        if size_mb is None:
+            return network_cache_state()
+        return set_network_cache_size(size_mb)
+
     def get_project_state(self, **_):
         project = QgsProject.instance()
         canvas = self.iface.mapCanvas()

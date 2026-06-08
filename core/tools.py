@@ -558,6 +558,33 @@ TOOL_SPECS = [
         },
     },
     {
+        "name": "configure_network_cache",
+        "method": "configure_network_cache",
+        "description": (
+            "Enable, adjust, or report QGIS's shared network disk cache, which "
+            "caches WMS/WMTS/XYZ tile responses (including streaming GEE "
+            "'ee_plugin' layers and web basemaps). Pass size_mb to set the "
+            "maximum cache size (size_mb > 0 enables caching; 0 disables); omit "
+            "it to just report current size, used space, and cache directory. "
+            "Note: this is QGIS's single shared network cache, not WMS-only — "
+            "it does not affect GEE 'geotiff' downloads, which save local files."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "size_mb": {
+                    "type": "number",
+                    "description": (
+                        "Maximum cache size in megabytes. > 0 enables/adjusts "
+                        "the cache; 0 disables it. Omit to report current "
+                        "settings without changing anything."
+                    ),
+                },
+            },
+            "required": [],
+        },
+    },
+    {
         "name": "web_fetch",
         "method": "web_fetch",
         "description": (

@@ -150,6 +150,9 @@ follow-up question. Do not list more than 3.
 - gee_add_layer(code, vis_params, name, region_layer_id): run an Earth Engine
   expression and add the result to the canvas
 - web_fetch(url, max_length, verify_ssl): fetch a web page or API endpoint via GET
+- configure_network_cache(size_mb): enable/adjust or report QGIS's shared network
+  cache for WMS/WMTS/XYZ tiles (incl. streaming GEE ee_plugin layers). size_mb > 0
+  enables/sizes it; omit to report. Does not affect GEE 'geotiff' local downloads.
 - add_layer / remove_layer / clear_layers / save_project: load, unload, clear, or save project layers.
   Pass is_analysis=true on add_layer for derived result layers (reused, kept; no forced zoom by default).
   remove_layer and clear_layers only unload layers from the QGIS project; they never delete source files.

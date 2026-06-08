@@ -37,8 +37,24 @@ class AgenticGisPlugin:
         self._action.triggered.connect(self._toggle_dock)
         self.iface.addToolBarIcon(self._action)
         self.iface.addPluginToMenu("AgenticGIS", self._action)
+        try:
+            from .core.network_cache import (
+                maybe_enable_default_cache,
+                sweep_stale_cache_on_startup,
+            )
+            sweep_stale_cache_on_startup()
+            # Enable a default cache size only if QGIS's cache is off; never
+            # overrides a size the user already set.
+            maybe_enable_default_cache()
+        except Exception:  # nosec B110
+            pass
 
     def unload(self):
+        try:
+            from .core.network_cache import clear_cache_on_unload
+            clear_cache_on_unload()
+        except Exception:  # nosec B110
+            pass
         self.toolkit.cleanup_gee_tiffs()
         self._stop_server()
         if self._dock is not None:
