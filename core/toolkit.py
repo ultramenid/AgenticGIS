@@ -2405,43 +2405,43 @@ class QgisToolkit:
             self.final_scale = _scale
             self.setProgress(50)
 
-            # Download via QNetworkAccessManager (thread-safe)
+            # Download via std-lib urllib (thread-safe for QgsTask background threads)
             url = ee.data.makeDownloadUrl(download_id)
             tmp = tempfile.NamedTemporaryFile(suffix=".tif", prefix="gee_", delete=False)
             self.download_path = tmp.name
             tmp.close()
 
-            from qgis.PyQt.QtCore import QEventLoop, QUrl
-            from qgis.PyQt.QtNetwork import QNetworkRequest
-            from qgis.core import QgsNetworkAccessManager
+            import urllib.request
+            import urllib.error
 
-            nam = QgsNetworkAccessManager.instance()
-            req = QNetworkRequest(QUrl(url))
-            reply = nam.get(req)
-
-            loop = QEventLoop()
-            reply.finished.connect(loop.quit)
-
+            req = urllib.request.Request(url, method="GET")
             deadline = time.time() + 120.0  # 2 min per tile
-            while not reply.isFinished() and time.time() < deadline:
-                if self.isCanceled():
-                    reply.abort()
-                    break
-                loop.processEvents()
-                # crude progress: jump from 50 → 90 over the timeout window
-                pct = 50 + min(40, int((120 - (deadline - time.time())) / 120 * 40))
-                self.setProgress(pct)
-                time.sleep(0.05)
-
-            if reply.error() != reply.NoError:
-                self.error_msg = f"Download failed: {reply.errorString()}"
-                reply.deleteLater()
+            try:
+                with _safe_urlopen(req, timeout=120.0) as resp:  # nosec B310
+                    # Stream download with periodic cancellation/progress checks
+                    chunk_size = 64 * 1024
+                    with open(self.download_path, "wb") as fh:
+                        while True:
+                            if self.isCanceled():
+                                self.error_msg = "Cancelled by user"
+                                return False
+                            if time.time() > deadline:
+                                self.error_msg = "GeoTIFF download timed out after 2 minutes"
+                                return False
+                            chunk = resp.read(chunk_size)
+                            if not chunk:
+                                break
+                            fh.write(chunk)
+                            # crude progress: jump from 50 → 90 over the timeout window
+                            elapsed = time.time() - (deadline - 120.0)
+                            pct = 50 + min(40, int(elapsed / 120 * 40))
+                            self.setProgress(pct)
+            except urllib.error.HTTPError as exc:
+                self.error_msg = f"GeoTIFF download HTTP error: {exc.code}"
                 return False
-
-            # Write data to temp file
-            with open(self.download_path, "wb") as fh:
-                fh.write(reply.readAll().data())
-            reply.deleteLater()
+            except Exception as exc:  # noqa: BLE001
+                self.error_msg = f"GeoTIFF download failed: {type(exc).__name__}: {exc}"
+                return False
 
             self.setProgress(95)
             return True
