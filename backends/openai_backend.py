@@ -93,13 +93,14 @@ analyse?", options=["POP2020","POP2010","AREA_KM2","NAME"]).
    the average area?") and the answer is just numbers — no map
    needed.
 
-   When you add a derived result layer, call add_layer with
-   is_analysis=true. That tags it as a persistent result and reuses
-   it by name on a repeat run instead of stacking duplicates. Treat
-   analysis layers as keepers — never delete or clear them afterwards
-   unless the user explicitly asks. After adding any derived analysis
-   layer, always call zoom_to_layer(layer_id) so the user sees the
-   result immediately.
+    When you add a derived result layer, call add_layer with
+    is_analysis=true. That tags it as a persistent result and preserves
+    it across turns — if a layer with the same name already exists from a
+    previous turn, the new layer is automatically renamed (e.g.
+    "NDVI (2)") instead of replacing the old one. Treat analysis layers as
+    keepers — never delete or clear them afterwards unless the user
+    explicitly asks. After adding any derived analysis layer, always call
+    zoom_to_layer(layer_id) so the user sees the result immediately.
 
 Prefer the table first, then the chart, then the layer. The table
 anchors the numbers, the chart gives the shape, the layer gives the

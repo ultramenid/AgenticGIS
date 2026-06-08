@@ -12,6 +12,7 @@ network manager can be absent in headless/test contexts.
 """
 
 from qgis.PyQt.QtCore import QSettings
+from qgis.PyQt.QtNetwork import QNetworkDiskCache
 
 # QGIS desktop stores its network disk-cache config under these QSettings keys
 # (the same ones behind Settings -> Options -> Network -> Cache).
@@ -23,6 +24,94 @@ _MB = 1024 * 1024
 # Default size applied at startup ONLY when QGIS's cache is off (size 0). A
 # user's existing positive size (including QGIS's own default) is never changed.
 DEFAULT_CACHE_MB = 1024
+
+
+class ForcedNetworkDiskCache(QNetworkDiskCache):
+    """QNetworkDiskCache that forces tile caching even when servers send
+    no-cache headers (common for GEE WMS/XYZ tiles).
+
+    Only overrides saveToDisk for GET tile-like URLs; respects headers for
+    everything else. Diagnostic messages are sent to the QGIS log so users
+    can see what is (or is not) being cached.
+    """
+
+    _TILE_PATTERNS = ("/tiles/", "/wms", "/wmts", "/xyz", "earthengine", "tile")
+
+    def insert(self, device):
+        meta = self.metaData()
+        url = meta.url().toString()
+        is_tile = any(p in url.lower() for p in self._TILE_PATTERNS)
+
+        if not meta.saveToDisk() and is_tile:
+            try:
+                from qgis.core import QgsMessageLog
+                QgsMessageLog.logMessage(
+                    f"[AgenticGIS Cache] FORCE tile: {url[:120]}", "AgenticGIS"
+                )
+            except Exception:  # nosec B110
+                pass
+            meta.setSaveToDisk(True)
+            self.setMetaData(meta)
+        else:
+            try:
+                from qgis.core import QgsMessageLog
+                status = "SAVE" if meta.saveToDisk() else "SKIP"
+                QgsMessageLog.logMessage(
+                    f"[AgenticGIS Cache] {status}: {url[:120]}", "AgenticGIS"
+                )
+            except Exception:  # nosec B110
+                pass
+
+        super().insert(device)
+
+    def prepare(self, metaData):
+        url = metaData.url().toString()
+        result = super().prepare(metaData)
+        try:
+            from qgis.core import QgsMessageLog
+            hit = result is not None
+            QgsMessageLog.logMessage(
+                f"[AgenticGIS Cache] {'HIT' if hit else 'MISS'}: {url[:120]}",
+                "AgenticGIS",
+            )
+        except Exception:  # nosec B110
+            pass
+        return result
+
+
+class _ForcedCacheInstaller:
+    """One-shot helper that swaps the NAM cache for ForcedNetworkDiskCache."""
+
+    _installed = False
+
+    @classmethod
+    def ensure(cls):
+        if cls._installed:
+            return True
+        nam = _nam()
+        if nam is None:
+            return False
+        old = nam.cache()
+        forced = ForcedNetworkDiskCache(nam)
+        if old is not None:
+            try:
+                forced.setCacheDirectory(old.cacheDirectory())
+                forced.setMaximumCacheSize(old.maximumCacheSize())
+            except Exception:  # nosec B110
+                pass
+        try:
+            nam.setCache(forced)
+        except Exception:  # nosec B110
+            return False
+        cls._installed = True
+        try:
+            from qgis.core import QgsMessageLog
+            QgsMessageLog.logMessage(
+                "[AgenticGIS Cache] ForcedNetworkDiskCache installed", "AgenticGIS"
+            )
+        except Exception:  # nosec B110
+            pass
+        return True
 
 
 def _nam():
@@ -107,6 +196,8 @@ def set_network_cache_size(size_mb):
                 cache.setMaximumCacheSize(size_bytes)
         except Exception:  # nosec B110
             pass
+    # Ensure the custom forced-cache wrapper is active (first call only).
+    _ForcedCacheInstaller.ensure()
     return network_cache_state()
 
 

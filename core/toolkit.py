@@ -47,6 +47,20 @@ from .processing_tasks import run_processing_algorithm_task
 
 
 # ── Safe HTTP helpers (defense against non-HTTP(S) schemes) ──────────────
+
+
+def _unique_layer_name(name):
+    """Return a unique layer name by appending (2), (3), etc. if it already exists."""
+    project = QgsProject.instance()
+    existing_names = {layer.name() for layer in project.mapLayers().values()}
+    if name not in existing_names:
+        return name
+    counter = 2
+    while f"{name} ({counter})" in existing_names:
+        counter += 1
+    return f"{name} ({counter})"
+
+
 def _safe_urlopen(request, **kwargs):
     """Wrap ``urllib.request.urlopen`` and reject non-HTTP(S) schemes.
 
@@ -1680,12 +1694,13 @@ class QgisToolkit:
     # ------------------------------------------------------------------ #
     def add_layer(self, uri, name=None, provider="ogr", zoom=False, is_analysis=False):
         name = name or uri.split("/")[-1]
-        # Reuse an existing analysis layer with the same logical name instead
-        # of stacking duplicates on the canvas.
+        # For analysis layers, preserve existing layers from previous turns.
+        # If a layer with the same name already exists, rename the new one
+        # with a (2), (3), etc. suffix instead of deleting the old layer.
         if is_analysis:
             existing_id = self._analysis_layers.get(name)
             if existing_id and QgsProject.instance().mapLayer(existing_id) is not None:
-                QgsProject.instance().removeMapLayer(existing_id)
+                name = _unique_layer_name(name)
         if provider in ("gdal", "raster"):
             from qgis.core import QgsRasterLayer
             layer = QgsRasterLayer(uri, name)

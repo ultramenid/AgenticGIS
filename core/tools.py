@@ -189,8 +189,9 @@ TOOL_SPECS = [
             "canvas refresh, which keeps large layer loads responsive. "
             "Set is_analysis=true for layers you derive as analysis results "
             "(buffers, joins, filtered subsets, etc.): these are tracked as "
-            "persistent results, reused by name instead of duplicated, and "
-            "never auto-deleted. After this, call zoom_to_layer so the user "
+            "persistent results, preserved across turns, and automatically "
+            "renamed (e.g. 'NDVI (2)') if a layer with the same name already "
+            "exists from a previous turn. After this, call zoom_to_layer so the user "
             "sees the result on the map."
         ),
         "input_schema": {
