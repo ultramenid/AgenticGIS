@@ -43,3 +43,5 @@ tests/
 # Markdown files (except README)
 *.md
 !README.md
+build_release.sh
+*.zip

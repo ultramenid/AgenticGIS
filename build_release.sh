@@ -45,9 +45,9 @@ for f in __init__.py plugin.py config.py metadata.txt; do
     fi
 done
 
-# Create ZIP with AgenticGIS/ folder at root
+# Create ZIP with AgenticGIS/ folder at root (exclude __pycache__ and .pyc for security)
 cd "$BUILD_DIR"
-zip -r "$ZIP_NAME" AgenticGIS/
+zip -r "$ZIP_NAME" AgenticGIS/ -x "*/__pycache__/*" "*/__init__.cpython*" "*/.pyc"
 
 # Move to project root
 mv "$ZIP_NAME" "$PLUGIN_ROOT/"

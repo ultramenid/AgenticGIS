@@ -292,7 +292,7 @@ def _dispatch_one_tool(toolkit, executor, name, tool_input, emit, should_stop):
     if (
         isinstance(result, dict)
         and result.get("ok")
-        and not name in _VISUALIZATION_TOOLS
+        and name not in _VISUALIZATION_TOOLS
         and (result.get("file_path") or result.get("download_path"))
     ):
         emit(AgentEvent(EventType.VISUALIZATION, {

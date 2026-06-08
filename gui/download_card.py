@@ -6,7 +6,6 @@ Displays filename, file type, and a download button.
 
 import os
 
-from qgis.PyQt.QtCore import Qt
 from qgis.PyQt.QtGui import QFont
 from qgis.PyQt.QtWidgets import (
     QFrame,
@@ -15,7 +14,7 @@ from qgis.PyQt.QtWidgets import (
     QVBoxLayout,
 )
 
-from .downloadable import HoverDownloadButton, save_file_copy, _safe_name
+from .downloadable import HoverDownloadButton, save_file_copy
 
 _SURFACE = "#161616"
 _BORDER = "#2e2e2e"

@@ -135,7 +135,7 @@ class GifWidget(QFrame):
         super().resizeEvent(event)
         self._position_label_overlay()
 
-def _save(self):
+    def _save(self):
         # Prefer Pillow-baked GIF with labels; fall back to original file copy.
         baked = self._bake_labels_to_gif()
         if baked and os.path.exists(baked):
@@ -232,7 +232,9 @@ def _save(self):
             return None
         # Save baked GIF to a temp file next to the original
         import tempfile
-        fd, tmp_path = tempfile.mkstemp(suffix="_labeled.gif", dir=os.path.dirname(gif_path))
+        fd, tmp_path = tempfile.mkstemp(
+            suffix="_labeled.gif", dir=os.path.dirname(gif_path)
+        )
         os.close(fd)
         try:
             frames[0].save(
