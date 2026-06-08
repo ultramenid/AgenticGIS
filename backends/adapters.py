@@ -137,21 +137,39 @@ class CliAdapter:
         # requiring the whole text to be valid JSON.
         if "{" not in stripped:
             return None
-        idx = stripped.find('{"type"')
+        # Search for "type" key anywhere after an opening brace — handles
+        # both compact {"type":...} and spaced { "type": ... } JSON.
+        idx = stripped.find('"type"')
         if idx == -1:
             return None
-        candidate = stripped[idx:]
+        # Walk back to the opening brace that starts this object
+        brace_idx = None
+        for i in range(idx, -1, -1):
+            if stripped[i] == "{":
+                brace_idx = i
+                break
+        if brace_idx is None:
+            return None
+        idx = brace_idx
+
+        # Find the matching closing brace so we don't include trailing text.
+        brace_depth = 0
+        end_idx = None
+        for i, ch in enumerate(stripped[idx:], start=idx):
+            if ch == "{":
+                brace_depth += 1
+            elif ch == "}":
+                brace_depth -= 1
+                if brace_depth == 0:
+                    end_idx = i + 1
+                    break
+        if end_idx is None:
+            return None
+        candidate = stripped[idx:end_idx]
         try:
             payload = json.loads(candidate)
         except (json.JSONDecodeError, ValueError):
-            # Try to find the next occurrence if first parse fails
-            idx2 = stripped.find('{"type"', idx + 1)
-            if idx2 == -1:
-                return None
-            try:
-                payload = json.loads(stripped[idx2:])
-            except (json.JSONDecodeError, ValueError):
-                return None
+            return None
         if not isinstance(payload, dict):
             return None
         if payload.get("type") != "tool_calls":

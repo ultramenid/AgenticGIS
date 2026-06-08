@@ -356,6 +356,7 @@ class AgentTurnBubble(QFrame):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._groups: dict = {}   # tool_name → ToolGroupRow
+        self._tool_keys: dict = {}  # (name, input_json) → ToolSubItem (dedup)
         self._stream_text = ""
         self._stream_html = ""
         self._progress_text = ""
@@ -461,6 +462,11 @@ class AgentTurnBubble(QFrame):
 
     def add_tool(self, tool_name: str, tool_input: dict) -> ToolSubItem:
         """Add a tool call; creates group if tool_name is new. Returns ToolSubItem."""
+        tool_key = (tool_name, json.dumps(tool_input or {}, sort_keys=True))
+        if tool_key in self._tool_keys:
+            # Duplicate TOOL_USE event (e.g. CLI backend emits during stream
+            # and again in _dispatch_one_tool).  Return the existing item.
+            return self._tool_keys[tool_key]
         if tool_name not in self._groups:
             group = ToolGroupRow(tool_name, self._tools_area)
             self._groups[tool_name] = group
@@ -468,6 +474,7 @@ class AgentTurnBubble(QFrame):
             self._tools_area.setVisible(True)
         item = self._groups[tool_name].add_item(tool_input)
         item._bubble = self
+        self._tool_keys[tool_key] = item
         return item
 
     def stream_reasoning(self, text_chunk: str) -> None:
