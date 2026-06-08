@@ -207,10 +207,18 @@ class ChartWidget(QFrame):
         painter.drawRoundedRect(box, 6, 6)
         painter.setFont(font_label)
         painter.setPen(QColor(_TEXT_2))
-        painter.drawText(box.adjusted(10, 6, -10, -22), Qt.AlignLeft | Qt.AlignVCenter, label)
+        painter.drawText(
+            box.adjusted(10, 6, -10, -22),
+            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+            label,
+        )
         painter.setFont(font_value)
         painter.setPen(QColor(_TEXT))
-        painter.drawText(box.adjusted(10, 22, -10, -6), Qt.AlignLeft | Qt.AlignVCenter, value)
+        painter.drawText(
+            box.adjusted(10, 22, -10, -6),
+            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+            value,
+        )
         painter.restore()
 
     def _draw_empty(self, painter, rect):

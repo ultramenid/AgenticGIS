@@ -590,7 +590,12 @@ class ChatDock(QgsDockWidget):
         return super().eventFilter(obj, event)
 
     def _newline_modifier(self, modifiers):
-        return bool(modifiers & (Qt.ShiftModifier | Qt.AltModifier | Qt.MetaModifier | Qt.ControlModifier))
+        return bool(modifiers & (
+            Qt.KeyboardModifier.ShiftModifier
+            | Qt.KeyboardModifier.AltModifier
+            | Qt.KeyboardModifier.MetaModifier
+            | Qt.KeyboardModifier.ControlModifier
+        ))
 
     def _remember_prompt(self, message):
         message = message.strip() if isinstance(message, str) else ""

@@ -129,6 +129,29 @@ def _make_qgs_feedback(event):
     return fb
 
 
+def _map_layer_type_name(layer):
+    """Return 'vector', 'raster', or 'other' for a QgsMapLayer, compatible
+    with both QGIS 3 (flat enum) and QGIS 4 (LayerType enum)."""
+    try:
+        layer_type = layer.type()
+    except Exception:  # noqa: BLE001
+        return "other"
+    # QGIS 4: QgsMapLayer.LayerType.VectorLayer
+    layer_type_cls = getattr(QgsMapLayer, "LayerType", None)
+    if layer_type_cls is not None:
+        if layer_type == getattr(layer_type_cls, "VectorLayer", None):
+            return "vector"
+        if layer_type == getattr(layer_type_cls, "RasterLayer", None):
+            return "raster"
+        return "other"
+    # QGIS 3: flat constants QgsMapLayer.VectorLayer / QgsMapLayer.RasterLayer
+    if layer_type == getattr(QgsMapLayer, "VectorLayer", None):
+        return "vector"
+    if layer_type == getattr(QgsMapLayer, "RasterLayer", None):
+        return "raster"
+    return "other"
+
+
 def _layer_brief(layer):
     # Guard every call: temporary/scratch layers can have a live Python wrapper
     # but a partially-freed C++ object, causing a segfault if accessed naively.
@@ -136,9 +159,7 @@ def _layer_brief(layer):
         info = {
             "id": layer.id(),
             "name": layer.name(),
-            "type": "vector" if layer.type() == QgsMapLayer.VectorLayer else (
-                "raster" if layer.type() == QgsMapLayer.RasterLayer else "other"
-            ),
+            "type": _map_layer_type_name(layer),
             "crs": layer.crs().authid() if layer.crs().isValid() else None,
             "valid": layer.isValid(),
         }
@@ -186,6 +207,20 @@ EVENT_PUMP_INTERVAL = 100
 # Timeout for background tool fallback to main-thread execution (seconds).
 # Must be bounded so Stop button remains responsive.
 _BG_TASK_FALLBACK_TIMEOUT = 30.0
+
+
+def _task_can_cancel():
+    """Return the task cancellation flag constant, compatible with both
+    QGIS 3 (_task_can_cancel()) and QGIS 4 (Qgis.TaskFlag.CanCancel)."""
+    # Try QGIS 4 style first
+    qgis_task_flag = getattr(Qgis, "TaskFlag", None)
+    if qgis_task_flag is not None:
+        val = getattr(qgis_task_flag, "CanCancel", None)
+        if val is not None:
+            return val
+    # Fall back to QGIS 3 style
+    return getattr(QgsTask, "CanCancel", None)
+
 
 # ── Google Earth Engine helpers ──────────────────────────────────────────
 _gee_initialized = False
@@ -1570,7 +1605,7 @@ class QgisToolkit:
         """QgsTask that runs tile preloading off the main thread."""
 
         def __init__(self, description, layer_id, zoom_levels, max_tiles):
-            super().__init__(description, QgsTask.CanCancel)
+            super().__init__(description, _task_can_cancel())
             self.layer_id = layer_id
             self.zoom_levels = zoom_levels
             self.max_tiles = max_tiles
@@ -2025,7 +2060,7 @@ class QgisToolkit:
         """Background task for ee.Initialize() + auth test."""
 
         def __init__(self):
-            super().__init__("GEE: Checking status", QgsTask.CanCancel)
+            super().__init__("GEE: Checking status", _task_can_cancel())
             self.result = {
                 "ok": True,
                 "plugin_installed": False,
@@ -2081,7 +2116,7 @@ class QgisToolkit:
         """Background task for fetching GEE dataset STAC metadata."""
 
         def __init__(self, dataset_id, ee_stac_base):
-            super().__init__(f"GEE: {dataset_id}", QgsTask.CanCancel)
+            super().__init__(f"GEE: {dataset_id}", _task_can_cancel())
             self.dataset_id = dataset_id
             self.ee_stac_base = ee_stac_base
             self.result = None
@@ -2423,7 +2458,6 @@ class QgisToolkit:
             QgsCoordinateReferenceSystem,
             QgsCoordinateTransform,
             QgsGeometry,
-            QgsMapLayer,
         )
 
         project = QgsProject.instance()
@@ -2445,7 +2479,7 @@ class QgisToolkit:
             }
 
         # Non-vector layers (rasters): only a bounding box is meaningful.
-        if layer.type() != QgsMapLayer.VectorLayer or geometry_mode == "bbox":
+        if _map_layer_type_name(layer) != "vector" or geometry_mode == "bbox":
             return _bbox_result()
 
         feat_count = layer.featureCount()
@@ -2555,7 +2589,7 @@ class QgisToolkit:
 
         def __init__(self, description, code, vis_params, name, region,
                      features, export_format, export_scale):
-            super().__init__(description, QgsTask.CanCancel)
+            super().__init__(description, _task_can_cancel())
             self.code = code
             self.vis_params = vis_params
             self.name = name
@@ -2951,7 +2985,7 @@ class QgisToolkit:
 
         def __init__(self, description, code, vis_params, name, region,
                      features, fps, dimensions, frame_labels=None):
-            super().__init__(description, QgsTask.CanCancel)
+            super().__init__(description, _task_can_cancel())
             self.code = code
             self.vis_params = vis_params
             self.name = name

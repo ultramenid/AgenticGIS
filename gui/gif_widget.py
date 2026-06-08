@@ -135,10 +135,118 @@ class GifWidget(QFrame):
         super().resizeEvent(event)
         self._position_label_overlay()
 
-    def _save(self):
+def _save(self):
+        # Prefer Pillow-baked GIF with labels; fall back to original file copy.
+        baked = self._bake_labels_to_gif()
+        if baked and os.path.exists(baked):
+            save_file_copy(
+                self,
+                baked,
+                _safe_name(self._name, "animation", ".gif"),
+                "GIF (*.gif)",
+            )
+            try:
+                os.remove(baked)
+            except OSError:
+                pass
+            return
+        # Pillow unavailable or failed — save the original GIF without labels.
         save_file_copy(
             self,
             self._gif_path,
             _safe_name(self._name, "animation", ".gif"),
             "GIF (*.gif)",
         )
+
+    # ── Optional Pillow label-burning ──────────────────────────────────────
+
+    def _bake_labels_to_gif(self):
+        """Re-encode the GIF so per-frame labels are burned into every frame.
+
+        Returns the path of a temporary baked GIF, or None if Pillow is not
+        available or the bake fails.  The caller is responsible for deleting the
+        temp file after copying it to the user's chosen location.
+        """
+        if not self._gif_path or not self._frame_labels:
+            return None
+        try:
+            from PIL import Image, ImageDraw, ImageFont
+        except Exception:
+            return None
+        gif_path = self._gif_path
+        labels = self._frame_labels
+        try:
+            img = Image.open(gif_path)
+        except Exception:
+            return None
+        frames = []
+        durations = []
+        frame_idx = 0
+        while True:
+            try:
+                # Copy frame so we can modify it
+                frame = img.copy()
+            except Exception:
+                break
+            # Convert palette images to RGB for text drawing
+            if frame.mode in ("P", "L", "1"):
+                frame = frame.convert("RGB")
+            # Draw label for this frame (loop if fewer labels than frames)
+            label = labels[min(frame_idx, len(labels) - 1)] if labels else ""
+            if label:
+                draw = ImageDraw.Draw(frame)
+                # Use a system font if available; fall back to default bitmap
+                try:
+                    font = ImageFont.truetype("/System/Library/Fonts/Helvetica.ttc", 18)
+                except Exception:
+                    try:
+                        font = ImageFont.truetype("arial.ttf", 18)
+                    except Exception:
+                        font = ImageFont.load_default()
+                # Measure text and position bottom-right with padding
+                bbox = draw.textbbox((0, 0), label, font=font)
+                tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
+                pad = 8
+                x = max(0, frame.width - tw - pad)
+                y = max(0, frame.height - th - pad)
+                # Dark translucent background pill behind text
+                pill = (
+                    max(0, x - 4),
+                    max(0, y - 2),
+                    min(frame.width, x + tw + 4),
+                    min(frame.height, y + th + 4),
+                )
+                draw.rectangle(pill, fill=(0, 0, 0, 160))
+                draw.text((x, y), label, fill=(255, 255, 255, 255), font=font)
+            # Convert back to palette for GIF
+            frames.append(frame.convert("P", palette=Image.ADAPTIVE))
+            # Duration in ms (default 100 ms)
+            dur = img.info.get("duration", 100)
+            durations.append(dur if dur is not None else 100)
+            frame_idx += 1
+            try:
+                img.seek(frame_idx)
+            except EOFError:
+                break
+        if not frames:
+            return None
+        # Save baked GIF to a temp file next to the original
+        import tempfile
+        fd, tmp_path = tempfile.mkstemp(suffix="_labeled.gif", dir=os.path.dirname(gif_path))
+        os.close(fd)
+        try:
+            frames[0].save(
+                tmp_path,
+                save_all=True,
+                append_images=frames[1:],
+                duration=durations,
+                loop=img.info.get("loop", 0),
+                optimize=False,
+            )
+        except Exception:
+            try:
+                os.remove(tmp_path)
+            except OSError:
+                pass
+            return None
+        return tmp_path

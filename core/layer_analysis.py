@@ -17,6 +17,34 @@ DEFAULT_SAMPLE_LIMIT = 5
 DEFAULT_TOP_LIMIT = 10
 
 
+def _geometry_type_name(layer):
+    """Return human-readable geometry type string, compatible with both
+    QGIS 3 (QgsWkbTypes.geometryDisplayString) and QGIS 4 (may be removed)."""
+    try:
+        gtype = layer.geometryType()
+    except Exception:  # noqa: BLE001
+        return "unknown"
+    # Try QGIS 3 API first
+    try:
+        return QgsWkbTypes.geometryDisplayString(gtype)
+    except AttributeError:
+        pass
+    # QGIS 4 fallback: use Qgis.GeometryType enum if available
+    if Qgis is not None:
+        geom_cls = getattr(Qgis, "GeometryType", None)
+        if geom_cls is not None:
+            names = {getattr(geom_cls, "Point", 1): "Point",
+                     getattr(geom_cls, "Line", 2): "LineString",
+                     getattr(geom_cls, "Polygon", 3): "Polygon",
+                     getattr(geom_cls, "Null", 4): "No geometry",
+                     getattr(geom_cls, "Unknown", 0): "Unknown geometry"}
+            return names.get(gtype, "Unknown geometry")
+    # Final fallback: map integer constants
+    names = {0: "Unknown geometry", 1: "Point", 2: "LineString",
+             3: "Polygon", 4: "No geometry"}
+    return names.get(int(gtype) if gtype is not None else 0, "Unknown geometry")
+
+
 def analyze_vector_layer(
     layer,
     fields=None,
@@ -141,7 +169,7 @@ def summarize_vector_layer(layer):
         "provider": layer.providerType(),
         "is_valid": layer.isValid(),
         "feature_count": _known_feature_count(layer),
-        "geometry_type": QgsWkbTypes.geometryDisplayString(layer.geometryType()),
+        "geometry_type": _geometry_type_name(layer),
         "crs": layer.crs().authid() if layer.crs().isValid() else None,
         "fields": fields,
     }

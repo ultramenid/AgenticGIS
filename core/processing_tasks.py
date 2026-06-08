@@ -108,7 +108,13 @@ def run_processing_algorithm_task(
         if hasattr(context, "setProject"):
             context.setProject(QgsProject.instance())
         feedback = QgsProcessingFeedback()
-        flags = getattr(QgsProcessingAlgRunnerTask, "CanCancel", QgsTask.CanCancel)
+        # Lazy default: avoid eager evaluation of QgsTask.CanCancel in case
+        # it is removed in QGIS 4 (would crash before the getattr fallback).
+        try:
+            _default_flag = QgsTask.CanCancel
+        except AttributeError:
+            _default_flag = 0  # fallback when QGIS 4 removes the constant
+        flags = getattr(QgsProcessingAlgRunnerTask, "CanCancel", _default_flag)
         task = QgsProcessingAlgRunnerTask(algorithm, params, context, feedback, flags)
 
         # PyQGIS callers must keep these alive for the whole task lifetime.
