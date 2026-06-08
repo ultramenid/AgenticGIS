@@ -816,29 +816,35 @@ class ChatDock(QgsDockWidget):
         self._restoring_transcript = True
         self._clear_live_ui()
         self._pending_restore_events = list(events or [])
+        self._restore_index = 0
         self._restore_transcript_batch()
 
     def _restore_transcript_batch(self):
         batch_size = 20
-        for _ in range(batch_size):
-            if not self._pending_restore_events:
-                self._finish_restore()
-                return
-            event = self._pending_restore_events.pop(0)
-            etype = event.get("type") if isinstance(event, dict) else None
-            if etype == "user":
-                self._add_widget(MessageContainer(event.get("text", ""), sender_name="You", is_user=True))
-            elif etype == "agent_turn":
-                self._restore_agent_turn(event)
-            elif etype == "chart":
-                self._add_widget(ChartWidget(event.get("data") or {}))
-            elif etype == "stats":
-                self._add_widget(StatsWidget(event.get("data") or {}))
-            elif etype == "error":
-                self._add_widget(MessageContainer(html.escape(
-                    str(event.get("text", ""))), is_user=False, is_error=True))
-            elif etype == "compaction":
-                self._add_compaction_notice()
+        self.transcript_widget.setUpdatesEnabled(False)
+        try:
+            for _ in range(batch_size):
+                if self._restore_index >= len(self._pending_restore_events):
+                    self._finish_restore()
+                    return
+                event = self._pending_restore_events[self._restore_index]
+                self._restore_index += 1
+                etype = event.get("type") if isinstance(event, dict) else None
+                if etype == "user":
+                    self._add_widget(MessageContainer(event.get("text", ""), sender_name="You", is_user=True))
+                elif etype == "agent_turn":
+                    self._restore_agent_turn(event)
+                elif etype == "chart":
+                    self._add_widget(ChartWidget(event.get("data") or {}))
+                elif etype == "stats":
+                    self._add_widget(StatsWidget(event.get("data") or {}))
+                elif etype == "error":
+                    self._add_widget(MessageContainer(html.escape(
+                        str(event.get("text", ""))), is_user=False, is_error=True))
+                elif etype == "compaction":
+                    self._add_compaction_notice()
+        finally:
+            self.transcript_widget.setUpdatesEnabled(True)
         QTimer.singleShot(0, self._restore_transcript_batch)
 
     def _finish_restore(self):
@@ -1333,6 +1339,8 @@ class ChatDock(QgsDockWidget):
             return
         self._save_current_session(immediate=True)
         session = self._session_store.create_session(name)
+        if self._toolkit is not None:
+            self._toolkit.clear_session_approvals()
         self._switch_to_session(session["id"], save_current=False)
 
     def _rename_current_session(self):
@@ -1556,18 +1564,24 @@ class ChatDock(QgsDockWidget):
         self._restore_transcript(self._transcript_events)
         self._update_session_name_label()
         self._set_status("Ready", _SUCCESS, icon="✓")
+        if self._toolkit is not None:
+            self._toolkit.clear_session_approvals()
         return True
 
     def _clear_transcript_widgets(self):
-        self.transcript_widget.hide()
+        self.transcript_widget.setUpdatesEnabled(False)
         try:
-            while self.transcript_layout.count() > 1:
-                item = self.transcript_layout.takeAt(0)
-                w = item.widget()
-                if w is not None:
-                    w.deleteLater()
+            self.transcript_widget.hide()
+            try:
+                while self.transcript_layout.count() > 1:
+                    item = self.transcript_layout.takeAt(0)
+                    w = item.widget()
+                    if w is not None:
+                        w.deleteLater()
+            finally:
+                self.transcript_widget.show()
         finally:
-            self.transcript_widget.show()
+            self.transcript_widget.setUpdatesEnabled(True)
 
     def _clear(self):
         self._stop_active_worker()
@@ -1867,14 +1881,14 @@ class ChatDock(QgsDockWidget):
             self._hide_typing()
             self._finish_streaming()
             self._add_error_message(str(ev.data.get("error", "")))
-            self._save_current_session(immediate=True)
+            self._save_current_session()
 
         elif ev.type == EventType.DONE:
             self._flush_stream_render()
             self._hide_typing()
             self._finish_streaming()
             self._finalize_current_turn_event()
-            self._save_current_session(immediate=True)
+            self._save_current_session()
             self._streaming = False
             self._thinking_started = False
             self._thinking_text = ""
@@ -2003,7 +2017,7 @@ class ChatDock(QgsDockWidget):
         if worker is not None and self._worker is not None and worker is not self._worker:
             return
         self._history = history if history is not None else self._history
-        self._save_current_session(immediate=True)
+        self._save_current_session()
         # NOTE: do NOT call _finish_streaming here — the DONE event handler
         # already finalized the turn and reset _current_agent_turn to None.
         # Calling it again would re-create an empty turn and call

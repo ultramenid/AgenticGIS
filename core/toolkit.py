@@ -183,6 +183,20 @@ EVENT_PUMP_INTERVAL = 100
 # Must be bounded so Stop button remains responsive.
 _BG_TASK_FALLBACK_TIMEOUT = 30.0
 
+# ── Google Earth Engine helpers ──────────────────────────────────────────
+_gee_initialized = False
+_GEE_AUTO_MAP_THRESHOLD_KM2 = 50000  # km² — auto-switch to 'map' above this
+
+
+def _ensure_gee_initialized():
+    """Idempotent Earth Engine initialization per QGIS session."""
+    global _gee_initialized
+    if _gee_initialized:
+        return
+    import ee
+    ee.Initialize()
+    _gee_initialized = True
+
 
 def _is_blank_chart_label(value):
     if value is None:
@@ -530,6 +544,9 @@ class QgisToolkit:
         # These are meant to persist; the agent reuses them instead of
         # recreating and never auto-deletes them.
         self._analysis_layers = {}
+        # Session-level approval for tool categories (e.g., "gee").
+        # Reset when the user starts a new chat session.
+        self._session_approved_tool_categories = set()
         # hook QGIS's plugins-changed signal so the algorithm list
         # reflects newly-enabled providers (GRASS, SAGA, custom plugins)
         # without a plugin restart.
@@ -723,6 +740,17 @@ class QgisToolkit:
             for item in value:
                 yield from self._iter_strings(item)
 
+    @staticmethod
+    def _tool_category(tool_name):
+        """Return a category string for session-level approval grouping.
+
+        Tools in the same category share a single session approval prompt.
+        Returns None for tools that are not part of a grouped category.
+        """
+        if tool_name.startswith("gee_"):
+            return "gee"
+        return None
+
     def _external_access_reason(self, tool_name, args):
         args = dict(args or {})
         if tool_name == "add_layer" and self._looks_external_reference(args.get("uri")):
@@ -759,6 +787,9 @@ class QgisToolkit:
                     f"catalog for '{ds.strip()}'"
                 )
 
+        if tool_name == "gee_add_layer":
+            return "run an Earth Engine expression and add the result to the canvas"
+
         return None
 
     def confirm_external_access(self, tool_name, args):
@@ -775,22 +806,35 @@ class QgisToolkit:
             log_event("external_access.allowed", tool=tool_name, reason=reason, permanent=True)
             return None
 
+        category = self._tool_category(tool_name)
+        if category and category in self._session_approved_tool_categories:
+            log_event("external_access.allowed", tool=tool_name, reason=reason, session_category=category)
+            return None
+
+        options = [
+            {
+                "label": "Allow once",
+                "description": "Permit this operation, then ask again next time.",
+            },
+            {
+                "label": "Always allow",
+                "description": "Permit external access now and remember this choice.",
+            },
+            {
+                "label": "Deny",
+                "description": "Block this operation and keep analysis inside loaded layers.",
+            },
+        ]
+        if category == "gee":
+            # Insert session-level approval for GEE tools before "Always allow"
+            options.insert(1, {
+                "label": "Allow all GEE tools for this session",
+                "description": "Permit all Earth Engine operations during this chat session.",
+            })
+
         answer = self.ask_user(
             f"Allow AgenticGIS to {reason}?",
-            [
-                {
-                    "label": "Allow once",
-                    "description": "Permit this operation, then ask again next time.",
-                },
-                {
-                    "label": "Always allow",
-                    "description": "Permit external access now and remember this choice.",
-                },
-                {
-                    "label": "Deny",
-                    "description": "Block this operation and keep analysis inside loaded layers.",
-                },
-            ],
+            options,
             allow_free_text=False,
         )
         if isinstance(answer, str):
@@ -799,6 +843,11 @@ class QgisToolkit:
         choice = (answer or {}).get("choice")
         if choice == "Allow once":
             log_event("external_access.allowed", tool=tool_name, reason=reason)
+            return None
+        if choice == "Allow all GEE tools for this session":
+            if category:
+                self._session_approved_tool_categories.add(category)
+            log_event("external_access.allowed", tool=tool_name, reason=reason, session_category=category)
             return None
         if choice == "Always allow":
             if self.config:
@@ -811,6 +860,10 @@ class QgisToolkit:
             "error": f"Permission denied: {reason}",
             "cancelled": True,
         }
+
+    def clear_session_approvals(self):
+        """Reset session-level tool-category approvals (e.g., when starting a new chat session)."""
+        self._session_approved_tool_categories.clear()
 
     # ------------------------------------------------------------------ #
     # Cancellation helpers                                                #
@@ -838,7 +891,14 @@ class QgisToolkit:
     # ------------------------------------------------------------------ #
     # Background read-only vector analysis                               #
     # ------------------------------------------------------------------ #
-    _BACKGROUND_TOOLS = {"analyze_layer", "create_chart", "get_layer_statistics"}
+    _BACKGROUND_TOOLS = {
+        "analyze_layer",
+        "create_chart",
+        "get_layer_statistics",
+        "gee_status",
+        "gee_dataset_info",
+        "gee_add_layer",
+    }
 
     def _ensure_background_task_state(self):
         """Initialize background-task fields for live dev-reloaded instances."""
@@ -883,6 +943,126 @@ class QgisToolkit:
         self._ensure_background_task_state()
         log_event("background_tool.start", tool=name, layer_id=layer_id)
 
+        # ------------------------------------------------------------------
+        # GEE tools — run heavy network / compute off the main thread.
+        # ------------------------------------------------------------------
+        if name == "gee_status":
+            def _gee_status_worker(_task):
+                return self.gee_status()
+
+            result = self._run_qgs_task(executor, "GEE status", _gee_status_worker)
+            log_event(
+                "background_tool.end",
+                tool=name,
+                path="qgs_task",
+                elapsed_ms=int((time.perf_counter() - start) * 1000),
+                ok=bool(result.get("ok")) if isinstance(result, dict) else None,
+            )
+            return result
+
+        if name == "gee_dataset_info":
+            ds_id = args.get("dataset_id", "")
+
+            def _gee_info_worker(_task):
+                return self.gee_dataset_info(dataset_id=ds_id)
+
+            result = self._run_qgs_task(
+                executor, f"GEE info {ds_id}", _gee_info_worker
+            )
+            log_event(
+                "background_tool.end",
+                tool=name,
+                path="qgs_task",
+                elapsed_ms=int((time.perf_counter() - start) * 1000),
+                ok=bool(result.get("ok")) if isinstance(result, dict) else None,
+            )
+            return result
+
+        if name == "gee_add_layer":
+            # Phase 1 — main-thread setup (region, mode selection).
+            setup = executor.run_sync(
+                lambda: self._gee_add_layer_setup(**args),
+                timeout=_BG_TASK_FALLBACK_TIMEOUT,
+            )
+            if isinstance(setup, dict) and not setup.get("ok"):
+                log_event(
+                    "background_tool.end",
+                    tool=name,
+                    path="setup_error",
+                    elapsed_ms=int((time.perf_counter() - start) * 1000),
+                    ok=False,
+                )
+                return setup
+            if isinstance(setup, dict) and setup.get("needs_decision"):
+                log_event(
+                    "background_tool.end",
+                    tool=name,
+                    path="needs_decision",
+                    elapsed_ms=int((time.perf_counter() - start) * 1000),
+                    ok=True,
+                )
+                return setup
+
+            # Phase 2 — background task (EE execution + download).
+            def _gee_layer_worker(_task):
+                task = self._GeeAddLayerTask(
+                    f"GEE: {setup['name']}",
+                    setup["code"],
+                    setup["vis_params"],
+                    setup["name"],
+                    setup.get("region"),
+                    setup.get("features"),
+                    setup["export_format"],
+                    setup["export_scale"],
+                )
+                QgsApplication.taskManager().addTask(task)
+                if not task.waitForFinished(180000):  # 3 min
+                    task.cancel()
+                    return {"ok": False, "error": "GEE task timed out after 3 minutes"}
+                if task.error_msg:
+                    return {"ok": False, "error": task.error_msg}
+                return {
+                    "ok": True,
+                    "download_path": task.download_path,
+                    "result_data": task.result_data,
+                    "final_scale": task.final_scale,
+                    "export_format": setup["export_format"],
+                    "name": setup["name"],
+                    "region_layer": setup.get("region_layer"),
+                    "zoom": setup.get("zoom", True),
+                    "mode_used": setup.get("mode_used"),
+                }
+
+            worker_result = self._run_qgs_task(
+                executor, f"GEE: {setup['name']}", _gee_layer_worker
+            )
+            if isinstance(worker_result, dict) and not worker_result.get("ok"):
+                log_event(
+                    "background_tool.end",
+                    tool=name,
+                    path="worker_error",
+                    elapsed_ms=int((time.perf_counter() - start) * 1000),
+                    ok=False,
+                )
+                return worker_result
+
+            # Phase 3 — main-thread finalisation (create layer, add to project).
+            result = executor.run_sync(
+                lambda: self._gee_add_layer_finish(worker_result),
+                timeout=_BG_TASK_FALLBACK_TIMEOUT,
+            )
+            log_event(
+                "background_tool.end",
+                tool=name,
+                path="qgs_task",
+                elapsed_ms=int((time.perf_counter() - start) * 1000),
+                ok=bool(result.get("ok")) if isinstance(result, dict) else None,
+            )
+            return result
+
+        # ------------------------------------------------------------------
+        # Vector-layer analysis tools (original background path).
+        # ------------------------------------------------------------------
         def snapshot():
             layer = QgsProject.instance().mapLayer(layer_id)
             if layer is None:
@@ -1776,28 +1956,22 @@ class QgisToolkit:
                 except Exception:  # nosec B110
                     pass
             try:
-                import ee
-            except Exception:
+                # Removed ee.Number(1).getInfo() auth test — ee.Initialize() success
+                # already proves connectivity, saving a slow getInfo() round-trip.
+                _ensure_gee_initialized()
+                self.result["ee_available"] = True
+                self.result["initialized"] = True
+                self.result["authenticated"] = True
+                self.result["message"] = (
+                    "Earth Engine is installed, authenticated, and ready."
+                )
+            except ImportError:
                 self.result["message"] = (
                     "Earth Engine API (ee) is not importable in this QGIS Python. "
                     "Install the 'Google Earth Engine' plugin from the QGIS Plugin "
                     "Manager (Plugins > Manage and Install Plugins), then restart QGIS."
                 )
                 return True  # task finished, but ee not available
-            self.result["ee_available"] = True
-            try:
-                ee.Initialize()
-                self.result["initialized"] = True
-                try:
-                    _ = ee.Number(1).getInfo()
-                    self.result["authenticated"] = True
-                    self.result["message"] = (
-                        "Earth Engine is installed, authenticated, and ready."
-                    )
-                except Exception as exc:  # noqa: BLE001
-                    self.result["message"] = (
-                        f"Initialized, but a test call failed: {exc}"
-                    )
             except Exception as exc:  # noqa: BLE001
                 self.result["message"] = (
                     "Earth Engine is not authenticated/initialized. In the QGIS Python "
@@ -1855,7 +2029,7 @@ class QgisToolkit:
         def _fallback_via_ee(self, dataset_id):
             try:
                 import ee
-                ee.Initialize()
+                _ensure_gee_initialized()
                 info = ee.data.getAsset(dataset_id)
                 if info:
                     return {
@@ -1968,7 +2142,7 @@ class QgisToolkit:
         except Exception:
             return None
         try:
-            ee.Initialize()
+            _ensure_gee_initialized()
         except Exception:  # nosec B110
             pass  # may already be initialized; a real failure surfaces below
         try:
@@ -1997,6 +2171,8 @@ class QgisToolkit:
             )
         # Collection assets carry no band list at the top level; sample the
         # first image's band names with one bounded getInfo call.
+        # This is a single necessary call; the result is used immediately and
+        # not cached because each asset lookup is independent.
         if not bands and asset_type == "image_collection":
             try:
                 names = ee.ImageCollection(asset_id).first().bandNames().getInfo()
@@ -2051,6 +2227,23 @@ class QgisToolkit:
                 extent.yMaximum(),
             ]
         )
+
+    def _estimate_layer_area_km2(self, layer):
+        """Approximate the bounding-box area of a QGIS layer in km²."""
+        import math
+        from qgis.core import QgsCoordinateReferenceSystem
+
+        extent = self._layer_extent_in_crs(
+            layer, QgsCoordinateReferenceSystem("EPSG:4326")
+        )
+        if extent is None or extent.isEmpty():
+            return 0.0
+        width_deg = extent.width()
+        height_deg = extent.height()
+        avg_lat = math.radians((extent.yMinimum() + extent.yMaximum()) / 2.0)
+        km_per_deg_lat = 111.0
+        km_per_deg_lon = 111.0 * math.cos(avg_lat)
+        return abs(width_deg * km_per_deg_lon * height_deg * km_per_deg_lat)
 
     @staticmethod
     def _geom_vertex_count(geom):
@@ -2288,7 +2481,7 @@ class QgisToolkit:
                 self.error_msg = f"EE import failed: {exc}"
                 return False
             try:
-                ee.Initialize()
+                _ensure_gee_initialized()
             except Exception:  # nosec B110
                 pass  # may already be initialized; a real failure surfaces below
 
@@ -2332,6 +2525,8 @@ class QgisToolkit:
             try:
                 download_region = None
                 if self.region is not None:
+                    # Single getInfo() call for bounds; result is stored in a local
+                    # variable and used immediately to build the download polygon.
                     bounds = self.region.bounds(maxError=1).getInfo()["coordinates"][0]
                     coords = [[pt[0], pt[1]] for pt in bounds]
                     download_region = _json.dumps(coords)
@@ -2416,7 +2611,7 @@ class QgisToolkit:
             self.setProgress(95)
             return True
 
-    def gee_add_layer(
+    def _gee_add_layer_setup(
         self,
         code,
         vis_params=None,
@@ -2426,28 +2621,15 @@ class QgisToolkit:
         geometry_mode="auto",
         max_vertices=5000,
         max_features=2000,
-        export_format="geotiff",
+        export_format=None,
         export_scale=250,
     ):
-        """Evaluate an Earth Engine expression and add the result to the canvas.
+        """Main-thread setup for ``gee_add_layer``.
 
-        ``code`` runs with ``ee``, ``Map`` (ee_plugin), ``iface``, an optional
-        ``region`` (ee.Geometry derived from ``region_layer_id``), and
-        ``features`` (an ee.FeatureCollection of that layer's features, or
-        None) in scope, and must assign the ee object to ``result``.
-
-        ``geometry_mode`` controls how ``region_layer_id`` is converted:
-        ``auto`` uses the true geometry but returns ``needs_decision`` when the
-        layer is too large (so the caller can ask the user); ``exact`` forces
-        the true geometry (subject to hard ceilings); ``simplify`` reduces
-        vertices to fit; ``bbox`` uses the bounding box only.
-
-        ``export_format`` controls how the result is loaded:
-        ``"map"`` (default) uses ee_plugin's Map.addLayer (WMS tile, slower
-        zoom). ``"geotiff"`` downloads as GeoTIFF and loads as a local raster
-        layer (instant zoom/pan, but requires download wait upfront).
+        Validates EE availability, builds the region / features from
+        ``region_layer_id``, and auto-selects the export format.  Returns a
+        dict with all fields the background worker and finaliser need.
         """
-        # Validate EE is available before launching background task.
         try:
             import ee
         except Exception as exc:  # noqa: BLE001
@@ -2456,7 +2638,7 @@ class QgisToolkit:
                 "error": f"Earth Engine API not available: {exc}. Run gee_status first.",
             }
         try:
-            from ee_plugin import Map as EEMap
+            from ee_plugin import Map as EEMap  # noqa: F401 (validates plugin is installed)
         except Exception as exc:  # noqa: BLE001
             return {
                 "ok": False,
@@ -2466,11 +2648,10 @@ class QgisToolkit:
                 ),
             }
         try:
-            ee.Initialize()
+            _ensure_gee_initialized()
         except Exception:  # nosec B110
             pass
 
-        # Build region / features on the main thread (quick, uses QGIS geometry).
         region, features, region_layer, mode_used = (None, None, None, None)
         if region_layer_id:
             try:
@@ -2488,40 +2669,87 @@ class QgisToolkit:
             region_layer = info.get("zoom_layer")
             mode_used = info.get("mode_used")
 
-        # ------------------------------------------------------------------
-        # Launch background task for heavy work (exec code + download).
-        # ------------------------------------------------------------------
-        task = self._GeeAddLayerTask(
-            f"GEE: {name}",
-            code,
-            vis_params,
-            name,
-            region,
-            features,
-            export_format,
-            export_scale,
-        )
-        QgsApplication.taskManager().addTask(task)
+        if export_format is None:
+            export_format = "geotiff"
+            if region_layer is not None:
+                try:
+                    area_km2 = self._estimate_layer_area_km2(region_layer)
+                    if area_km2 > _GEE_AUTO_MAP_THRESHOLD_KM2:
+                        export_format = "map"
+                except Exception:  # nosec B110
+                    pass
 
-        if not task.waitForFinished(180000):  # 3 min timeout
-            task.cancel()
-            return {"ok": False, "error": "GEE task timed out after 3 minutes"}
+        return {
+            "ok": True,
+            "code": code,
+            "vis_params": vis_params,
+            "name": name,
+            "region": region,
+            "features": features,
+            "region_layer": region_layer,
+            "export_format": export_format,
+            "export_scale": export_scale,
+            "zoom": zoom,
+            "mode_used": mode_used,
+        }
 
-        if task.error_msg:
-            return {"ok": False, "error": task.error_msg}
+    def _gee_add_layer_finish(self, worker_result):
+        """Main-thread finalisation after the background task finishes.
 
-        # ------------------------------------------------------------------
-        # Back on main thread: create layer and add to project.
-        # ------------------------------------------------------------------
+        ``worker_result`` is the dict returned by the background worker
+        (containing ``download_path``, ``result_data``, ``export_format``,
+        etc.).  Creates the QgsRasterLayer for geotiff mode or wires the
+        map mode result, then adds the layer to the project.
+        """
+        export_format = worker_result.get("export_format")
+        name = worker_result.get("name")
+        region_layer = worker_result.get("region_layer")
+        zoom = worker_result.get("zoom", True)
+        mode_used = worker_result.get("mode_used")
+
         if export_format == "geotiff":
-            return self._finish_ee_geotiff(task, name, region_layer, zoom)
+            tmp_path = worker_result.get("download_path")
+            if not tmp_path or not os.path.exists(tmp_path):
+                return {
+                    "ok": False,
+                    "error": "GeoTIFF download completed but temp file is missing",
+                }
+            layer = QgsRasterLayer(tmp_path, name, "gdal")
+            if not layer or not layer.isValid():
+                try:
+                    os.unlink(tmp_path)
+                except Exception:  # nosec B110
+                    pass
+                return {
+                    "ok": False,
+                    "error": f"Failed to load GeoTIFF as raster layer: {tmp_path}",
+                }
+            QgsProject.instance().addMapLayer(layer)
+            layer.setCustomProperty("gee_tiff_source", tmp_path)
+            self._gee_tiff_sources[layer.id()] = tmp_path
+            self._sync_gee_manifest(list(self._gee_tiff_sources.values()))
+            self._ensure_gee_tiff_cleanup_connection()
+            self._canvas_dirty = True
+            layer_id = layer.id()
+            zoomed = False
+            if zoom and region_layer is not None:
+                zoomed = self._zoom_to_layer(region_layer)
+            return {
+                "ok": True,
+                "name": name,
+                "layer_id": layer_id,
+                "zoomed": zoomed,
+                "final_scale": worker_result.get("final_scale"),
+            }
 
         # Map mode
         try:
+            from ee_plugin import Map as EEMap
+
             EEMap.addLayer(
-                task.result_data["obj"],
-                task.result_data["vis_params"] or {},
-                task.result_data["name"],
+                worker_result["result_data"]["obj"],
+                worker_result["result_data"]["vis_params"] or {},
+                worker_result["result_data"]["name"],
             )
         except Exception as exc:  # noqa: BLE001
             return {
@@ -2529,7 +2757,6 @@ class QgisToolkit:
                 "error": f"Map.addLayer failed: {type(exc).__name__}: {exc}",
             }
         self._canvas_dirty = True
-        # Find the layer ee_plugin just created (matched by name).
         layer_id = None
         for lyr in QgsProject.instance().mapLayers().values():
             if lyr.name() == name:
@@ -2544,6 +2771,75 @@ class QgisToolkit:
             "zoomed": zoomed,
             "geometry_mode": mode_used,
         }
+
+    def gee_add_layer(
+        self,
+        code,
+        vis_params=None,
+        name="GEE layer",
+        region_layer_id=None,
+        zoom=True,
+        geometry_mode="auto",
+        max_vertices=5000,
+        max_features=2000,
+        export_format=None,
+        export_scale=250,
+    ):
+        """Evaluate an Earth Engine expression and add the result to the canvas.
+
+        When called through the background-tool path (``run_background_tool``)
+        the heavy work runs off the main thread so the UI stays responsive.
+        When called directly on the main thread it still works, but will block
+        for the duration of the EE execution and download.
+        """
+        setup = self._gee_add_layer_setup(
+            code=code,
+            vis_params=vis_params,
+            name=name,
+            region_layer_id=region_layer_id,
+            zoom=zoom,
+            geometry_mode=geometry_mode,
+            max_vertices=max_vertices,
+            max_features=max_features,
+            export_format=export_format,
+            export_scale=export_scale,
+        )
+        if not setup.get("ok"):
+            return setup
+        if setup.get("needs_decision"):
+            return setup
+
+        task = self._GeeAddLayerTask(
+            f"GEE: {setup['name']}",
+            setup["code"],
+            setup["vis_params"],
+            setup["name"],
+            setup.get("region"),
+            setup.get("features"),
+            setup["export_format"],
+            setup["export_scale"],
+        )
+        QgsApplication.taskManager().addTask(task)
+
+        if not task.waitForFinished(180000):  # 3 min timeout
+            task.cancel()
+            return {"ok": False, "error": "GEE task timed out after 3 minutes"}
+
+        if task.error_msg:
+            return {"ok": False, "error": task.error_msg}
+
+        worker_result = {
+            "ok": True,
+            "download_path": task.download_path,
+            "result_data": task.result_data,
+            "final_scale": task.final_scale,
+            "export_format": setup["export_format"],
+            "name": setup["name"],
+            "region_layer": setup.get("region_layer"),
+            "zoom": setup.get("zoom", True),
+            "mode_used": setup.get("mode_used"),
+        }
+        return self._gee_add_layer_finish(worker_result)
 
     def _finish_ee_geotiff(self, task, name, region_layer, zoom):
         """Main-thread finalisation after the background task downloaded the GeoTIFF."""

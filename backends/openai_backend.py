@@ -170,15 +170,12 @@ collections, drive it through Earth Engine:
 1. Call gee_status FIRST to confirm the GEE QGIS plugin (ee_plugin) is
    installed and Earth Engine is authenticated. If it is not ready, relay the
    message's setup steps and stop — do not attempt GEE work until it is ready.
-2. If it is ready, call ask_user to confirm the user wants to run the GEE
-   operation (it uses Google's cloud and the network), offering a sensible
-   default (dataset, date range, index) as the first option.
-3. Before writing any code, call gee_dataset_info(dataset_id) for EVERY dataset
+2. Before writing any code, call gee_dataset_info(dataset_id) for EVERY dataset
    you intend to use (the imagery collection AND any cloud-mask companion). Use
    its real band_names, scale/offset, date_range, and `deprecated` flag — never
    rely on memorized band names or snippets, which are often out of date. If
    `deprecated` is true, switch to the current replacement.
-4. Once confirmed, call gee_add_layer with an `ee` expression that assigns the
+3. Call gee_add_layer with an `ee` expression that assigns the
    final ee object to `result`. Pass region_layer_id to clip/filter to a loaded
    layer: its TRUE geometry is exposed as `region` (ee.Geometry) and its
    features as `features` (ee.FeatureCollection, for per-feature work). It is
@@ -187,13 +184,16 @@ collections, drive it through Earth Engine:
    with instant zoom). Only set ``export_format='map'`` for a quick preview
    where the upfront download wait is not worth it. Pass ``export_scale=N``
    to control resolution (N=100-500 depending on area size).
+   GEE tools are automatically gated by a permission prompt; the user can
+   allow all GEE tools for the current session, so do NOT call ask_user for
+   GEE permission yourself.
 
- 5. After the layer is on the canvas, use analyze_layer, get_layer_statistics,
+ 4. After the layer is on the canvas, use analyze_layer, get_layer_statistics,
     create_chart, and run_pyqgis to analyse and interpret the result. Call
     ask_user(question, options) when the user's request is ambiguous — do not
     guess which field or analysis to run.
 
- 6. **REUSE existing layers instead of re-processing in GEE.** If an existing
+ 5. **REUSE existing layers instead of re-processing in GEE.** If an existing
     QGIS layer already has the data the user needs (e.g. a Sentinel-2 composite
     covering Aceh), do NOT re-run the full GEE pipeline to get a subset. Use
     QGIS tools instead:
