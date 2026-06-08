@@ -36,6 +36,7 @@ from ..core.qt_compat import QUEUED_CONNECTION
 from ..core.session_store import DEFAULT_SESSION_NAME, SessionStore
 from .agent_turn_bubble import AgentTurnBubble, _SPINNER_FRAMES
 from .chart_widget import ChartWidget
+from .gif_widget import GifWidget
 from .message_bubble import MessageContainer
 from .stats_widget import StatsWidget
 from .typing_indicator import TypingIndicator
@@ -797,6 +798,10 @@ class ChatDock(QgsDockWidget):
         self._add_widget(StatsWidget(stats_data))
         self._record_transcript_event({"type": "stats", "data": stats_data})
 
+    def _add_gif(self, data):
+        self._add_widget(GifWidget(data))
+        self._record_transcript_event({"type": "gif", "data": data})
+
     def _add_compaction_notice(self):
         w = QLabel("── history compacted ──")
         w.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -838,6 +843,8 @@ class ChatDock(QgsDockWidget):
                     self._add_widget(ChartWidget(event.get("data") or {}))
                 elif etype == "stats":
                     self._add_widget(StatsWidget(event.get("data") or {}))
+                elif etype == "gif":
+                    self._add_widget(GifWidget(event.get("data") or {}))
                 elif etype == "error":
                     self._add_widget(MessageContainer(html.escape(
                         str(event.get("text", ""))), is_user=False, is_error=True))
@@ -1860,6 +1867,8 @@ class ChatDock(QgsDockWidget):
                 self._add_chart(d)
             elif viz == "stats":
                 self._add_stats(d)
+            elif viz == "gif":
+                self._add_gif(d)
 
         elif ev.type == EventType.THINKING:
             self._flush_stream_render()

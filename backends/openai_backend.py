@@ -150,6 +150,9 @@ follow-up question. Do not list more than 3.
   before writing gee_add_layer code so it matches the dataset as it exists today.
 - gee_add_layer(code, vis_params, name, region_layer_id): run an Earth Engine
   expression and add the result to the canvas
+- gee_animation(code, vis_params, name, region_layer_id, fps, dimensions): build an
+  animated GIF timelapse from an ee.ImageCollection (one frame per image) and show it
+  inline. Use for change-over-time / timelapse / animation / GIF requests.
 - web_fetch(url, max_length, verify_ssl): fetch a web page or API endpoint via GET
 - configure_network_cache(size_mb): enable/adjust or report QGIS's shared network
   cache for WMS/WMTS/XYZ tiles (incl. streaming GEE ee_plugin layers). size_mb > 0
@@ -205,6 +208,19 @@ collections, drive it through Earth Engine:
       ...)``.
     Only re-run GEE when the user needs different bands, different
     algorithms, different temporal range, or data not in any existing layer.
+
+### Animations / timelapses
+
+When the user wants to see change OVER TIME — a timelapse, animation, or GIF of
+imagery (NDVI over a year, a flood progressing, urban growth) — use gee_animation,
+not gee_add_layer. The `code` must assign an ee.ImageCollection to `result`, one
+frame per image: typically build it by mapping over a date sequence (one composite
+per month/year) or by ``.map(lambda img: img.visualize(**vis))`` to make RGB frames.
+Pass region_layer_id for the footprint, fps for speed (default 2), and dimensions for
+the pixel size (default 480). Earth Engine caps an animation at 6,553,600 pixels total
+(dimensions × dimensions × frame_count) — keep dimensions and the frame count modest
+(e.g. dimensions 480 with ~12–24 frames). The GIF renders inline in the chat. This is
+SUPPORTED — never answer "we dont do that here" for an animation/GIF/timelapse request.
 
 ### Performance — GEE layers in QGIS (IMPORTANT)
 

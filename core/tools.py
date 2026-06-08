@@ -413,6 +413,85 @@ TOOL_SPECS = [
         },
     },
     {
+        "name": "gee_animation",
+        "method": "gee_animation",
+        "description": (
+            "Produce an animated GIF TIMELAPSE from an Earth Engine "
+            "ImageCollection via getVideoThumbURL and show it inline in the "
+            "chat. Use for change-over-time / timelapse / animation / GIF "
+            "requests. Only use after gee_status confirms GEE is ready. The "
+            "`code` runs with `ee`, `Map` (ee_plugin), `region` (an ee.Geometry "
+            "built from region_layer_id) and `features` in scope, and MUST "
+            "assign an ee.ImageCollection to a variable named `result` — one "
+            "frame per image. Typically filterDate over the period with one "
+            "composite per step, or .map(lambda img: img.visualize(**vis)) to "
+            "build RGB frames. Example monthly NDVI timelapse: "
+            "\"col = ee.ImageCollection('COPERNICUS/S2_SR_HARMONIZED')"
+            ".filterBounds(region).filterDate('2023-01-01','2024-01-01'); "
+            "months = ee.List.sequence(0, 11); "
+            "def frame(m):\\n"
+            "    start = ee.Date('2023-01-01').advance(m, 'month')\\n"
+            "    comp = col.filterDate(start, start.advance(1, 'month')).median()\\n"
+            "    ndvi = comp.normalizedDifference(['B8','B4']).clip(region)\\n"
+            "    return ndvi.visualize(min=-0.2, max=0.8, "
+            "palette=['blue','white','green'])\\n"
+            "result = ee.ImageCollection(months.map(frame))\". "
+            "IMPORTANT: Earth Engine caps an animation at 6,553,600 pixels total "
+            "(dimensions x dimensions x frame_count, e.g. 256x256x100) — keep "
+            "`dimensions` and the number of frames modest (e.g. dimensions 480 "
+            "with ~12-24 frames). Only GIF output is supported."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "code": {
+                    "type": "string",
+                    "description": (
+                        "Earth Engine Python expression. Must assign an "
+                        "ee.ImageCollection (one frame per image) to `result`. "
+                        "`region` (ee.Geometry), `features` "
+                        "(ee.FeatureCollection|None) and `ee` are in scope."
+                    ),
+                },
+                "vis_params": {
+                    "type": "object",
+                    "description": (
+                        "Earth Engine visualization params (min, max, palette, "
+                        "bands, gamma) merged into the video params. For RGB "
+                        "frames, prefer calling .visualize(**vis) inside `code`."
+                    ),
+                },
+                "name": {
+                    "type": "string",
+                    "description": "Display name for the animation.",
+                },
+                "region_layer_id": {
+                    "type": "string",
+                    "description": (
+                        "Optional QGIS layer id. Its geometry defines `region` "
+                        "/ `features` (EPSG:4326) and the animation footprint."
+                    ),
+                },
+                "fps": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "Frames per second of the GIF (default 2).",
+                    "default": 2,
+                },
+                "dimensions": {
+                    "type": "integer",
+                    "minimum": 16,
+                    "description": (
+                        "Larger side of the GIF in pixels (default 480). Keep "
+                        "dimensions x frames under the 6,553,600-pixel cap."
+                    ),
+                    "default": 480,
+                },
+            },
+            "required": ["code"],
+        },
+    },
+    {
         "name": "remove_layer",
         "method": "remove_layer",
         "description": (

@@ -13,6 +13,8 @@ from qgis.PyQt.QtCore import Qt, QPoint, QSize, QRect
 from qgis.PyQt.QtGui import QColor, QFont, QFontMetrics, QPainter, QPen, QBrush, QPolygon, QGuiApplication
 from qgis.PyQt.QtWidgets import QFrame, QSizePolicy
 
+from .downloadable import HoverDownloadButton, save_widget_png, _safe_name
+
 # Design tokens — darker, softer (match chat_dock.py)
 _SURFACE = "#161616"
 _INPUT_BG = "#1e1e1e"
@@ -67,6 +69,11 @@ class ChartWidget(QFrame):
         self._cursor_pos = QPoint(0, 0)
         self.setMouseTracking(True)
         self.setCursor(Qt.CursorShape.ArrowCursor)
+        # Hover-to-download: save the chart as a PNG image.
+        HoverDownloadButton(self, self._save, tooltip="Save chart (PNG)")
+
+    def _save(self):
+        save_widget_png(self, self, _safe_name(self.title, "chart", ".png"))
 
     def minimumSizeHint(self):
         return QSize(100, 180)

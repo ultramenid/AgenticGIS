@@ -535,6 +535,8 @@ class QgisToolkit:
         # Track GeoTIFF temp files from gee_add_layer export_format='geotiff'
         # for automatic cleanup on layer removal / plugin unload.
         self._gee_tiff_sources = {}  # layer_id -> file_path
+        # Track GIF temp files from gee_animation for cleanup on plugin unload.
+        self._gee_gif_sources = []   # list of file_path
         self._gee_tiff_cleanup_connected = False
         self._gee_manifest_path = os.path.join(
             tempfile.gettempdir(), "agenticgis_gee_manifest.json"
@@ -790,6 +792,9 @@ class QgisToolkit:
         if tool_name == "gee_add_layer":
             return "run an Earth Engine expression and add the result to the canvas"
 
+        if tool_name == "gee_animation":
+            return "run an Earth Engine expression and build an animated GIF timelapse"
+
         return None
 
     def confirm_external_access(self, tool_name, args):
@@ -898,6 +903,7 @@ class QgisToolkit:
         "gee_status",
         "gee_dataset_info",
         "gee_add_layer",
+        "gee_animation",
     }
 
     def _ensure_background_task_state(self):
@@ -1049,6 +1055,84 @@ class QgisToolkit:
             # Phase 3 — main-thread finalisation (create layer, add to project).
             result = executor.run_sync(
                 lambda: self._gee_add_layer_finish(worker_result),
+                timeout=_BG_TASK_FALLBACK_TIMEOUT,
+            )
+            log_event(
+                "background_tool.end",
+                tool=name,
+                path="qgs_task",
+                elapsed_ms=int((time.perf_counter() - start) * 1000),
+                ok=bool(result.get("ok")) if isinstance(result, dict) else None,
+            )
+            return result
+
+        if name == "gee_animation":
+            # Phase 1 — main-thread setup (region build, validation).
+            setup = executor.run_sync(
+                lambda: self._gee_animation_setup(**args),
+                timeout=_BG_TASK_FALLBACK_TIMEOUT,
+            )
+            if isinstance(setup, dict) and not setup.get("ok"):
+                log_event(
+                    "background_tool.end",
+                    tool=name,
+                    path="setup_error",
+                    elapsed_ms=int((time.perf_counter() - start) * 1000),
+                    ok=False,
+                )
+                return setup
+            if isinstance(setup, dict) and setup.get("needs_decision"):
+                log_event(
+                    "background_tool.end",
+                    tool=name,
+                    path="needs_decision",
+                    elapsed_ms=int((time.perf_counter() - start) * 1000),
+                    ok=True,
+                )
+                return setup
+
+            # Phase 2 — background task (EE execution + GIF download).
+            def _gee_animation_worker(_task):
+                task = self._GeeAnimationTask(
+                    f"GEE animation: {setup['name']}",
+                    setup["code"],
+                    setup["vis_params"],
+                    setup["name"],
+                    setup.get("region"),
+                    setup.get("features"),
+                    setup["fps"],
+                    setup["dimensions"],
+                )
+                QgsApplication.taskManager().addTask(task)
+                if not task.waitForFinished(180000):  # 3 min
+                    task.cancel()
+                    return {"ok": False, "error": "GEE animation task timed out after 3 minutes"}
+                if task.error_msg:
+                    return {"ok": False, "error": task.error_msg}
+                return {
+                    "ok": True,
+                    "gif_path": task.gif_path,
+                    "name": setup["name"],
+                    "fps": setup["fps"],
+                    "dimensions": setup["dimensions"],
+                }
+
+            worker_result = self._run_qgs_task(
+                executor, f"GEE animation: {setup['name']}", _gee_animation_worker
+            )
+            if isinstance(worker_result, dict) and not worker_result.get("ok"):
+                log_event(
+                    "background_tool.end",
+                    tool=name,
+                    path="worker_error",
+                    elapsed_ms=int((time.perf_counter() - start) * 1000),
+                    ok=False,
+                )
+                return worker_result
+
+            # Phase 3 — main-thread finalisation (register temp file).
+            result = executor.run_sync(
+                lambda: self._gee_animation_finish(worker_result),
                 timeout=_BG_TASK_FALLBACK_TIMEOUT,
             )
             log_event(
@@ -2841,6 +2925,290 @@ class QgisToolkit:
         }
         return self._gee_add_layer_finish(worker_result)
 
+    # ------------------------------------------------------------------ #
+    # GEE animation (GIF timelapse via getVideoThumbURL)                  #
+    # ------------------------------------------------------------------ #
+    class _GeeAnimationTask(QgsTask):
+        """QgsTask that builds an animated GIF off the main thread.
+
+        Execs the user code to obtain an ee.ImageCollection, asks Earth
+        Engine for a video thumbnail URL (format='gif'), and streams the
+        GIF to a temp file. Mirrors ``_GeeAddLayerTask`` for cancellation,
+        timeout, and progress reporting.
+        """
+
+        def __init__(self, description, code, vis_params, name, region,
+                     features, fps, dimensions):
+            super().__init__(description, QgsTask.CanCancel)
+            self.code = code
+            self.vis_params = vis_params
+            self.name = name
+            self.region = region
+            self.features = features
+            self.fps = fps
+            self.dimensions = dimensions
+
+            self.result_data = None
+            self.error_msg = None
+            self.gif_path = None
+
+        def run(self):
+            try:
+                import ee  # noqa: F401 (used inside exec)
+                from ee_plugin import Map as EEMap  # noqa: F401
+            except Exception as exc:
+                self.error_msg = f"EE import failed: {exc}"
+                return False
+            try:
+                _ensure_gee_initialized()
+            except Exception:  # nosec B110
+                pass  # may already be initialized; a real failure surfaces below
+
+            # 1. Execute user code
+            self.setProgress(10)
+            ns = {
+                "ee": ee,
+                "Map": EEMap,
+                "region": self.region,
+                "features": self.features,
+                "result": None,
+            }
+            try:
+                exec(compile(self.code, "<gee_animation>", "exec"), ns)  # nosec B102
+            except Exception as exc:
+                self.error_msg = f"Earth Engine code error: {type(exc).__name__}: {exc}"
+                return False
+
+            obj = ns.get("result")
+            if obj is None:
+                self.error_msg = (
+                    "Earth Engine code must assign an ee.ImageCollection to `result`."
+                )
+                return False
+
+            self.setProgress(30)
+
+            # 2. Build video-thumbnail parameters
+            params = {
+                "dimensions": self.dimensions,
+                "framesPerSecond": self.fps,
+                "crs": "EPSG:3857",
+                "format": "gif",
+            }
+            if self.region is not None:
+                params["region"] = self.region
+            if isinstance(self.vis_params, dict):
+                for key in ("min", "max", "bands", "palette", "gamma"):
+                    if key in self.vis_params:
+                        params[key] = self.vis_params[key]
+
+            try:
+                url = obj.getVideoThumbURL(params)
+            except Exception as exc:  # noqa: BLE001
+                self.error_msg = f"getVideoThumbURL failed: {type(exc).__name__}: {exc}"
+                return False
+
+            self.setProgress(50)
+
+            # 3. Stream the GIF to a temp file (cancellable, with a deadline)
+            import tempfile
+
+            tmp = tempfile.NamedTemporaryFile(
+                suffix=".gif", prefix="gee_anim_", delete=False
+            )
+            self.gif_path = tmp.name
+            tmp.close()
+
+            import urllib.error
+            import urllib.request
+
+            req = urllib.request.Request(url, method="GET")
+            deadline = time.time() + 120.0
+            try:
+                with _safe_urlopen(req, timeout=120.0) as resp:  # nosec B310
+                    chunk_size = 64 * 1024
+                    with open(self.gif_path, "wb") as fh:
+                        while True:
+                            if self.isCanceled():
+                                self.error_msg = "Cancelled by user"
+                                return False
+                            if time.time() > deadline:
+                                self.error_msg = "GIF download timed out after 2 minutes"
+                                return False
+                            chunk = resp.read(chunk_size)
+                            if not chunk:
+                                break
+                            fh.write(chunk)
+                            elapsed = time.time() - (deadline - 120.0)
+                            pct = 50 + min(45, int(elapsed / 120 * 45))
+                            self.setProgress(pct)
+            except urllib.error.HTTPError as exc:
+                self.error_msg = f"GIF download HTTP error: {exc.code}"
+                return False
+            except Exception as exc:  # noqa: BLE001
+                self.error_msg = f"GIF download failed: {type(exc).__name__}: {exc}"
+                return False
+
+            self.setProgress(98)
+            return True
+
+    def _gee_animation_setup(
+        self,
+        code,
+        vis_params=None,
+        name="GEE animation",
+        region_layer_id=None,
+        fps=2,
+        dimensions=480,
+        geometry_mode="auto",
+        max_vertices=5000,
+        max_features=2000,
+    ):
+        """Main-thread setup for ``gee_animation``.
+
+        Validates EE availability and builds the region / features from
+        ``region_layer_id``. Returns a dict the background worker needs.
+        """
+        try:
+            import ee
+        except Exception as exc:  # noqa: BLE001
+            return {
+                "ok": False,
+                "error": f"Earth Engine API not available: {exc}. Run gee_status first.",
+            }
+        try:
+            from ee_plugin import Map as EEMap  # noqa: F401 (validates plugin install)
+        except Exception as exc:  # noqa: BLE001
+            return {
+                "ok": False,
+                "error": (
+                    "Google Earth Engine QGIS plugin (ee_plugin) is not installed: "
+                    f"{exc}. Install it from the QGIS Plugin Manager."
+                ),
+            }
+        try:
+            _ensure_gee_initialized()
+        except Exception:  # nosec B110
+            pass
+
+        region, features, region_layer, mode_used = (None, None, None, None)
+        if region_layer_id:
+            try:
+                info = self._ee_inputs_from_layer(
+                    ee, region_layer_id, geometry_mode, max_vertices, max_features
+                )
+            except Exception as exc:  # noqa: BLE001
+                return {"ok": False, "error": f"Failed to build region: {exc}"}
+            if "error" in info:
+                return {"ok": False, "error": info["error"]}
+            if info.get("needs_decision"):
+                return self._gee_decision_payload(info)
+            region = info.get("region")
+            features = info.get("features")
+            region_layer = info.get("zoom_layer")
+            mode_used = info.get("mode_used")
+
+        try:
+            fps = int(fps)
+        except (TypeError, ValueError):
+            fps = 2
+        try:
+            dimensions = int(dimensions)
+        except (TypeError, ValueError):
+            dimensions = 480
+
+        return {
+            "ok": True,
+            "code": code,
+            "vis_params": vis_params,
+            "name": name,
+            "region": region,
+            "features": features,
+            "region_layer": region_layer,
+            "fps": max(1, fps),
+            "dimensions": max(16, dimensions),
+            "mode_used": mode_used,
+        }
+
+    def _gee_animation_finish(self, worker_result):
+        """Main-thread finalisation: verify the GIF file and register it."""
+        gif_path = worker_result.get("gif_path")
+        if not gif_path or not os.path.exists(gif_path):
+            return {
+                "ok": False,
+                "error": "GIF download completed but temp file is missing",
+            }
+        self._gee_gif_sources.append(gif_path)
+        return {
+            "ok": True,
+            "gif_path": gif_path,
+            "name": worker_result.get("name"),
+            "fps": worker_result.get("fps"),
+            "dimensions": worker_result.get("dimensions"),
+        }
+
+    def gee_animation(
+        self,
+        code,
+        vis_params=None,
+        name="GEE animation",
+        region_layer_id=None,
+        fps=2,
+        dimensions=480,
+        geometry_mode="auto",
+        max_vertices=5000,
+        max_features=2000,
+    ):
+        """Build an animated GIF timelapse from an Earth Engine ImageCollection.
+
+        When called through ``run_background_tool`` the heavy work runs off the
+        main thread. When called directly it blocks for the duration of the EE
+        execution and GIF download.
+        """
+        setup = self._gee_animation_setup(
+            code=code,
+            vis_params=vis_params,
+            name=name,
+            region_layer_id=region_layer_id,
+            fps=fps,
+            dimensions=dimensions,
+            geometry_mode=geometry_mode,
+            max_vertices=max_vertices,
+            max_features=max_features,
+        )
+        if not setup.get("ok"):
+            return setup
+        if setup.get("needs_decision"):
+            return setup
+
+        task = self._GeeAnimationTask(
+            f"GEE animation: {setup['name']}",
+            setup["code"],
+            setup["vis_params"],
+            setup["name"],
+            setup.get("region"),
+            setup.get("features"),
+            setup["fps"],
+            setup["dimensions"],
+        )
+        QgsApplication.taskManager().addTask(task)
+
+        if not task.waitForFinished(180000):  # 3 min timeout
+            task.cancel()
+            return {"ok": False, "error": "GEE animation task timed out after 3 minutes"}
+
+        if task.error_msg:
+            return {"ok": False, "error": task.error_msg}
+
+        worker_result = {
+            "ok": True,
+            "gif_path": task.gif_path,
+            "name": setup["name"],
+            "fps": setup["fps"],
+            "dimensions": setup["dimensions"],
+        }
+        return self._gee_animation_finish(worker_result)
+
     def _finish_ee_geotiff(self, task, name, region_layer, zoom):
         """Main-thread finalisation after the background task downloaded the GeoTIFF."""
         tmp_path = task.download_path
@@ -2938,6 +3306,15 @@ class QgisToolkit:
                 pass
         self._gee_tiff_sources.clear()
         self._sync_gee_manifest([])
+
+    def cleanup_gee_gifs(self):
+        """Delete all tracked GIF temp files. Called on plugin unload."""
+        for path in list(getattr(self, "_gee_gif_sources", [])):
+            try:
+                os.unlink(path)
+            except Exception:  # nosec B110
+                pass
+        self._gee_gif_sources = []
 
     @staticmethod
     def _gee_decision_payload(info):

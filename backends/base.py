@@ -247,7 +247,11 @@ def agent_iteration_steps(max_iterations: Any):
 
 MAX_TOKENS = 4096
 
-_VISUALIZATION_TOOLS = {"create_chart": "chart", "get_layer_statistics": "stats"}
+_VISUALIZATION_TOOLS = {
+    "create_chart": "chart",
+    "get_layer_statistics": "stats",
+    "gee_animation": "gif",
+}
 
 
 def _dispatch_one_tool(toolkit, executor, name, tool_input, emit, should_stop):

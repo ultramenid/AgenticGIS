@@ -14,6 +14,7 @@ from qgis.PyQt.QtWidgets import (
     QSizePolicy, QVBoxLayout, QWidget,
 )
 
+from .downloadable import HoverDownloadButton, save_text, _safe_name
 from .message_bubble import _md_inline, _md_to_html, _show_code_context_menu
 
 from .theme import (
@@ -420,7 +421,16 @@ class AgentTurnBubble(QFrame):
         self._progress_timer.setInterval(180)
         self._progress_timer.timeout.connect(self._render_progress_text)
 
+        # Hover-to-download: save the agent's answer text as Markdown.
+        HoverDownloadButton(self, self._save_text, tooltip="Save response (.md)")
+
     # ── Core public API ───────────────────────────────────────────────────
+
+    def _save_text(self) -> None:
+        text = self._stream_text or ""
+        if not text.strip():
+            return
+        save_text(self, text, _safe_name(text.split("\n", 1)[0], "response", ".md"))
 
     def _refresh_text_geometry(self) -> None:
         """Force Qt to remeasure rich text after streamed/final HTML changes."""

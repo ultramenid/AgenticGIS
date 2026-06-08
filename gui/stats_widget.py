@@ -12,6 +12,8 @@ from qgis.PyQt.QtWidgets import (
     QVBoxLayout,
 )
 
+from .downloadable import HoverDownloadButton, save_csv, _safe_name
+
 # Design tokens — darker, softer (match chat_dock.py)
 _SURFACE = "#161616"
 _INPUT_BG = "#1e1e1e"
@@ -94,6 +96,8 @@ class StatsWidget(QFrame):
         if stdev_val is not None:
             stats_list.append(("StdDev", f"{stdev_val:.2f}"))
 
+        self._stats_rows = stats_list  # retained for CSV export
+
         row = 0
         col = 0
         for label, value in stats_list:
@@ -104,6 +108,15 @@ class StatsWidget(QFrame):
                 row += 1
 
         main_layout.addLayout(grid)
+
+        # Hover-to-download: save the metrics as CSV.
+        HoverDownloadButton(self, self._save, tooltip="Save stats (CSV)")
+
+    def _save(self):
+        layer_name = self.stats_data.get("layer_name", "Layer")
+        rows = [["Metric", "Value"]]
+        rows.extend([label, value] for label, value in self._stats_rows)
+        save_csv(self, rows, _safe_name(layer_name, "stats", ".csv"))
 
     def _create_stat_card(self, label, value):
         card = QFrame()

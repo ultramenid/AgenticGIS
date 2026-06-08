@@ -56,6 +56,10 @@ class AgenticGisPlugin:
         except Exception:  # nosec B110
             pass
         self.toolkit.cleanup_gee_tiffs()
+        try:
+            self.toolkit.cleanup_gee_gifs()
+        except Exception:  # nosec B110
+            pass
         self._stop_server()
         if self._dock is not None:
             try:

@@ -22,6 +22,7 @@ from qgis.PyQt.QtWidgets import (
     QWidget,
 )
 
+from .downloadable import HoverDownloadButton, save_text, _safe_name
 from .theme import (
     DOCK_SURFACE as _SURFACE,
     DOCK_SURFACE_2 as _SURFACE_2,
@@ -591,6 +592,14 @@ class MessageBubble(QFrame):
         """)
 
         layout.addWidget(self.text_label)
+
+        # Hover-to-download for agent answers: save the response as Markdown.
+        if not self.is_user and not self.is_tool:
+            HoverDownloadButton(self, self._save, tooltip="Save response (.md)")
+
+    def _save(self):
+        text = self.text or self._last_text or ""
+        save_text(self, text, _safe_name(text.split("\n", 1)[0], "response", ".md"))
 
     def _show_context_menu(self, pos):
         text = self.text or self._last_text or ""
