@@ -874,6 +874,9 @@ class NormalizingStream:
         self._text_emitted = False
         self._first_event_logged = False
         self._first_text_logged = False
+        # Deduplicate tool calls that arrive twice (e.g. Claude CLI may emit
+        # both a content_block_delta and raw JSON for the same call).
+        self._emitted_tool_call_keys = set()
 
     def _log_first_event(self, event_type):
         if self._first_event_logged:
@@ -918,6 +921,10 @@ class NormalizingStream:
             if protocol is not None:
                 self._log_first_event("tool_calls")
                 for call in protocol.tool_calls:
+                    key = (call.get("name"), json.dumps(call.get("arguments", {}), sort_keys=True))
+                    if key in self._emitted_tool_call_keys:
+                        continue
+                    self._emitted_tool_call_keys.add(key)
                     if self.pending_tool_call is None:
                         self.pending_tool_call = call
                     self.emit(
@@ -954,6 +961,10 @@ class NormalizingStream:
             protocol = self.adapter.parse_protocol_text(decoded)
             if protocol is not None:
                 for call in protocol.tool_calls:
+                    key = (call.get("name"), json.dumps(call.get("arguments", {}), sort_keys=True))
+                    if key in self._emitted_tool_call_keys:
+                        continue
+                    self._emitted_tool_call_keys.add(key)
                     if self.pending_tool_call is None:
                         self.pending_tool_call = call
                     self.emit(
@@ -994,6 +1005,12 @@ class NormalizingStream:
                     self.emit(AgentEvent(EventType.TEXT, {"text": norm.text}))
                     self._text_emitted = True
         for call in norm.tool_calls:
+            # Deduplicate identical tool calls (Claude CLI may emit the
+            # same call via both content_block_delta and raw JSON).
+            key = (call.get("name"), json.dumps(call.get("arguments", {}), sort_keys=True))
+            if key in self._emitted_tool_call_keys:
+                continue
+            self._emitted_tool_call_keys.add(key)
             if self.pending_tool_call is None:
                 self.pending_tool_call = call
             self.emit(
