@@ -1912,14 +1912,7 @@ class QgisToolkit:
         """Report whether the GEE QGIS plugin is installed and authenticated."""
         task = self._GeeStatusTask()
         QgsApplication.taskManager().addTask(task)
-        # Wait using QEventLoop.exec_() so queued task signals are processed
-        from qgis.PyQt.QtCore import QEventLoop, QTimer
-        loop = QEventLoop()
-        task.taskCompleted.connect(loop.quit)
-        task.taskTerminated.connect(loop.quit)
-        QTimer.singleShot(15000, loop.quit)  # 15 s hard timeout
-        loop.exec_()
-        if not task.isFinished():
+        if not task.waitForFinished(15000):  # 15 s timeout
             task.cancel()
             return {"ok": False, "error": "GEE status check timed out after 15s"}
         return task.result
@@ -1953,13 +1946,7 @@ class QgisToolkit:
         # Run heavy network fetch in background so the UI stays responsive.
         task = self._GeeDatasetInfoTask(dataset_id, self._EE_STAC_BASE)
         QgsApplication.taskManager().addTask(task)
-        from qgis.PyQt.QtCore import QEventLoop, QTimer
-        loop = QEventLoop()
-        task.taskCompleted.connect(loop.quit)
-        task.taskTerminated.connect(loop.quit)
-        QTimer.singleShot(25000, loop.quit)  # 25 s hard timeout
-        loop.exec_()
-        if not task.isFinished():
+        if not task.waitForFinished(25000):  # 25 s timeout
             task.cancel()
             return {"ok": False, "error": "GEE dataset info timed out after 25s"}
         if task.error_msg:
@@ -2516,15 +2503,7 @@ class QgisToolkit:
         )
         QgsApplication.taskManager().addTask(task)
 
-        # Wait for task completion while keeping UI responsive.
-        from qgis.PyQt.QtCore import QEventLoop, QTimer
-        loop = QEventLoop()
-        task.taskCompleted.connect(loop.quit)
-        task.taskTerminated.connect(loop.quit)
-        QTimer.singleShot(180000, loop.quit)  # 3 min hard timeout
-        loop.exec_()
-
-        if not task.isFinished():
+        if not task.waitForFinished(180000):  # 3 min timeout
             task.cancel()
             return {"ok": False, "error": "GEE task timed out after 3 minutes"}
 
