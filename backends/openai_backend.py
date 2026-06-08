@@ -54,8 +54,16 @@ analyse?", options=["POP2020","POP2010","AREA_KM2","NAME"]).
      get_layer_statistics(layer_id, field_name) for the aggregates
      + create_chart(layer_id, field_name, "bar") for the
      distribution.
-   - Category breakdowns → markdown table + create_chart(layer_id,
-     field_name, "bar" or "pie").
+   - Category breakdowns (how many features per category) → markdown
+     table + create_chart(layer_id, field_name, "bar" or "pie"). This
+     counts occurrences per field_name value.
+   - A NUMERIC MEASURE per category (e.g. total/average area, length,
+     or population by category) → create_chart with field_name = the
+     category and value_field = the numeric field, plus aggregate
+     ("sum" by default, or "mean"/"max"/"min"). Never chart an already
+     totalled numeric field as field_name itself — that counts each
+     distinct number once and yields equal-height bars with numeric
+     labels. Pass the category as field_name and the number as value_field.
    - If the grouped chart field is a code/id and another field contains
      readable names or descriptions, pass that field as `label_field`.
      This is generic code/name or id/description handling; use no hardcoded field names.
@@ -126,7 +134,9 @@ follow-up question. Do not list more than 3.
   QGIS/GEOS versions. Never call ``geom.makeValid()`` directly (the default
   structured method crashes on GEOS < 3.10).
 - analyze_layer(layer_id, analysis_type, fields): bounded layer analysis
-- create_chart(layer_id, field_name, chart_type, label_field): renders chart inline.
+- create_chart(layer_id, field_name, chart_type, label_field, value_field, aggregate):
+  renders chart inline. Counts features per field_name by default; pass value_field +
+  aggregate ("sum"/"mean"/"max"/"min") to plot a numeric measure per category instead.
   Use label_field for readable chart labels when field_name contains codes/IDs.
 - get_layer_statistics(layer_id, field_name): renders stat card inline
 - get_layer_fields / get_layer_summary: inspect layer schema

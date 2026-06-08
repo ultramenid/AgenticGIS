@@ -471,6 +471,14 @@ TOOL_SPECS = [
         "description": (
             "Create a chart visualization from a vector layer's field values. "
             "Returns chart data that can be displayed as a bar, line, or pie chart. "
+            "By default the chart COUNTS how many features fall into each distinct "
+            "field_name value (a category frequency chart). To chart a NUMERIC "
+            "MEASURE instead — e.g. total/average area per category — set value_field "
+            "to the numeric field and aggregate to 'sum' (or 'mean'/'max'/'min'); "
+            "field_name is then the category axis and bar height is the aggregated "
+            "value. Do NOT chart an already-aggregated numeric field directly as "
+            "field_name (that just counts each distinct number once, giving equal "
+            "bars) — pass the category as field_name and the number as value_field. "
             "Use optional label_field for readable display labels when field_name "
             "contains codes/IDs and another field contains names or descriptions. "
             "Optionally supply a custom colors list (hex strings like '#5d8aa8') "
@@ -490,6 +498,25 @@ TOOL_SPECS = [
                         "Use this for generic code/name or id/description field "
                         "pairs; no hardcoded field names are assumed. If invalid "
                         "or blank, labels fall back to field_name values."
+                    ),
+                },
+                "value_field": {
+                    "type": "string",
+                    "description": (
+                        "Optional numeric field to aggregate per category. When "
+                        "set, bar height is the aggregated value of this field "
+                        "grouped by field_name (instead of a feature count). Use "
+                        "for measures like area, length, population, or a "
+                        "pre-aggregated total. Omit to count occurrences."
+                    ),
+                },
+                "aggregate": {
+                    "type": "string",
+                    "enum": ["count", "sum", "mean", "max", "min"],
+                    "description": (
+                        "How to reduce value_field per category. Defaults to "
+                        "'count' when value_field is omitted, else 'sum'. "
+                        "'mean'/'max'/'min' also require value_field."
                     ),
                 },
                 "chart_type": {

@@ -190,6 +190,86 @@ def _chart_row(label, value, raw_label=None):
     return row
 
 
+# Aggregation modes for create_chart. "count" tallies feature occurrences per
+# category (the default, value_field not needed). The rest reduce a numeric
+# value_field grouped by the category field — e.g. sum a per-feature area.
+_CHART_AGGREGATES = ("count", "sum", "mean", "max", "min")
+
+
+def _resolve_chart_aggregate(aggregate, value_field):
+    """Validate the aggregate mode against value_field; return (mode, error).
+
+    With no value_field the only meaningful mode is "count". With a value_field
+    the default is "sum". Returns (None, error_message) on invalid input.
+    """
+    mode = (aggregate or ("sum" if value_field else "count")).lower()
+    if mode not in _CHART_AGGREGATES:
+        return None, (
+            f"invalid aggregate {aggregate!r}: use one of "
+            f"{', '.join(_CHART_AGGREGATES)}"
+        )
+    if mode != "count" and not value_field:
+        return None, f"aggregate {mode!r} requires value_field"
+    return mode, None
+
+
+def _coerce_number(val):
+    """Best-effort numeric coercion; None for blanks/non-numeric values."""
+    if val is None or isinstance(val, bool):
+        return None
+    if isinstance(val, (int, float)):
+        return float(val)
+    try:
+        return float(str(val).strip())
+    except (TypeError, ValueError):
+        return None
+
+
+def _new_chart_acc():
+    return {"count": 0, "nsum": 0.0, "ncount": 0, "nmin": None, "nmax": None}
+
+
+def _update_chart_acc(acc, num):
+    """Fold one feature into a per-category accumulator. ``num`` is the
+    coerced numeric value_field (or None when counting / value missing)."""
+    acc["count"] += 1
+    if num is not None:
+        acc["nsum"] += num
+        acc["ncount"] += 1
+        acc["nmin"] = num if acc["nmin"] is None else min(acc["nmin"], num)
+        acc["nmax"] = num if acc["nmax"] is None else max(acc["nmax"], num)
+
+
+def _finalize_chart_data(groups, display_labels, aggregate):
+    """Reduce per-category accumulators to sorted top-20 chart rows."""
+    rows = []
+    for key, acc in groups.items():
+        if aggregate == "sum":
+            value = acc["nsum"]
+        elif aggregate == "mean":
+            value = acc["nsum"] / acc["ncount"] if acc["ncount"] else 0
+        elif aggregate == "max":
+            value = acc["nmax"] if acc["nmax"] is not None else 0
+        elif aggregate == "min":
+            value = acc["nmin"] if acc["nmin"] is not None else 0
+        else:  # count
+            value = acc["count"]
+        if isinstance(value, float) and value.is_integer():
+            value = int(value)
+        rows.append((key, value))
+    rows.sort(key=lambda kv: kv[1], reverse=True)
+    return [
+        _chart_row(display_labels.get(k, k), v, raw_label=k)
+        for k, v in rows[:20]
+    ]
+
+
+def _chart_title(field_name, layer_name, value_field, aggregate):
+    if value_field and aggregate != "count":
+        return f"{aggregate} of {value_field} by {field_name} in {layer_name}"
+    return f"{field_name} in {layer_name}"
+
+
 def _clean_chart_colors(colors):
     clean_colors = []
     if colors is None:
@@ -210,6 +290,8 @@ def _calculate_chart_for_layer(
     chart_type="bar",
     colors=None,
     label_field=None,
+    value_field=None,
+    aggregate=None,
     cancel=None,
     pump_events=False,
 ):
@@ -225,6 +307,9 @@ def _calculate_chart_for_layer(
     clean_colors, color_error = _clean_chart_colors(colors)
     if color_error:
         return {"ok": False, "error": color_error}
+    agg, agg_error = _resolve_chart_aggregate(aggregate, value_field)
+    if agg_error:
+        return {"ok": False, "error": agg_error}
 
     label_idx = -1
     attr_names = [field_name]
@@ -232,11 +317,18 @@ def _calculate_chart_for_layer(
         label_idx = layer.fields().indexFromName(label_field)
         if label_idx != -1 and label_field != field_name:
             attr_names.append(label_field)
+    value_idx = -1
+    if value_field:
+        value_idx = layer.fields().indexFromName(value_field)
+        if value_idx == -1:
+            return {"ok": False, "error": f"Field {value_field!r} not found"}
+        if value_field not in attr_names:
+            attr_names.append(value_field)
 
     req = QgsFeatureRequest().setFlags(_no_geometry_flag())
     req.setSubsetOfAttributes(attr_names, layer.fields())
 
-    values = {}
+    groups = {}
     display_labels = {}
     scanned = 0
     for i, feature in enumerate(layer.getFeatures(req)):
@@ -246,7 +338,12 @@ def _calculate_chart_for_layer(
             break
         attrs = feature.attributes()
         val = attrs[field_idx] if field_idx < len(attrs) else None
-        values[val] = values.get(val, 0) + 1
+        num = None
+        if value_idx != -1:
+            num = _coerce_number(attrs[value_idx] if value_idx < len(attrs) else None)
+        if val not in groups:
+            groups[val] = _new_chart_acc()
+        _update_chart_acc(groups[val], num)
         if label_idx != -1 and val not in display_labels:
             display = attrs[label_idx] if label_idx < len(attrs) else None
             if not _is_blank_chart_label(display):
@@ -258,20 +355,19 @@ def _calculate_chart_for_layer(
             elif hasattr(cancel, "setProgress"):
                 cancel.setProgress(min(99.0, (i / DEFAULT_FEATURE_SCAN_LIMIT) * 100.0))
 
-    sorted_items = sorted(values.items(), key=lambda x: x[1], reverse=True)[:20]
     result = {
         "ok": True,
         "chart_type": chart_type,
-        "title": f"{field_name} in {layer.name()}",
-        "data": [
-            _chart_row(display_labels.get(k, k), v, raw_label=k)
-            for k, v in sorted_items
-        ],
+        "title": _chart_title(field_name, layer.name(), value_field, agg),
+        "data": _finalize_chart_data(groups, display_labels, agg),
         "field": field_name,
         "layer_name": layer.name(),
+        "aggregate": agg,
         "scanned_features": scanned,
         "truncated": scanned >= DEFAULT_FEATURE_SCAN_LIMIT,
     }
+    if value_field:
+        result["value_field"] = value_field
     if label_idx != -1:
         result["label_field"] = label_field
     if clean_colors:
@@ -834,6 +930,8 @@ class QgisToolkit:
                     args.get("chart_type", "bar"),
                     colors=args.get("colors"),
                     label_field=args.get("label_field"),
+                    value_field=args.get("value_field"),
+                    aggregate=args.get("aggregate"),
                     cancel=task,
                     pump_events=False,
                 )
@@ -2614,7 +2712,8 @@ class QgisToolkit:
             )
             return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
 
-    def create_chart(self, layer_id, field_name, chart_type="bar", colors=None, label_field=None):
+    def create_chart(self, layer_id, field_name, chart_type="bar", colors=None,
+                     label_field=None, value_field=None, aggregate=None):
         """Generate chart data from a vector layer field.
 
         Returns structured data for the chat dock to render as a chart.
@@ -2626,6 +2725,12 @@ class QgisToolkit:
 
         Optional ``label_field`` supplies readable display labels for
         grouped/code values without changing the grouping field.
+
+        Optional ``value_field`` + ``aggregate`` plot a numeric measure
+        instead of category counts: ``field_name`` is the category/label
+        axis and the numeric ``value_field`` is reduced per category
+        ("sum" by default, also "mean"/"max"/"min"). With no value_field
+        the chart counts feature occurrences per category.
         """
         # Validate colors up front so the user gets a clear error
         # rather than a silent fallback. We accept both '#rrggbb' and
@@ -2633,13 +2738,15 @@ class QgisToolkit:
         clean_colors, color_error = _clean_chart_colors(colors)
         if color_error:
             return {"ok": False, "error": color_error}
+        agg, agg_error = _resolve_chart_aggregate(aggregate, value_field)
+        if agg_error:
+            return {"ok": False, "error": agg_error}
         layer = QgsProject.instance().mapLayer(layer_id)
         if layer is None:
             return {"ok": False, "error": f"No layer with id {layer_id!r}"}
         if not isinstance(layer, QgsVectorLayer):
             return {"ok": False, "error": "Layer is not a vector layer"}
 
-        data = []
         field_idx = layer.fields().indexFromName(field_name)
         if field_idx == -1:
             return {"ok": False, "error": f"Field {field_name!r} not found"}
@@ -2649,13 +2756,20 @@ class QgisToolkit:
             label_idx = layer.fields().indexFromName(label_field)
             if label_idx != -1 and label_field != field_name:
                 attr_names.append(label_field)
+        value_idx = -1
+        if value_field:
+            value_idx = layer.fields().indexFromName(value_field)
+            if value_idx == -1:
+                return {"ok": False, "error": f"Field {value_field!r} not found"}
+            if value_field not in attr_names:
+                attr_names.append(value_field)
 
-        # pull only the one field, no geometry — cuts allocation for big layers.
+        # pull only the needed fields, no geometry — cuts allocation for big layers.
         from qgis.core import QgsFeatureRequest
         req = QgsFeatureRequest().setFlags(_no_geometry_flag())
         req.setSubsetOfAttributes(attr_names, layer.fields())
         with self._cancel.scope() as (event, owner):
-            values = {}
+            groups = {}
             display_labels = {}
             feature_iter = layer.getFeatures(req)
             scanned = 0
@@ -2666,9 +2780,14 @@ class QgisToolkit:
                     break
                 attrs = feature.attributes()
                 val = attrs[field_idx] if field_idx < len(attrs) else None
-                if val not in values:
-                    values[val] = 0
-                values[val] += 1
+                num = None
+                if value_idx != -1:
+                    num = _coerce_number(
+                        attrs[value_idx] if value_idx < len(attrs) else None
+                    )
+                if val not in groups:
+                    groups[val] = _new_chart_acc()
+                _update_chart_acc(groups[val], num)
                 if label_idx != -1 and val not in display_labels:
                     display = attrs[label_idx] if label_idx < len(attrs) else None
                     if not _is_blank_chart_label(display):
@@ -2678,23 +2797,19 @@ class QgisToolkit:
                 if i % EVENT_PUMP_INTERVAL == 0:
                     QCoreApplication.processEvents()
 
-        # Sort by count
-        sorted_items = sorted(values.items(), key=lambda x: x[1], reverse=True)[:20]  # top 20
-        data = [
-            _chart_row(display_labels.get(k, k), v, raw_label=k)
-            for k, v in sorted_items
-        ]
-
         result = {
             "ok": True,
             "chart_type": chart_type,
-            "title": f"{field_name} in {layer.name()}",
-            "data": data,
+            "title": _chart_title(field_name, layer.name(), value_field, agg),
+            "data": _finalize_chart_data(groups, display_labels, agg),
             "field": field_name,
             "layer_name": layer.name(),
+            "aggregate": agg,
             "scanned_features": scanned,
             "truncated": scanned >= DEFAULT_FEATURE_SCAN_LIMIT,
         }
+        if value_field:
+            result["value_field"] = value_field
         if label_idx != -1:
             result["label_field"] = label_field
         if clean_colors:
