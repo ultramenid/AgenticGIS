@@ -908,7 +908,7 @@ class NormalizingStream:
     def feed_line(self, raw_bytes: bytes) -> None:
         decoded = raw_bytes.decode("utf-8", "replace")
         stripped = decoded.strip()
-        
+
         # Early protocol check: if the raw line is the AgenticGIS tool_calls
         # protocol JSON, parse it immediately before any other processing.
         # This catches both raw protocol JSON and protocol embedded in CLI
@@ -932,7 +932,7 @@ class NormalizingStream:
                 if protocol.is_final:
                     self.final_text = protocol.text or self.final_text
                 return
-        
+
         try:
             raw = json.loads(decoded)
         except (json.JSONDecodeError, UnicodeDecodeError):
