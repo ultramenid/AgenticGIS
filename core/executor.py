@@ -50,6 +50,9 @@ class MainThreadExecutor(QObject):
     def __init__(self, parent=None, config=None):
         super().__init__(parent)
         self.config = config
+        # Store main thread ID for Qt6 compat (PyQt6 may return different
+        # wrapper objects for the same QThread, breaking 'is' comparison).
+        self._main_thread_id = QThread.currentThreadId()
         # Serialise access to the job id and in-flight state.
         self._lock = threading.Lock()
         self._job_seq = 0
@@ -73,7 +76,9 @@ class MainThreadExecutor(QObject):
             if self.config is not None:
                 timeout = self.config.get("main_thread_timeout", timeout)
         # Fast path: already on the main thread — just call it.
-        if QThread.currentThread() is self.thread():
+        # Qt6 compat: compare native thread IDs instead of object identity
+        # because PyQt6 may return different wrapper objects for the same thread.
+        if QThread.currentThreadId() == self._main_thread_id:
             return fn()
 
         jid = self._next_id()

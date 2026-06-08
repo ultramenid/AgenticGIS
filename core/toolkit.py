@@ -34,8 +34,12 @@ from qgis.core import (
     QgsRasterLayer,
     QgsTask,
     QgsVectorLayer,
-    QgsVectorLayerCache,
 )
+
+try:
+    from qgis.core import QgsVectorLayerCache
+except ImportError:
+    QgsVectorLayerCache = None
 
 from .cancellation import CancellationRegistry as _CancellationRegistry
 from .cancellation import cancel_requested as _cancel_requested
@@ -1466,6 +1470,8 @@ class QgisToolkit:
 
         # Layer cache helper for repeated efficient access
         def _make_layer_cache(layer_id, cache_size=10000):
+            if QgsVectorLayerCache is None:
+                return None
             layer = QgsProject.instance().mapLayer(layer_id)
             if not isinstance(layer, QgsVectorLayer):
                 return None
