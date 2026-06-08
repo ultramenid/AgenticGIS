@@ -906,33 +906,42 @@ class NormalizingStream:
         return False
 
     def feed_line(self, raw_bytes: bytes) -> None:
+        decoded = raw_bytes.decode("utf-8", "replace")
+        stripped = decoded.strip()
+        
+        # Early protocol check: if the raw line is the AgenticGIS tool_calls
+        # protocol JSON, parse it immediately before any other processing.
+        # This catches both raw protocol JSON and protocol embedded in CLI
+        # text events (e.g. Claude's content_block_delta text fields).
+        if stripped.startswith("{"):
+            protocol = self.adapter.parse_protocol_text(stripped)
+            if protocol is not None:
+                self._log_first_event("tool_calls")
+                for call in protocol.tool_calls:
+                    if self.pending_tool_call is None:
+                        self.pending_tool_call = call
+                    self.emit(
+                        AgentEvent(
+                            EventType.TOOL_USE,
+                            {
+                                "name": call["name"],
+                                "input": call.get("arguments", {}),
+                            },
+                        )
+                    )
+                if protocol.is_final:
+                    self.final_text = protocol.text or self.final_text
+                return
+        
         try:
-            decoded = raw_bytes.decode("utf-8", "replace")
             raw = json.loads(decoded)
         except (json.JSONDecodeError, UnicodeDecodeError):
-            text = raw_bytes.decode("utf-8", "replace").strip()
+            text = stripped
             if text and not self._is_startup_noise(raw_bytes, {}):
                 self._log_first_event("text")
-                protocol = self.adapter.parse_protocol_text(text)
-                if protocol is not None:
-                    for call in protocol.tool_calls:
-                        if self.pending_tool_call is None:
-                            self.pending_tool_call = call
-                        self.emit(
-                            AgentEvent(
-                                EventType.TOOL_USE,
-                                {
-                                    "name": call["name"],
-                                    "input": call.get("arguments", {}),
-                                },
-                            )
-                        )
-                    if protocol.is_final:
-                        self.final_text = protocol.text or self.final_text
-                else:
-                    self._log_first_text()
-                    self.emit(AgentEvent(EventType.TEXT, {"text": text}))
-                    self.final_text = text
+                self._log_first_text()
+                self.emit(AgentEvent(EventType.TEXT, {"text": text}))
+                self.final_text = text
             return
         if not isinstance(raw, dict):
             return
