@@ -39,4 +39,7 @@ Thumbs.db
 dev/
 docs/
 tests/
-QGIS_COMPATIBILITY_RULES.md
+
+# Markdown files (except README)
+*.md
+!README.md
