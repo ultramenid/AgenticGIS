@@ -1302,6 +1302,15 @@ class QgisToolkit:
             return network_cache_state()
         return set_network_cache_size(size_mb)
 
+    def warm_cache(self, layer_id, zoom_levels=None, max_tiles=500, **_):
+        """Pre-fetch tiles for a loaded layer and store them in the NAM disk cache."""
+        from .tile_preloader import warm_cache_for_layer
+        return warm_cache_for_layer(
+            layer_id,
+            zoom_levels=zoom_levels,
+            max_tiles=max_tiles,
+        )
+
     def get_project_state(self, **_):
         project = QgsProject.instance()
         canvas = self.iface.mapCanvas()

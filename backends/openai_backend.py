@@ -154,6 +154,9 @@ follow-up question. Do not list more than 3.
 - configure_network_cache(size_mb): enable/adjust or report QGIS's shared network
   cache for WMS/WMTS/XYZ tiles (incl. streaming GEE ee_plugin layers). size_mb > 0
   enables/sizes it; omit to report. Does not affect GEE 'geotiff' local downloads.
+- warm_cache(layer_id, zoom_levels, max_tiles): pre-fetch tiles for a loaded
+  WMS/XYZ/GEE layer and store them in disk cache so the area is instant later.
+  Good for demo preparation or known revisit areas.
 - add_layer / remove_layer / clear_layers / save_project: load, unload, clear, or save project layers.
   Pass is_analysis=true on add_layer for derived result layers (reused, kept; no forced zoom by default).
   remove_layer and clear_layers only unload layers from the QGIS project; they never delete source files.

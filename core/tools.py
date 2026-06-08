@@ -586,6 +586,41 @@ TOOL_SPECS = [
         },
     },
     {
+        "name": "warm_cache",
+        "method": "warm_cache",
+        "description": (
+            "Pre-fetch map tiles for a loaded WMS / XYZ / GEE tile layer and "
+            "store them in the disk cache so the area is instant on the next "
+            "visit.  Good for demo preparation or when you know the user will "
+            "pan/zoom in the same area again.  Specify zoom_levels (list of "
+            "integers) to control which zoom levels to warm.  Default is "
+            "current zoom ± 1.  Has a safety cap of 500 tiles."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "layer_id": {
+                    "type": "string",
+                    "description": "Layer ID from get_project_state or list_layers.",
+                },
+                "zoom_levels": {
+                    "type": "array",
+                    "items": {"type": "integer"},
+                    "description": (
+                        "Zoom levels to preload, e.g. [5, 6, 7].  "
+                        "Default: current zoom ± 1."
+                    ),
+                },
+                "max_tiles": {
+                    "type": "integer",
+                    "default": 500,
+                    "description": "Hard safety limit for number of tiles.",
+                },
+            },
+            "required": ["layer_id"],
+        },
+    },
+    {
         "name": "web_fetch",
         "method": "web_fetch",
         "description": (
