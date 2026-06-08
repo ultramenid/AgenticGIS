@@ -273,16 +273,45 @@ class ClaudeAdapter(CliAdapter):
         etype = raw.get("type")
         sid = raw.get("session_id") or raw.get("sessionID") or ""
         if etype == "assistant":
-            parts = [
+            content = raw.get("message", {}).get("content") or []
+            text_parts = [
                 b.get("text", "")
-                for b in (raw.get("message", {}).get("content") or [])
+                for b in content
                 if isinstance(b, dict) and b.get("type") == "text"
             ]
-            return NormalizedEvent(text="".join(parts), session_id=sid)
+            tool_calls = []
+            for b in content:
+                if isinstance(b, dict) and b.get("type") == "tool_use":
+                    tool_calls.append({
+                        "name": b.get("name", ""),
+                        "arguments": b.get("input", {}) or {},
+                    })
+            return NormalizedEvent(
+                text="".join(text_parts),
+                tool_calls=tool_calls,
+                session_id=sid,
+            )
         if etype == "content_block_delta":
             delta = raw.get("delta") or {}
-            text = delta.get("text") or delta.get("text_delta", "") if isinstance(delta, dict) else str(delta)
-            return NormalizedEvent(text=str(text))
+            if isinstance(delta, dict):
+                # Handle tool_calls deltas (new in recent Claude CLI versions)
+                if delta.get("type") == "tool_calls":
+                    calls = delta.get("calls", [])
+                    tool_calls = []
+                    for c in calls:
+                        if isinstance(c, dict):
+                            name = c.get("name")
+                            if isinstance(name, str) and name:
+                                tool_calls.append({
+                                    "name": name,
+                                    "arguments": c.get("arguments", {}) or {},
+                                })
+                    if tool_calls:
+                        return NormalizedEvent(tool_calls=tool_calls)
+                # Standard text delta
+                text = delta.get("text") or delta.get("text_delta", "")
+                return NormalizedEvent(text=str(text))
+            return NormalizedEvent(text=str(delta))
         if etype == "user":
             for b in (raw.get("message", {}).get("content") or []):
                 if isinstance(b, dict) and b.get("type") == "tool_result":
