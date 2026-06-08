@@ -25,6 +25,36 @@ from .base import (
 from .openai_backend import DEFAULT_SYSTEM_PROMPT
 
 
+def _messages_with_cache_breakpoint(messages):
+    """Return a shallow copy of ``messages`` with an ephemeral cache_control
+    breakpoint on the last block of the last message.
+
+    Lets Anthropic cache the growing conversation prefix across turns (system
+    blocks and the last tool definition already carry their own breakpoints),
+    so turn 2+ reads the history from cache instead of re-prefilling it. The
+    input list and its message dicts are left untouched. Anthropic ignores
+    breakpoints below the minimum cacheable size, so short chats are simply
+    unaffected.
+    """
+    if not messages:
+        return messages
+    out = list(messages)
+    last = dict(out[-1])
+    content = last.get("content")
+    if isinstance(content, list) and content:
+        blocks = [dict(b) for b in content]
+        blocks[-1] = {**blocks[-1], "cache_control": {"type": "ephemeral"}}
+        last["content"] = blocks
+    elif isinstance(content, str) and content:
+        last["content"] = [
+            {"type": "text", "text": content, "cache_control": {"type": "ephemeral"}}
+        ]
+    else:
+        return messages
+    out[-1] = last
+    return out
+
+
 class ApiBackend(AgentBackend):
     label = "API (Anthropic)"
 
@@ -62,6 +92,15 @@ class ApiBackend(AgentBackend):
             self._active_client = None
         if client is not None:
             client.close()
+
+    def prewarm(self):
+        err = self.validate()
+        if err:
+            return
+        try:
+            self._client().prewarm()
+        except Exception:  # nosec B110
+            pass
 
     def _system_blocks(self):
         text = self.config.get("system_prompt") or DEFAULT_SYSTEM_PROMPT
@@ -116,7 +155,7 @@ class ApiBackend(AgentBackend):
                     max_tokens=MAX_TOKENS,
                     system=self._system_blocks(),
                     tools=self._tool_list(),
-                    messages=messages,
+                    messages=_messages_with_cache_breakpoint(messages),
                     on_text=lambda t: emit(AgentEvent(EventType.TEXT, {"text": t})),
                     should_stop=should_stop,
                 )

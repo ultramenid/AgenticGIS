@@ -342,6 +342,15 @@ class OpenAIBackend(AgentBackend):
         if client is not None:
             client.close()
 
+    def prewarm(self):
+        err = self.validate()
+        if err:
+            return
+        try:
+            self._client().prewarm()
+        except Exception:  # nosec B110
+            pass
+
     def _system_text(self):
         return self.config.get("system_prompt") or DEFAULT_SYSTEM_PROMPT
 

@@ -167,7 +167,6 @@ class AnthropicHttpClient:
             "messages": messages,
             "stream": True,
             "thinking": {"type": "disabled"},
-            "cache_control": {"type": "ephemeral"},
         }).encode("utf-8")
         log_event(
             "transport.request_serialized",
@@ -326,6 +325,35 @@ class AnthropicHttpClient:
     def close(self):
         """Close the reusable connection; safe to call more than once."""
         self._close_conn()
+
+    def prewarm(self, timeout=10):
+        """Eagerly perform the TCP+TLS handshake without sending a request.
+
+        Calling this before the first ``stream_message`` hides the handshake
+        latency from the user's perceived time-to-first-token. Establishes the
+        socket only when no live connection exists, so it never clobbers or
+        duplicates an in-flight connection. Never raises — the network may be
+        down; a failed prewarm just means the first send pays the handshake.
+        """
+        with self._conn_lock:
+            if self._conn is not None and getattr(self._conn, "sock", None) is not None:
+                return
+            parsed = urllib.parse.urlparse(self.base_url)
+            host = parsed.hostname or ""
+            port = parsed.port
+            if parsed.scheme == "https":
+                self._conn = http.client.HTTPSConnection(host, port=port, timeout=timeout)
+            else:
+                self._conn = http.client.HTTPConnection(host, port=port, timeout=timeout)
+            self._conn_host = self.base_url
+            try:
+                self._conn.connect()
+            except Exception:  # nosec B110
+                try:
+                    self._conn.close()
+                except Exception:  # nosec B110
+                    pass
+                self._conn = None
 
     @staticmethod
     def _clean_blocks(blocks):

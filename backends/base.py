@@ -102,6 +102,12 @@ class AgentBackend(ABC):
         except Exception:  # nosec B110
             pass
 
+    def prewarm(self) -> None:
+        """Optionally open network connections ahead of the first send to cut
+        time-to-first-token. Default is a no-op (e.g. CLI backends have nothing
+        to warm). HTTP-transport backends override this."""
+        return None
+
     # Hook for shared compaction — must be overridden.
     def _system_arg(self):
         """Return the ``system`` value the LLM client expects.

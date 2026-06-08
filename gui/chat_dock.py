@@ -6,6 +6,7 @@ mode (default) and respects QGIS's own theme via neutral grays.
 """
 
 import html
+import threading
 import time
 from collections import deque
 from datetime import datetime
@@ -237,6 +238,7 @@ class ChatDock(QgsDockWidget):
         self._worker = None
         self._stop_requested = False
         self._streaming = False
+        self._prewarmed = False
         self._pending_tool = None
         self._typing_widget = None
         self._current_agent_turn = None   # AgentTurnBubble for the active turn
@@ -536,6 +538,23 @@ class ChatDock(QgsDockWidget):
     def showEvent(self, event):
         super().showEvent(event)
         self.input.setFocus(Qt.FocusReason.OtherFocusReason)
+        if not self._prewarmed and not self._streaming:
+            self._prewarmed = True
+
+            def _prewarm():
+                try:
+                    backend = self._get_backend()
+                    if backend is not None:
+                        backend.prewarm()
+                except Exception:  # nosec B110
+                    pass
+
+            try:
+                threading.Thread(
+                    target=_prewarm, name="agenticgis-prewarm", daemon=True
+                ).start()
+            except Exception:  # nosec B110
+                pass
         if self._show_startup_picker and not self._startup_picker_shown and self._session_store.had_existing_sessions:
             self._startup_picker_shown = True
             QTimer.singleShot(0, self._show_startup_session_picker)

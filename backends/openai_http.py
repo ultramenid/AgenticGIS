@@ -118,6 +118,42 @@ class OpenAIHttpClient:
             except Exception:  # nosec B110
                 pass
 
+    def prewarm(self, timeout=10):
+        """Eagerly perform the TCP+TLS handshake without sending a request.
+
+        Hides the handshake latency from the user's perceived time-to-first-
+        token. Establishes the socket only when no live connection exists, so
+        it never clobbers an in-flight connection. Never raises.
+        """
+        with self._conn_lock:
+            if self._conn is not None and getattr(self._conn, "sock", None) is not None:
+                return
+            if self._conn is not None:
+                try:
+                    self._conn.close()
+                except Exception:  # nosec B110
+                    pass
+                self._conn = None
+            parsed = self._parsed_base_url
+            connection_class = (
+                http.client.HTTPSConnection
+                if parsed.scheme == "https"
+                else http.client.HTTPConnection
+            )
+            conn = connection_class(
+                parsed.hostname,
+                port=parsed.port,
+                timeout=timeout,
+            )
+            try:
+                conn.connect()
+                self._conn = conn
+            except Exception:  # nosec B110
+                try:
+                    conn.close()
+                except Exception:  # nosec B110
+                    pass
+
     def _headers(self):
         headers = {
             "content-type": "application/json",
