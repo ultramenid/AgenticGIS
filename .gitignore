@@ -43,5 +43,10 @@ tests/
 # Markdown files (except README)
 *.md
 !README.md
+# Local tooling & scripts
+setup.cfg
 build_release.sh
 *.zip
+
+# Compatibility docs (local reference only)
+QGIS_COMPATIBILITY_RULES.md
