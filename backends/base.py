@@ -287,4 +287,16 @@ def _dispatch_one_tool(toolkit, executor, name, tool_input, emit, should_stop):
             "type": _VISUALIZATION_TOOLS[name],
             "data": result,
         }))
+    # Generic file download card: any tool returning a successful dict with a
+    # file_path or download_path gets a download widget.
+    if (
+        isinstance(result, dict)
+        and result.get("ok")
+        and not name in _VISUALIZATION_TOOLS
+        and (result.get("file_path") or result.get("download_path"))
+    ):
+        emit(AgentEvent(EventType.VISUALIZATION, {
+            "type": "file",
+            "data": result,
+        }))
     return payload, is_error, is_cancelled, result

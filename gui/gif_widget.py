@@ -40,11 +40,15 @@ class GifWidget(QFrame):
         """)
         self.setMaximumWidth(600)
 
-        # Extract name and gif_path from result dict
+        # Extract name, gif_path, and per-frame labels from result dict
         name = data.get("name") or "Animation"
         gif_path = data.get("gif_path")
         self._gif_path = gif_path
         self._name = name
+        # Optional per-frame captions (e.g. ["2020","2021",...]), one per frame
+        # in playback order. Overlaid on the animation, synced to the frame.
+        self._frame_labels = [str(x) for x in (data.get("frame_labels") or [])]
+        self._label_overlay = None
 
         # Layout: title label + animation label
         layout = QVBoxLayout()
@@ -62,6 +66,7 @@ class GifWidget(QFrame):
         animation_label.setStyleSheet(
             f"background-color: {_SURFACE}; color: {_TEXT};"
         )
+        self._animation_label = animation_label
 
         # Try to load and play the GIF
         if gif_path and os.path.exists(gif_path):
@@ -70,6 +75,9 @@ class GifWidget(QFrame):
                 animation_label.setMovie(movie)
                 # Keep a reference to prevent garbage collection
                 self._movie = movie
+                if self._frame_labels:
+                    self._build_label_overlay(animation_label)
+                    movie.frameChanged.connect(self._on_frame_changed)
                 movie.start()
             else:
                 # GIF file exists but is not valid
@@ -87,6 +95,45 @@ class GifWidget(QFrame):
 
         # Hover-to-download: save the animated GIF to disk.
         HoverDownloadButton(self, self._save, tooltip="Save GIF")
+
+    def _build_label_overlay(self, host):
+        """Create the per-frame caption overlaid on the animation."""
+        overlay = QLabel(host)
+        overlay.setStyleSheet(
+            "background-color: rgba(0, 0, 0, 160); color: #ffffff;"
+            " font-size: 14px; font-weight: 600; padding: 2px 8px;"
+            " border-radius: 4px;"
+        )
+        overlay.setText(self._frame_labels[0])
+        overlay.adjustSize()
+        overlay.show()
+        self._label_overlay = overlay
+        self._position_label_overlay()
+
+    def _on_frame_changed(self, idx):
+        if not self._label_overlay or not self._frame_labels:
+            return
+        if idx < 0:
+            idx = 0
+        elif idx >= len(self._frame_labels):
+            idx = len(self._frame_labels) - 1
+        self._label_overlay.setText(self._frame_labels[idx])
+        self._label_overlay.adjustSize()
+        self._position_label_overlay()
+
+    def _position_label_overlay(self):
+        overlay = self._label_overlay
+        host = getattr(self, "_animation_label", None)
+        if overlay is None or host is None:
+            return
+        margin = 8
+        x = max(0, host.width() - overlay.width() - margin)
+        y = max(0, host.height() - overlay.height() - margin)
+        overlay.move(x, y)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._position_label_overlay()
 
     def _save(self):
         save_file_copy(

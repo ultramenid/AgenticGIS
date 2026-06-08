@@ -17,6 +17,7 @@ import http.client
 import json
 import socket
 import threading
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -248,11 +249,26 @@ class OpenAIHttpClient:
             first_text_logged = False
             stream_error = False
             done_received = False
+            stalled = False
+            last_activity = time.monotonic()
 
             try:
                 while True:
                     if should_stop():
                         stopped = True
+                        break
+                    # Inactivity guard: a stream that keeps the socket alive
+                    # (e.g. SSE heartbeats) but sends no real data would
+                    # otherwise hang forever. Bail out after the timeout with
+                    # no new server data.
+                    if time.monotonic() - last_activity > effective_timeout:
+                        stalled = True
+                        stream_error = True
+                        log_event(
+                            "transport.stream_stalled",
+                            transport="openai",
+                            idle_s=round(time.monotonic() - last_activity, 1),
+                        )
                         break
                     try:
                         raw = response.readline()
@@ -280,6 +296,8 @@ class OpenAIHttpClient:
                         event = json.loads(data_text)
                     except json.JSONDecodeError:
                         continue
+                    # Real server data arrived — reset the inactivity timer.
+                    last_activity = time.monotonic()
                     if not first_event_logged:
                         log_event(
                             "transport.first_stream_event",
@@ -334,6 +352,23 @@ class OpenAIHttpClient:
                     self._active_connection = None
                 if stopped or cancelled or stream_error:
                     self._close_conn()
+
+        # A stall/transport error that produced nothing usable would otherwise
+        # end the turn silently (the dock keeps showing "Preparing answer…").
+        # Surface it so the agent loop emits a visible error the user can act on.
+        if (
+            (stalled or stream_error)
+            and not done_received
+            and not stopped
+            and not cancelled
+            and not text_parts
+            and not tool_calls
+        ):
+            raise OpenAIHttpError(
+                "The model stopped sending data mid-stream (no response for "
+                f"~{int(effective_timeout)}s). The endpoint may be slow or "
+                "overloaded — try again, or switch model in Settings."
+            )
 
         blocks = []
         if text_parts:
@@ -423,6 +458,14 @@ class OpenAIHttpClient:
                 raise OpenAIHttpError(
                     f"HTTP {response.status}: {detail[:600]}"
                 )
+            # Bound the streaming read so a silent socket cannot block the
+            # worker forever; the read loop re-checks should_stop / stall.
+            try:
+                sock = getattr(connection, "sock", None)
+                if sock is not None:
+                    sock.settimeout(timeout)
+            except OSError:  # nosec B110
+                pass
             return response
         raise OpenAIHttpError(f"Connection error: {last_error}")
 

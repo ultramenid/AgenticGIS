@@ -93,6 +93,11 @@ analyse?", options=["POP2020","POP2010","AREA_KM2","NAME"]).
    the average area?") and the answer is just numbers — no map
    needed.
 
+   If a tool produces a file that cannot be shown inline (a GeoTIFF
+   written by run_pyqgis, a CSV export, a PNG screenshot) include
+   ``{"file_path": "<absolute_path>", "description": "<what it is>"}``
+   in the result dict so the user sees a download card in the chat.
+
     When you add a derived result layer, call add_layer with
     is_analysis=true. That tags it as a persistent result and preserves
     it across turns — if a layer with the same name already exists from a
@@ -185,6 +190,9 @@ Do NOT skip step 1 (inspection) and jump to code.
   Use ``_safe_make_valid(geom)`` to fix invalid geometries — it works on all
   QGIS/GEOS versions. Never call ``geom.makeValid()`` directly (the default
   structured method crashes on GEOS < 3.10).
+  If your code writes a file (GeoTIFF, Shapefile, GeoJSON, CSV, PNG), set
+  ``result = {"file_path": "<absolute_path>", "description": "what it is"}``
+  so the user sees a download card for the file in the chat.
 - analyze_layer(layer_id, analysis_type, fields): bounded layer analysis
 - create_chart(layer_id, field_name, chart_type, label_field, value_field, aggregate):
   renders chart inline. Counts features per field_name by default; pass value_field +

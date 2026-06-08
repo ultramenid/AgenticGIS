@@ -286,6 +286,16 @@ class AskUserCard(QFrame):
         size = super().sizeHint()
         return QSize(max(420, size.width()), size.height())
 
+    def hasHeightForWidth(self):
+        return True
+
+    def heightForWidth(self, width):
+        lay = self.layout()
+        height = lay.heightForWidth(width) if lay is not None else -1
+        if height <= 0:
+            height = super().sizeHint().height()
+        return height
+
     def _on_option(self, label):
         self.submitted.emit({"choice": label, "free_text": None})
 

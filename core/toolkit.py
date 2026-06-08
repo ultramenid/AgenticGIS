@@ -1102,19 +1102,24 @@ class QgisToolkit:
                     setup.get("features"),
                     setup["fps"],
                     setup["dimensions"],
+                    setup.get("frame_labels"),
                 )
                 QgsApplication.taskManager().addTask(task)
                 if not task.waitForFinished(180000):  # 3 min
                     task.cancel()
                     return {"ok": False, "error": "GEE animation task timed out after 3 minutes"}
-                if task.error_msg:
-                    return {"ok": False, "error": task.error_msg}
+                if task.error_msg or not task.gif_path:
+                    return {
+                        "ok": False,
+                        "error": task.error_msg or "GIF generation failed (no output produced)",
+                    }
                 return {
                     "ok": True,
                     "gif_path": task.gif_path,
                     "name": setup["name"],
                     "fps": setup["fps"],
                     "dimensions": setup["dimensions"],
+                    "frame_labels": setup.get("frame_labels"),
                 }
 
             worker_result = self._run_qgs_task(
@@ -1127,6 +1132,7 @@ class QgisToolkit:
                     path="worker_error",
                     elapsed_ms=int((time.perf_counter() - start) * 1000),
                     ok=False,
+                    error=str(worker_result.get("error"))[:500],
                 )
                 return worker_result
 
@@ -2938,7 +2944,7 @@ class QgisToolkit:
         """
 
         def __init__(self, description, code, vis_params, name, region,
-                     features, fps, dimensions):
+                     features, fps, dimensions, frame_labels=None):
             super().__init__(description, QgsTask.CanCancel)
             self.code = code
             self.vis_params = vis_params
@@ -2947,6 +2953,7 @@ class QgisToolkit:
             self.features = features
             self.fps = fps
             self.dimensions = dimensions
+            self.frame_labels = frame_labels
 
             self.result_data = None
             self.error_msg = None
@@ -3049,8 +3056,91 @@ class QgisToolkit:
                 self.error_msg = f"GIF download failed: {type(exc).__name__}: {exc}"
                 return False
 
+            # 4. Burn frame labels into the GIF if provided
+            if self.frame_labels and self.gif_path and os.path.exists(self.gif_path):
+                try:
+                    self._burn_labels_into_gif()
+                except Exception:  # noqa: BLE001
+                    pass  # Labels are optional; don't fail the whole operation
+
             self.setProgress(98)
             return True
+
+        def _burn_labels_into_gif(self):
+            """Burn frame_labels text into each GIF frame using PIL."""
+            from PIL import Image, ImageDraw, ImageFont
+
+            labels = self.frame_labels
+            gif_path = self.gif_path
+
+            # Open the GIF
+            img = Image.open(gif_path)
+            frames = []
+
+            try:
+                while True:
+                    frame = img.copy()
+                    frames.append(frame)
+                    img.seek(img.tell() + 1)
+            except EOFError:
+                pass
+
+            if not frames:
+                return
+
+            # Prepare font
+            try:
+                font = ImageFont.truetype("/System/Library/Fonts/Helvetica.ttc", 20)
+            except Exception:
+                font = ImageFont.load_default()
+
+            modified_frames = []
+            for idx, frame in enumerate(frames):
+                # Convert to RGBA for text overlay
+                frame_rgba = frame.convert("RGBA")
+                draw = ImageDraw.Draw(frame_rgba)
+
+                # Get label for this frame
+                label = labels[idx] if idx < len(labels) else ""
+                if label:
+                    # Position: bottom-left corner with padding
+                    bbox = draw.textbbox((0, 0), str(label), font=font)
+                    text_width = bbox[2] - bbox[0]
+                    text_height = bbox[3] - bbox[1]
+                    x = 10
+                    y = frame_rgba.height - text_height - 15
+
+                    # Draw semi-transparent background
+                    padding = 5
+                    bg_bbox = [x - padding, y - padding,
+                               x + text_width + padding, y + text_height + padding]
+                    overlay = Image.new("RGBA", frame_rgba.size, (0, 0, 0, 0))
+                    overlay_draw = ImageDraw.Draw(overlay)
+                    overlay_draw.rectangle(bg_bbox, fill=(0, 0, 0, 180))
+                    frame_rgba = Image.alpha_composite(frame_rgba, overlay)
+                    draw = ImageDraw.Draw(frame_rgba)
+
+                    # Draw text
+                    draw.text((x, y), str(label), fill=(255, 255, 255, 255), font=font)
+
+                # Convert back to palette mode (P) for GIF
+                if frame.mode == 'P':
+                    modified = frame_rgba.convert("P", palette=Image.ADAPTIVE)
+                else:
+                    modified = frame_rgba.convert("P", palette=Image.ADAPTIVE)
+
+                modified_frames.append(modified)
+
+            # Save modified GIF
+            if modified_frames:
+                modified_frames[0].save(
+                    gif_path,
+                    save_all=True,
+                    append_images=modified_frames[1:],
+                    duration=int(1000 / self.fps),
+                    loop=0,
+                    optimize=False
+                )
 
     def _gee_animation_setup(
         self,
@@ -3060,6 +3150,7 @@ class QgisToolkit:
         region_layer_id=None,
         fps=2,
         dimensions=480,
+        frame_labels=None,
         geometry_mode="auto",
         max_vertices=5000,
         max_features=2000,
@@ -3117,6 +3208,11 @@ class QgisToolkit:
         except (TypeError, ValueError):
             dimensions = 480
 
+        if isinstance(frame_labels, (list, tuple)):
+            labels = [str(x) for x in frame_labels]
+        else:
+            labels = None
+
         return {
             "ok": True,
             "code": code,
@@ -3127,6 +3223,7 @@ class QgisToolkit:
             "region_layer": region_layer,
             "fps": max(1, fps),
             "dimensions": max(16, dimensions),
+            "frame_labels": labels,
             "mode_used": mode_used,
         }
 
@@ -3145,6 +3242,7 @@ class QgisToolkit:
             "name": worker_result.get("name"),
             "fps": worker_result.get("fps"),
             "dimensions": worker_result.get("dimensions"),
+            "frame_labels": worker_result.get("frame_labels"),
         }
 
     def gee_animation(
@@ -3155,6 +3253,7 @@ class QgisToolkit:
         region_layer_id=None,
         fps=2,
         dimensions=480,
+        frame_labels=None,
         geometry_mode="auto",
         max_vertices=5000,
         max_features=2000,
@@ -3172,6 +3271,7 @@ class QgisToolkit:
             region_layer_id=region_layer_id,
             fps=fps,
             dimensions=dimensions,
+            frame_labels=frame_labels,
             geometry_mode=geometry_mode,
             max_vertices=max_vertices,
             max_features=max_features,
@@ -3206,6 +3306,7 @@ class QgisToolkit:
             "name": setup["name"],
             "fps": setup["fps"],
             "dimensions": setup["dimensions"],
+            "frame_labels": setup.get("frame_labels"),
         }
         return self._gee_animation_finish(worker_result)
 

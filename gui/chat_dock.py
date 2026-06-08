@@ -36,6 +36,7 @@ from ..core.qt_compat import QUEUED_CONNECTION
 from ..core.session_store import DEFAULT_SESSION_NAME, SessionStore
 from .agent_turn_bubble import AgentTurnBubble, _SPINNER_FRAMES
 from .chart_widget import ChartWidget
+from .download_card import DownloadWidget
 from .gif_widget import GifWidget
 from .message_bubble import MessageContainer
 from .stats_widget import StatsWidget
@@ -802,6 +803,10 @@ class ChatDock(QgsDockWidget):
         self._add_widget(GifWidget(data))
         self._record_transcript_event({"type": "gif", "data": data})
 
+    def _add_file(self, data):
+        self._add_widget(DownloadWidget(data))
+        self._record_transcript_event({"type": "file", "data": data})
+
     def _add_compaction_notice(self):
         w = QLabel("── history compacted ──")
         w.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -845,6 +850,8 @@ class ChatDock(QgsDockWidget):
                     self._add_widget(StatsWidget(event.get("data") or {}))
                 elif etype == "gif":
                     self._add_widget(GifWidget(event.get("data") or {}))
+                elif etype == "file":
+                    self._add_widget(DownloadWidget(event.get("data") or {}))
                 elif etype == "error":
                     self._add_widget(MessageContainer(html.escape(
                         str(event.get("text", ""))), is_user=False, is_error=True))
@@ -975,10 +982,22 @@ class ChatDock(QgsDockWidget):
             card_layout.setSpacing(0)
             # The actual AskUserCard (with question + buttons) goes here
             self._ask_card_layout = card_layout
+            # A scroll area wraps the card so a long question scrolls instead
+            # of overflowing and clipping the header/options.
+            from qgis.PyQt.QtWidgets import QScrollArea as _QSA
+            scroll = _QSA(self._ask_card_frame)
+            scroll.setWidgetResizable(True)
+            scroll.setFrameShape(QFrame.Shape.NoFrame)
+            scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+            scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+            scroll.setStyleSheet("background: transparent; border: none;")
+            scroll.viewport().setStyleSheet("background: transparent;")
+            card_layout.addWidget(scroll)
+            self._ask_scroll = scroll
         # Build the actual interactive card
         card = AskUserCard(question, options, allow_free_text=allow_free_text, parent=self._ask_card_frame)
         card.submitted.connect(self._resolve_ask_user)
-        self._ask_card_layout.addWidget(card)
+        self._ask_scroll.setWidget(card)
         self._ask_card = card
 
         # Position the overlay to cover the dock's viewport area. We
@@ -1005,17 +1024,17 @@ class ChatDock(QgsDockWidget):
         # Tear down the overlay + card so the chat becomes interactive
         # again. We keep the overlay widget itself (cheap) but hide it
         # and clear the inner card so the next question rebuilds clean.
+        # Detach the card from the scroll area first so the next ask starts
+        # fresh, but keep the reusable scroll area in the layout.
+        if hasattr(self, "_ask_scroll") and self._ask_scroll is not None:
+            old = self._ask_scroll.takeWidget()
+            if old is not None:
+                old.deleteLater()
         if self._ask_user_card is not None:
-            self._ask_user_card.deleteLater()
             self._ask_user_card = None
+        self._ask_card = None
         if hasattr(self, "_ask_overlay") and self._ask_overlay is not None:
             self._ask_overlay.hide()
-        if hasattr(self, "_ask_card_layout") and self._ask_card_layout is not None:
-            # Remove all children so the next ask starts fresh
-            while self._ask_card_layout.count():
-                item = self._ask_card_layout.takeAt(0)
-                if item.widget() is not None:
-                    item.widget().deleteLater()
         label = payload.get("choice")
         text = payload.get("free_text")
         chosen_text = label or text
@@ -1051,14 +1070,17 @@ class ChatDock(QgsDockWidget):
         available_w = max(280, ov.width() - 32)
         card_w = min(560, available_w)
         self._ask_card_frame.setFixedWidth(card_w)
+        # Content height at this width; the scroll area shows a viewport of
+        # this height (capped to the overlay) and scrolls any overflow.
         card = getattr(self, "_ask_card", None)
         if card is not None:
-            card.setFixedWidth(card_w)
-            card_size = card.sizeHint()
+            content_h = card.heightForWidth(card_w)
+            if content_h <= 0:
+                content_h = card.sizeHint().height()
         else:
-            card_size = self._ask_card_frame.sizeHint()
+            content_h = self._ask_card_frame.sizeHint().height()
         available_h = max(240, ov.height() - 32)
-        card_h = min(max(card_size.height(), 240), available_h)
+        card_h = min(max(content_h, 240), available_h)
         cx = ov.x() + (ov.width() - card_w) // 2
         cy = ov.y() + (ov.height() - card_h) // 2
         self._ask_card_frame.setGeometry(cx, cy, card_w, card_h)
@@ -1869,6 +1891,8 @@ class ChatDock(QgsDockWidget):
                 self._add_stats(d)
             elif viz == "gif":
                 self._add_gif(d)
+            elif viz == "file":
+                self._add_file(d)
 
         elif ev.type == EventType.THINKING:
             self._flush_stream_render()
