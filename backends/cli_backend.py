@@ -1390,7 +1390,7 @@ class CliToolBackend(AgentBackend):
                 # for UI display only). End the turn with the assistant's text.
             if stream.final_text is not None:
                 messages.append({"role": "assistant", "content": stream.final_text})
-            elif not stream.had_error:
+            elif not stream.had_error and not stream._text_emitted:
                 # No text returned and no tool call — show a visible fallback
                 # so the user knows the CLI completed rather than hung.
                 fallback = "The CLI agent completed without returning a response."
