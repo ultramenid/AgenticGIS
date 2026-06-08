@@ -1929,15 +1929,13 @@ class QgisToolkit:
         """Report whether the GEE QGIS plugin is installed and authenticated."""
         task = self._GeeStatusTask()
         QgsApplication.taskManager().addTask(task)
-        # Wait with UI processing
-        from qgis.PyQt.QtCore import QEventLoop
+        # Wait using QEventLoop.exec_() so queued task signals are processed
+        from qgis.PyQt.QtCore import QEventLoop, QTimer
         loop = QEventLoop()
         task.taskCompleted.connect(loop.quit)
         task.taskTerminated.connect(loop.quit)
-        start = time.time()
-        while not task.isFinished() and time.time() - start < 15:
-            loop.processEvents()
-            time.sleep(0.05)
+        QTimer.singleShot(15000, loop.quit)  # 15 s hard timeout
+        loop.exec_()
         if not task.isFinished():
             task.cancel()
             return {"ok": False, "error": "GEE status check timed out after 15s"}
@@ -1972,14 +1970,12 @@ class QgisToolkit:
         # Run heavy network fetch in background so the UI stays responsive.
         task = self._GeeDatasetInfoTask(dataset_id, self._EE_STAC_BASE)
         QgsApplication.taskManager().addTask(task)
-        from qgis.PyQt.QtCore import QEventLoop
+        from qgis.PyQt.QtCore import QEventLoop, QTimer
         loop = QEventLoop()
         task.taskCompleted.connect(loop.quit)
         task.taskTerminated.connect(loop.quit)
-        start = time.time()
-        while not task.isFinished() and time.time() - start < 25:
-            loop.processEvents()
-            time.sleep(0.05)
+        QTimer.singleShot(25000, loop.quit)  # 25 s hard timeout
+        loop.exec_()
         if not task.isFinished():
             task.cancel()
             return {"ok": False, "error": "GEE dataset info timed out after 25s"}
@@ -2321,6 +2317,10 @@ class QgisToolkit:
             except Exception as exc:
                 self.error_msg = f"EE import failed: {exc}"
                 return False
+            try:
+                ee.Initialize()
+            except Exception:  # nosec B110
+                pass  # may already be initialized; a real failure surfaces below
 
             # 1. Execute user code
             self.setProgress(10)
@@ -2534,15 +2534,12 @@ class QgisToolkit:
         QgsApplication.taskManager().addTask(task)
 
         # Wait for task completion while keeping UI responsive.
-        from qgis.PyQt.QtCore import QEventLoop
+        from qgis.PyQt.QtCore import QEventLoop, QTimer
         loop = QEventLoop()
         task.taskCompleted.connect(loop.quit)
         task.taskTerminated.connect(loop.quit)
-
-        start = time.time()
-        while not task.isFinished() and time.time() - start < 180:  # 3 min timeout
-            loop.processEvents()
-            time.sleep(0.05)
+        QTimer.singleShot(180000, loop.quit)  # 3 min hard timeout
+        loop.exec_()
 
         if not task.isFinished():
             task.cancel()
