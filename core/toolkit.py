@@ -964,12 +964,13 @@ class QgisToolkit:
         return self._cancel.is_cancelled()
 
     # ------------------------------------------------------------------ #
-    # Background read-only vector analysis                               #
+    # Background-safe tools (heavy I/O or compute off the main thread)    #
     # ------------------------------------------------------------------ #
     _BACKGROUND_TOOLS = {
         "analyze_layer",
         "create_chart",
         "get_layer_statistics",
+        "web_fetch",
         "gee_status",
         "gee_dataset_info",
         "gee_add_layer",
@@ -1044,6 +1045,28 @@ class QgisToolkit:
 
             result = self._run_qgs_task(
                 executor, f"GEE info {ds_id}", _gee_info_worker
+            )
+            log_event(
+                "background_tool.end",
+                tool=name,
+                path="qgs_task",
+                elapsed_ms=int((time.perf_counter() - start) * 1000),
+                ok=bool(result.get("ok")) if isinstance(result, dict) else None,
+            )
+            return result
+
+        if name == "web_fetch":
+            url = args.get("url", "")
+
+            def _web_fetch_worker(_task):
+                return self.web_fetch(
+                    url=url,
+                    max_length=args.get("max_length", 500000),
+                    verify_ssl=args.get("verify_ssl", True),
+                )
+
+            result = self._run_qgs_task(
+                executor, f"Fetch: {url[:50]}", _web_fetch_worker
             )
             log_event(
                 "background_tool.end",

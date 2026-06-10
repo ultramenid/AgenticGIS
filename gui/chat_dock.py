@@ -1919,6 +1919,12 @@ class ChatDock(QgsDockWidget):
             elif viz == "file":
                 self._add_file(d)
 
+        elif ev.type == EventType.CONNECTING:
+            # HTTP transport is establishing a fresh TCP+TLS connection.
+            # Shown briefly before THINKING so the user knows the delay is
+            # network-level, not the model being slow.
+            self._set_status("Connecting", _TEXT_3, spinning=True)
+
         elif ev.type == EventType.THINKING:
             self._flush_stream_render()
             self._hide_typing()

@@ -188,6 +188,7 @@ class ApiBackend(AgentBackend):
                     messages=_messages_with_cache_breakpoint(messages),
                     on_text=lambda t: emit(AgentEvent(EventType.TEXT, {"text": t})),
                     should_stop=should_stop,
+                    on_connecting=lambda: emit(AgentEvent(EventType.CONNECTING)),
                 )
             except AnthropicHttpError as exc:
                 emit(AgentEvent(EventType.ERROR, {"error": str(exc)}))

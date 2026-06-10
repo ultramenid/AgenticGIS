@@ -187,7 +187,7 @@ Do NOT skip step 1 (inspection) and jump to code.
 
 ## Tools
 
-- Prefer analyze_layer for layer summariesx, category counts,
+- Prefer analyze_layer for layer summaries, category counts,
   samples, and missing values. Use chart/stat/stat/schema/processing tools
   before run_pyqgis; use run_pyqgis only when no structured tool covers it.
 - run_pyqgis: PyQGIS escape hatch with full QGIS + plugin access. Call directly, no preamble.
@@ -581,6 +581,7 @@ class OpenAIBackend(AgentBackend):
                     messages=messages,
                     on_text=lambda t: emit(AgentEvent(EventType.TEXT, {"text": t})),
                     should_stop=should_stop,
+                    on_connecting=lambda: emit(AgentEvent(EventType.CONNECTING)),
                 )
             except OpenAIHttpError as exc:
                 emit(AgentEvent(EventType.ERROR, {"error": str(exc)}))

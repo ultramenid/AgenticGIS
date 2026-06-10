@@ -108,6 +108,8 @@ class AnthropicHttpClient:
         """Return a live HTTPSConnection with a bounded socket timeout.
 
         Recreates if host changed or the socket is dead (peer reset).
+        Returns ``(connection, is_new)`` where *is_new* is ``True`` when a
+        fresh TCP+TLS handshake was just performed.
         """
         with self._conn_lock:
             if self._conn is not None:
@@ -127,7 +129,8 @@ class AnthropicHttpClient:
                             pass
                         self._conn = None
 
-            if self._conn is None:
+            is_new = self._conn is None
+            if is_new:
                 parsed = urllib.parse.urlparse(self.base_url)
                 host = parsed.hostname or ""
                 port = parsed.port
@@ -140,7 +143,7 @@ class AnthropicHttpClient:
                         host, port=port, timeout=timeout
                     )
                 self._conn_host = self.base_url
-        return self._conn
+        return self._conn, is_new
 
     def _close_conn(self):
         with self._conn_lock:
@@ -157,7 +160,8 @@ class AnthropicHttpClient:
         self._close_conn()
 
     def stream_message(self, model, max_tokens, system, tools, messages,
-                       on_text, should_stop, timeout=600):
+                       on_text, should_stop, timeout=600,
+                       on_connecting=None):
         self._cancel_event.clear()
         payload = json.dumps({
             "model": model,
@@ -178,7 +182,12 @@ class AnthropicHttpClient:
         headers = self._headers()
         headers["Content-Length"] = str(len(payload))
 
-        conn = self._ensure_conn(timeout)
+        conn, is_new = self._ensure_conn(timeout)
+        if is_new and on_connecting:
+            try:
+                on_connecting()
+            except Exception:  # nosec B110
+                pass
         try:
             conn.request("POST", "/v1/messages", body=payload, headers=headers)
             response = conn.getresponse()
@@ -187,7 +196,12 @@ class AnthropicHttpClient:
             self._close_conn()
             if self._cancel_event.is_set():
                 return [], "stop"
-            conn = self._ensure_conn(timeout)
+            conn, is_new = self._ensure_conn(timeout)
+            if is_new and on_connecting:
+                try:
+                    on_connecting()
+                except Exception:  # nosec B110
+                    pass
             try:
                 conn.request("POST", "/v1/messages", body=payload, headers=headers)
                 response = conn.getresponse()

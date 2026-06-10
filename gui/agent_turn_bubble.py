@@ -15,7 +15,13 @@ from qgis.PyQt.QtWidgets import (
 )
 
 from .downloadable import HoverDownloadButton, save_text, _safe_name
-from .message_bubble import _md_inline, _md_to_html, _show_code_context_menu
+from .message_bubble import (
+    _md_inline,
+    _md_to_html,
+    _show_code_context_menu,
+    _count_complete_fenced_blocks,
+    _count_complete_tables,
+)
 
 from .theme import (
     DOCK_SURFACE as _SURFACE,
@@ -364,6 +370,8 @@ class AgentTurnBubble(QFrame):
         self._user_decision_lbl = None
         self._last_stream_text = ""
         self._last_stream_html = ""
+        # Auto-format: switch to full _md_to_html once a complete fenced block/table appears.
+        self._auto_format = False
         self._geo_timer = QTimer(self)
         self._geo_timer.setInterval(150)
         self._geo_timer.setSingleShot(True)
@@ -490,6 +498,23 @@ class AgentTurnBubble(QFrame):
         self._stream_text = text
         cursor = f'<span style="color:{_TEXT_3};font-weight:300;">|</span>'
 
+        # Auto-promote: once we see a complete fenced block or table, switch to
+        # full markdown rendering so syntax highlighting and tables appear live.
+        if not self._auto_format:
+            if _count_complete_fenced_blocks(text) > 0 or _count_complete_tables(text) > 0:
+                self._auto_format = True
+
+        if self._auto_format:
+            # Full render path — re-parse the full text on every token.
+            self._last_stream_text = text
+            self._last_stream_html = _md_to_html(text) if text else ""
+            self._stream_html = self._last_stream_html
+            self.text_lbl.setText(self._last_stream_html + cursor)
+            if not self._geo_timer.isActive():
+                self._geo_timer.start()
+            return
+
+        # Fast delta-only path
         if len(self._last_stream_text) > len(text):
             self._last_stream_text = ""
             self._last_stream_html = ""
@@ -530,6 +555,7 @@ class AgentTurnBubble(QFrame):
         self._stream_html = _md_to_html(text) if text else ""
         self._last_stream_text = ""
         self._last_stream_html = ""
+        self._auto_format = False
         self.text_lbl.setText(self._stream_html)
         self._refresh_text_geometry()
         self.setStyleSheet(f"""
@@ -547,6 +573,7 @@ class AgentTurnBubble(QFrame):
         self._ticker.hide_ticker()
         self._last_stream_text = ""
         self._last_stream_html = ""
+        self._auto_format = False
         self.text_lbl.setText(self._stream_html)
         self._refresh_text_geometry()
         for group in self._groups.values():
@@ -569,6 +596,7 @@ class AgentTurnBubble(QFrame):
         self._stream_html = ""
         self._last_stream_text = ""
         self._last_stream_html = ""
+        self._auto_format = False
         self.text_lbl.setText("")
         self.text_lbl.setMinimumHeight(0)
         self.updateGeometry()

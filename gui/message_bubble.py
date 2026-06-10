@@ -505,6 +505,20 @@ def _md_inline(text: str) -> str:
     return safe
 
 
+def _count_complete_fenced_blocks(text: str) -> int:
+    """Count complete fenced code blocks (both opening and closing ``` present)."""
+    if not text:
+        return 0
+    return len(re.findall(r"```[^\n]*\n.*?```", text, re.DOTALL))
+
+
+def _count_complete_tables(text: str) -> int:
+    """Count complete markdown tables (at least 2 |…| rows)."""
+    if not text:
+        return 0
+    return len(re.findall(r"(?m)(?:^\|[^\n]*\n){2,}(?:^\|[^\n]*)?", text))
+
+
 class MessageBubble(QFrame):
     """A single message bubble with alignment and optional markdown rendering."""
 
@@ -526,6 +540,8 @@ class MessageBubble(QFrame):
         # Streaming optimization: keep last-processed state to avoid O(N²) md.
         self._last_text = ""
         self._last_html = ""
+        # Auto-format: switch to full _md_to_html once a complete fenced block/table appears.
+        self._auto_format = False
         self._build_ui()
         self._animate_entrance()
 
@@ -651,27 +667,40 @@ class MessageBubble(QFrame):
         self.text_label.setText(html.escape(text))
 
     def set_streaming_text(self, text: str):
-        """Streaming path — delta-only markdown + cursor.
+        """Streaming path — delta-only markdown + cursor, auto-promotes to full.
 
-        Instead of re-parsing the full text on every token (O(N²)), we only
-        process the newly arrived delta, then append it to the cached HTML.
+        Uses fast delta-only rendering until a complete fenced code block or
+        markdown table arrives, then switches to full _md_to_html() so syntax
+        highlighting and table formatting appear live during the stream.
         """
-        delta = text[len(self._last_text):]
-        self._last_text = text
-        # Minimal cursor — thin vertical bar, muted
         cursor = f'<span style="color:{_TEXT_3};font-weight:300;">|</span>'
 
-        if not delta:
-            # No new text — just refresh cursor position
+        # Auto-promote: once we see a complete fenced block or table, switch to
+        # full markdown rendering so syntax highlighting and tables appear live.
+        if not self._auto_format:
+            blocks = _count_complete_fenced_blocks(text)
+            tables = _count_complete_tables(text)
+            if blocks > 0 or tables > 0:
+                self._auto_format = True
+
+        if self._auto_format:
+            # Full render — the text changes are incremental, re-parsing is fine.
+            self._last_text = text
+            self._last_html = _md_to_html(text) if text else ""
             self.text_label.setText(self._last_html + cursor)
             return
 
-        # Markdown-process only the delta.  We escape it then run the same
-        # inline transforms _md_inline uses so bold/italic/code/bullets work.
+        # Fast delta path — only the new text needs markdown processing.
+        delta = text[len(self._last_text):]
+        self._last_text = text
+        if not delta:
+            self.text_label.setText(self._last_html + cursor)
+            return
+
         html_delta = html.escape(delta)
 
         def _inline_transforms(chunk: str) -> str:
-            # Bullet list items (line-start only) — tighter, en-dash instead of heavy bullet
+            # Bullet list items (line-start only)
             chunk = re.sub(
                 r"(?m)^- (.+)$",
                 lambda m: (
@@ -699,13 +728,6 @@ class MessageBubble(QFrame):
             chunk = chunk.replace("\n", "<br>")
             return chunk
 
-        # Preserve that our last_html already ends with a <br> if needed.
-        # Process the delta — if the delta crosses a markdown boundary
-        # (e.g. a closing `*` is in the new chunk) our simple approach
-        # is correct for *opening* markers but may fail for *closing* ones
-        # that started before the boundary.  For agent streaming this is
-        # a rare edge case; the user still sees valid text with potentially
-        # one un-styled character until the next token completes it.
         processed = _inline_transforms(html_delta)
         self._last_html += processed
         self.text_label.setText(self._last_html + cursor)
@@ -713,9 +735,10 @@ class MessageBubble(QFrame):
     def finalize_text(self, text: str):
         """Stream end — full markdown render, cursor removed, geometry updated."""
         self.text = text
-        # Reset streaming delta cache so a later set_streaming_text starts fresh.
+        # Reset streaming state so a later set_streaming_text starts fresh.
         self._last_text = ""
         self._last_html = ""
+        self._auto_format = False
         if not self.is_user and not self.is_tool and not self.is_error:
             self.text_label.setText(_md_to_html(text))
         else:

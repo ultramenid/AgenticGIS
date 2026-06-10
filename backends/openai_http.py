@@ -118,6 +118,12 @@ class OpenAIHttpClient:
         return f"{path}/v1/chat/completions" or "/v1/chat/completions"
 
     def _ensure_conn(self, timeout):
+        """Return a live connection, creating one if necessary.
+
+        Returns ``(connection, is_new)`` where *is_new* is ``True`` when a
+        fresh TCP+TLS handshake was just performed (so the caller can surface
+        a "Connecting…" UI state).
+        """
         with self._conn_lock:
             if self._conn is not None:
                 try:
@@ -128,7 +134,8 @@ class OpenAIHttpClient:
                     except Exception:  # nosec B110
                         pass
                     self._conn = None
-            if self._conn is None:
+            is_new = self._conn is None
+            if is_new:
                 parsed = self._parsed_base_url
                 connection_class = (
                     http.client.HTTPSConnection
@@ -140,7 +147,7 @@ class OpenAIHttpClient:
                     port=parsed.port,
                     timeout=timeout,
                 )
-            return self._conn
+            return self._conn, is_new
 
     def _close_conn(self):
         with self._conn_lock:
@@ -239,7 +246,8 @@ class OpenAIHttpClient:
         return [], last_err or "Unknown error"
 
     def stream_message(self, model, max_tokens, system, tools, messages,
-                       on_text, should_stop, timeout=None):
+                       on_text, should_stop, timeout=None,
+                       on_connecting=None):
         """POST /v1/chat/completions with stream=True.
 
         Calls ``on_text(str)`` for each text delta. Returns
@@ -280,7 +288,10 @@ class OpenAIHttpClient:
             self._cancel_requested = False
 
         with self._request_lock:
-            response = self._open_stream(data, headers, effective_timeout)
+            response = self._open_stream(
+                data, headers, effective_timeout,
+                on_connecting=on_connecting,
+            )
             text_parts = []
             tool_calls = {}
             finish_reason = None
@@ -435,10 +446,15 @@ class OpenAIHttpClient:
 
         return blocks, finish_reason
 
-    def _open_stream(self, data, headers, timeout):
+    def _open_stream(self, data, headers, timeout, on_connecting=None):
         last_error = None
         for attempt in range(2):
-            connection = self._ensure_conn(timeout)
+            connection, is_new = self._ensure_conn(timeout)
+            if is_new and on_connecting:
+                try:
+                    on_connecting()
+                except Exception:  # nosec B110
+                    pass
             with self._active_lock:
                 self._active_connection = connection
                 cancelled = self._cancel_requested

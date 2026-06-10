@@ -19,6 +19,7 @@ from typing import Any, Callable, Dict, List, Optional
 class EventType:
     TEXT = "text"            # assistant text delta (data: {"text": str})
     THINKING = "thinking"    # status / reasoning note  (data: {"text": str})
+    CONNECTING = "connecting"  # HTTP transport establishing new TCP+TLS (data: {})
     TOOL_USE = "tool_use"    # agent invoked a tool      (data: {"name", "input"})
     TOOL_RESULT = "tool_result"  # tool returned          (data: {"name", "result"})
     DONE = "done"            # turn finished
@@ -312,6 +313,7 @@ BACKGROUND_SAFE_TOOLS = {
     "analyze_layer",
     "create_chart",
     "get_layer_statistics",
+    "web_fetch",
     "gee_status",
     "gee_dataset_info",
     "gee_add_layer",

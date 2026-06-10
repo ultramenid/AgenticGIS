@@ -199,3 +199,10 @@ class AgenticGisPlugin:
         dialog = SettingsDialog(self.config, self.iface.mainWindow())
         dialog.exec()
         # Backend is rebuilt lazily on the next send via _get_backend().
+        # Eagerly warm the new connection now so the first post-settings
+        # message is fast.
+        if self._dock is not None:
+            try:
+                self._dock._maybe_prewarm()
+            except Exception:  # nosec B110
+                pass
