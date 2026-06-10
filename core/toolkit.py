@@ -680,6 +680,37 @@ class QgisToolkit:
         # Structured workspace-state registry that survives history compaction.
         from ..core.agent_state import AgentState
         self._agent_state = AgentState()
+        # Scan layers already loaded in the project so the agent state
+        # summary is never stale at startup.
+        self._scan_existing_layers()
+
+    def _scan_existing_layers(self):
+        """Register all existing project layers in the agent state.
+
+        Called once on toolkit construction so the system prompt already
+        reflects the current workspace even when the user opens the plugin
+        dock after loading a project.
+        """
+        try:
+            layers = list(QgsProject.instance().mapLayers().values())
+        except Exception:  # nosec B110
+            return
+        for layer in layers:
+            if not layer:
+                continue
+            try:
+                self._agent_state.register_layer(
+                    layer_id=layer.id(),
+                    name=layer.name(),
+                    layer_type=_map_layer_type_name(layer),
+                    crs=layer.crs().authid() if layer.crs().isValid() else None,
+                    feature_count=_safe_feature_count(layer) if isinstance(layer, QgsVectorLayer) else None,
+                    fields=[f.name() for f in layer.fields()] if isinstance(layer, QgsVectorLayer) else None,
+                    source=layer.publicSource(),
+                    is_analysis=bool(layer.customProperty("agenticgis/analysis")),
+                )
+            except Exception:  # nosec B110
+                pass
 
     def agent_state_summary(self):
         """Return a compact workspace summary suitable for injection into prompts."""
