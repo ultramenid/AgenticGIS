@@ -161,17 +161,24 @@ class AnthropicHttpClient:
 
     def stream_message(self, model, max_tokens, system, tools, messages,
                        on_text, should_stop, timeout=600,
-                       on_connecting=None):
+                       on_connecting=None, temperature=None, top_p=None):
         self._cancel_event.clear()
-        payload = json.dumps({
+        thinking_config = self.config.get("anthropic_thinking") if self.config else None
+        base_payload = {
             "model": model,
             "max_tokens": max_tokens,
             "system": system,
             "tools": tools,
             "messages": messages,
             "stream": True,
-            "thinking": {"type": "disabled"},
-        }).encode("utf-8")
+        }
+        if thinking_config:
+            base_payload["thinking"] = thinking_config
+        else:
+            base_payload["thinking"] = {"type": "disabled"}
+        if temperature is not None:
+            base_payload["temperature"] = temperature
+        payload = json.dumps(base_payload).encode("utf-8")
         log_event(
             "transport.request_serialized",
             transport="anthropic",
@@ -231,6 +238,7 @@ class AnthropicHttpClient:
         stream_error = False
         first_event_logged = False
         first_text_logged = False
+        last_cache_logged = None
 
         try:
             while True:
@@ -260,7 +268,7 @@ class AnthropicHttpClient:
                         transport="anthropic",
                     )
                     first_event_logged = True
-                self._log_cache_usage(event)
+                last_cache_logged = self._log_cache_usage(event, last_cache_logged)
                 etype = event.get("type")
 
                 if etype == "content_block_start":
@@ -314,13 +322,19 @@ class AnthropicHttpClient:
         return self._clean_blocks(blocks), stop_reason
 
     @staticmethod
-    def _log_cache_usage(event):
+    def _log_cache_usage(event, last_logged=None):
+        """Log cache usage, deduped per stream.
+
+        Some events repeat the same ``usage`` block; logging each one writes
+        a file line per chunk, which is pure overhead. Returns the value to
+        pass back in as ``last_logged`` on the next event.
+        """
         usage = event.get("usage")
         if not isinstance(usage, dict):
             message = event.get("message")
             usage = message.get("usage") if isinstance(message, dict) else None
         if not isinstance(usage, dict):
-            return
+            return last_logged
         cache_fields = {
             key: usage.get(key)
             for key in (
@@ -330,11 +344,14 @@ class AnthropicHttpClient:
             if key in usage
         }
         if cache_fields:
-            log_event(
-                "transport.cache_usage",
-                transport="anthropic",
-                **cache_fields,
-            )
+            if cache_fields != last_logged:
+                log_event(
+                    "transport.cache_usage",
+                    transport="anthropic",
+                    **cache_fields,
+                )
+            return cache_fields
+        return last_logged
 
     def close(self):
         """Close the reusable connection; safe to call more than once."""

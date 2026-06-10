@@ -132,65 +132,56 @@ class CliAdapter:
                 stripped = "\n".join(block_lines).strip()
 
         # Try to find and parse the tool_calls protocol JSON anywhere in
-        # the text. Claude may emit extra text around the JSON, so we
-        # search for the {"type":"tool_calls" pattern rather than
-        # requiring the whole text to be valid JSON.
+        # the text. Claude may emit extra text around the JSON, so we search
+        # for the {"type":"tool_calls" pattern and use json.JSONDecoder.
+        # raw_decode() to extract the exact object — this handles braces
+        # inside JSON strings correctly, unlike a naive brace-depth counter.
         if "{" not in stripped:
             return None
-        # Search for "type" key anywhere after an opening brace — handles
-        # both compact {"type":...} and spaced { "type": ... } JSON.
-        idx = stripped.find('"type"')
-        if idx == -1:
-            return None
-        # Walk back to the opening brace that starts this object
-        brace_idx = None
-        for i in range(idx, -1, -1):
-            if stripped[i] == "{":
-                brace_idx = i
+        decoder = json.JSONDecoder()
+        search_start = 0
+        while True:
+            idx = stripped.find('"type"', search_start)
+            if idx == -1:
                 break
-        if brace_idx is None:
-            return None
-        idx = brace_idx
-
-        # Find the matching closing brace so we don't include trailing text.
-        brace_depth = 0
-        end_idx = None
-        for i, ch in enumerate(stripped[idx:], start=idx):
-            if ch == "{":
-                brace_depth += 1
-            elif ch == "}":
-                brace_depth -= 1
-                if brace_depth == 0:
-                    end_idx = i + 1
+            # Walk back to the opening brace that starts this object
+            brace_idx = None
+            for i in range(idx, -1, -1):
+                if stripped[i] == "{":
+                    brace_idx = i
                     break
-        if end_idx is None:
-            return None
-        candidate = stripped[idx:end_idx]
-        try:
-            payload = json.loads(candidate)
-        except (json.JSONDecodeError, ValueError):
-            return None
-        if not isinstance(payload, dict):
-            return None
-        if payload.get("type") != "tool_calls":
-            return None
-        calls = payload.get("calls")
-        if not isinstance(calls, list) or not calls:
-            return None
-        tool_calls = []
-        for c in calls:
-            if not isinstance(c, dict):
+            if brace_idx is None:
+                search_start = idx + 1
                 continue
-            name = c.get("name")
-            if not isinstance(name, str) or not name:
+            try:
+                payload, end = decoder.raw_decode(stripped, brace_idx)
+            except (json.JSONDecodeError, ValueError):
+                search_start = idx + 1
                 continue
-            arguments = c.get("arguments", {}) or {}
-            if not isinstance(arguments, dict):
-                arguments = {}
-            tool_calls.append({"name": name, "arguments": arguments})
-        if not tool_calls:
-            return None
-        return NormalizedEvent(tool_calls=tool_calls, is_final=True)
+            if not isinstance(payload, dict):
+                search_start = end
+                continue
+            if payload.get("type") != "tool_calls":
+                search_start = end
+                continue
+            calls = payload.get("calls")
+            if not isinstance(calls, list) or not calls:
+                return None
+            tool_calls = []
+            for c in calls:
+                if not isinstance(c, dict):
+                    continue
+                name = c.get("name")
+                if not isinstance(name, str) or not name:
+                    continue
+                arguments = c.get("arguments", {}) or {}
+                if not isinstance(arguments, dict):
+                    arguments = {}
+                tool_calls.append({"name": name, "arguments": arguments})
+            if not tool_calls:
+                return None
+            return NormalizedEvent(tool_calls=tool_calls, is_final=True)
+        return None
 
     def env(self) -> dict:
         return {}
@@ -323,6 +314,7 @@ class ClaudeAdapter(CliAdapter):
                 text="".join(text_parts),
                 tool_calls=tool_calls,
                 session_id=sid,
+                is_final=True,
             )
         if etype == "content_block_delta":
             delta = raw.get("delta") or {}
@@ -372,6 +364,15 @@ class ClaudeAdapter(CliAdapter):
                         })
             if tool_calls:
                 return NormalizedEvent(tool_calls=tool_calls)
+        # Handle Claude result/summary events — these echo the final text and
+        # must not fall through to the generic fallback or they duplicate the
+        # assistant message already shown.
+        if etype in ("result", "summary"):
+            result_text = raw.get("result") or raw.get("message") or ""
+            is_err = bool(raw.get("is_error")) or bool(raw.get("api_error_status"))
+            if is_err:
+                return NormalizedEvent(is_error=True, text=str(result_text))
+            return NormalizedEvent(text=str(result_text), is_final=True)
         return None
 
 
@@ -486,36 +487,72 @@ class OpenCodeAdapter(CliAdapter):
 
     def parse_event(self, raw):
         etype = raw.get("type")
+        # opencode may nest the payload under "part" or put keys at top level.
         part = raw.get("part") or raw
         sid = raw.get("sessionID") or raw.get("session_id") or ""
-        if etype == "text":
-            return NormalizedEvent(
-                text=str(part.get("text") or "").strip(),
-                session_id=sid, is_final=True,
+
+        # ── text / message / thinking / content_block_delta ──────────────
+        # Aggressive text extraction: try many locations for the payload.
+        # This catches events where opencode nests text in unexpected keys.
+        text = None
+        if etype in ("text", "message", "thinking", "content_block_delta"):
+            text = (
+                part.get("text")
+                or part.get("content")
+                or part.get("message")
+                or part.get("response")
+                or raw.get("text")
+                or raw.get("content")
+                or raw.get("message")
+                or raw.get("response")
+                or ""
             )
-        if etype == "tool_use":
+            text = str(text).strip()
+            if text:
+                return NormalizedEvent(text=text, session_id=sid)
+            return None
+
+        if etype in ("tool_use", "tool_call"):
             tool_name = part.get("tool", "")
             state = part.get("state") or {}
             if tool_name == "invalid":
                 tool_name = (state.get("input") or {}).get("name", "")
             if not tool_name:
+                # Some opencode versions put tool name directly under part.name
+                tool_name = part.get("name", "")
+            if not tool_name:
                 return None
+            args = state.get("input") or part.get("arguments") or part.get("args") or {}
             return NormalizedEvent(
-                tool_calls=[{
-                    "name": tool_name,
-                    "arguments": state.get("input") or {},
-                }],
+                tool_calls=[{"name": tool_name, "arguments": args}],
                 session_id=sid,
             )
+
         if etype == "error":
             err = raw.get("error") or {}
             if isinstance(err, dict):
-                err_text = err.get("data", {}).get("message", "") or err.get("message", "") or str(err)
+                err_text = (
+                    err.get("data", {}).get("message", "")
+                    or err.get("message", "")
+                    or err.get("text", "")
+                    or str(err)
+                )
             else:
                 err_text = str(err)
-            return NormalizedEvent(is_error=True, text=err_text)
+            if err_text:
+                return NormalizedEvent(is_error=True, text=err_text)
+            return None
+
         if etype in ("step_start", "step_finish"):
             return None
+
+        # Fallback for opencode's many output shapes: any top-level text key
+        # that DefaultAdapter would catch, but also handle nested structures.
+        for key in ("text", "response", "content", "output", "result", "message"):
+            val = raw.get(key)
+            if isinstance(val, str) and val.strip():
+                return NormalizedEvent(text=val.strip(), is_final=True)
+
         return super().parse_event(raw)
 
 

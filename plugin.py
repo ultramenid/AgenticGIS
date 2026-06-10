@@ -7,6 +7,7 @@ change.
 
 import hashlib
 import json
+import threading
 
 from qgis.PyQt.QtWidgets import QAction
 
@@ -112,6 +113,10 @@ class AgenticGisPlugin:
         old_backend = self._cached_backend
         self._cached_backend = backend
         self._cached_backend_fingerprint = fingerprint
+        try:
+            threading.Thread(target=backend.prewarm, daemon=True).start()
+        except Exception:  # nosec B110
+            pass
         if old_backend is not None:
             self._close_backend(old_backend)
         return backend

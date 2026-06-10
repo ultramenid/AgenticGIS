@@ -9,7 +9,6 @@ import concurrent.futures
 import json
 import os
 import threading
-
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from itertools import count
@@ -17,15 +16,15 @@ from typing import Any, Callable, Dict, List, Optional
 
 
 class EventType:
-    TEXT = "text"            # assistant text delta (data: {"text": str})
-    THINKING = "thinking"    # status / reasoning note  (data: {"text": str})
+    TEXT = "text"  # assistant text delta (data: {"text": str})
+    THINKING = "thinking"  # status / reasoning note  (data: {"text": str})
     CONNECTING = "connecting"  # HTTP transport establishing new TCP+TLS (data: {})
-    TOOL_USE = "tool_use"    # agent invoked a tool      (data: {"name", "input"})
+    TOOL_USE = "tool_use"  # agent invoked a tool      (data: {"name", "input"})
     TOOL_RESULT = "tool_result"  # tool returned          (data: {"name", "result"})
-    DONE = "done"            # turn finished
+    DONE = "done"  # turn finished
     VISUALIZATION = "visualization"  # data visualization (charts, stats) (data: {"type": str, "data": dict})
-    ASK_USER = "ask_user"    # agent asks the user      (data: {"question", "options", "allow_free_text"})
-    ERROR = "error"          # something failed          (data: {"error": str})
+    ASK_USER = "ask_user"  # agent asks the user      (data: {"question", "options", "allow_free_text"})
+    ERROR = "error"  # something failed          (data: {"error": str})
     COMPACTION = "compaction"  # history summarized to fit context window
 
 
@@ -71,13 +70,17 @@ class AgentBackend(ABC):
 
     def _provider(self):
         from . import providers
+
         pid = self.config.get("provider")
         return None if pid == "custom" else providers.get_provider(pid)
 
     def validate(self) -> Optional[str]:
         p = self._provider()
-        key = (self.config.get("api_key") or os.environ.get(
-            p["key_env"], "")) if p else self.config.get("custom_api_key")
+        key = (
+            (self.config.get("api_key") or os.environ.get(p["key_env"], ""))
+            if p
+            else self.config.get("custom_api_key")
+        )
         label = p["label"] if p else "Custom endpoint"
         if not key:
             return (
@@ -177,8 +180,9 @@ class AgentBackend(ABC):
                 "role": "user",
                 "content": (
                     "Summarize the conversation above in bullet points. "
-                    "Keep: layer IDs, key findings, tool results, decisions made. "
-                    "Be concise — max 300 words."
+                    "Keep: layer IDs, key findings, tool results, decisions made, "
+                    "field names, CRS, algorithm IDs used, output layer IDs, and errors. "
+                    "Be thorough — max 800 words."
                 ),
             }
         ]
@@ -188,7 +192,7 @@ class AgentBackend(ABC):
             model = self.config.get("compaction_model") or self.config.get("model")
             content, _ = client.stream_message(
                 model=model,
-                max_tokens=1024,
+                max_tokens=2048,
                 system=self._system_arg(),
                 tools=self._tool_list(),
                 messages=sum_messages,
@@ -239,9 +243,9 @@ _CONTEXT_WINDOWS = {
     "qwen": 128_000,
 }
 _DEFAULT_CONTEXT_WINDOW = 200_000
-_MAX_EFFECTIVE_CONTEXT_WINDOW = 100_000
+_MAX_EFFECTIVE_CONTEXT_WINDOW = 200_000
 _COMPACTION_THRESHOLD = 0.90
-_COMPACTION_KEEP_TAIL = 6   # keep this many recent messages verbatim
+_COMPACTION_KEEP_TAIL = 12  # keep this many recent messages verbatim
 _COMPACTION_FIXED_OVERHEAD = 30_000  # reserved for system prompt + tool schemas
 
 
@@ -272,6 +276,9 @@ def estimate_message_tokens(messages) -> int:
 
 def should_compact(messages, model: str) -> bool:
     """Return True when estimated token usage exceeds the compaction threshold."""
+    # Fast path: very short conversations are never worth compacting.
+    if estimate_message_tokens(messages) < 5000:
+        return False
     limit = context_window_for(model)
     estimated = estimate_message_tokens(messages) + _COMPACTION_FIXED_OVERHEAD
     return estimated >= int(limit * _COMPACTION_THRESHOLD)
@@ -300,11 +307,11 @@ def agent_iteration_steps(max_iterations: Any):
         return range(0)
 
 
-MAX_TOKENS = 4096
+MAX_TOKENS = 16384
 # Maximum characters stored in conversation history for a single tool result.
 # Keeping this small reduces per-turn token cost: this payload is re-sent on
 # every subsequent request for the remainder of the session.
-MAX_TOOL_RESULT_CHARS = 30_000
+MAX_TOOL_RESULT_CHARS = 200_000
 
 # Fix A3: tools that are safe to run concurrently (no QGIS-canvas side-effects,
 # no shared mutable state). Do NOT import from core.toolkit — keeping this list
@@ -380,7 +387,81 @@ def _build_tool_use_id_to_name(messages):
     return mapping
 
 
-def elide_stale_tool_results(messages, keep_recent_user_turns=2):
+def _build_tool_use_id_to_input(messages):
+    """Build a mapping of tool_use_id → tool input dict from assistant messages.
+
+    Used to include the original arguments in elision stubs so the agent knows
+    what parameters were used when it needs to re-run the tool.
+    """
+    mapping = {}
+    for msg in messages:
+        if msg.get("role") != "assistant":
+            continue
+        content = msg.get("content")
+        if not isinstance(content, list):
+            continue
+        for block in content:
+            if isinstance(block, dict) and block.get("type") == "tool_use":
+                inp = block.get("input") or {}
+                if isinstance(inp, dict):
+                    mapping[block["id"]] = inp
+    return mapping
+
+
+def _build_tool_name_to_input(messages):
+    """Build a mapping of tool name → input dict from OpenAI assistant messages.
+
+    Used for OpenAI-format tool-result elision where the result message only
+    has the tool name, not a tool_use_id.
+    """
+    mapping = {}
+    for msg in messages:
+        if msg.get("role") != "assistant":
+            continue
+        tool_calls = msg.get("tool_calls")
+        if not isinstance(tool_calls, list):
+            continue
+        for tc in tool_calls:
+            if isinstance(tc, dict):
+                name = (
+                    tc.get("function", {}).get("name")
+                    if isinstance(tc.get("function"), dict)
+                    else tc.get("name")
+                )
+                if name:
+                    try:
+                        args = (
+                            json.loads(tc.get("function", {}).get("arguments", "{}"))
+                            if isinstance(tc.get("function"), dict)
+                            else (tc.get("arguments") or {})
+                        )
+                    except (json.JSONDecodeError, TypeError):
+                        args = {}
+                    if isinstance(args, dict):
+                        mapping[name] = args
+    return mapping
+
+
+def _format_tool_args_summary(args_dict, max_chars=80):
+    """Return a compact string summary of tool arguments for elision stubs."""
+    if not isinstance(args_dict, dict) or not args_dict:
+        return ""
+    parts = []
+    for key in sorted(args_dict):
+        val = args_dict[key]
+        if val is None or val == "":
+            continue
+        s = str(val)
+        if len(s) > 30:
+            s = s[:27] + "..."
+        parts.append(f"{key}={s}")
+    summary = ", ".join(parts)
+    if len(summary) > max_chars:
+        summary = summary[: max_chars - 3] + "..."
+    return summary
+
+
+def elide_stale_tool_results(messages, keep_recent_user_turns=4):
     """Return a new messages list with old tool-result payloads replaced by stubs.
 
     Handles both Anthropic format (user messages whose content list contains
@@ -395,11 +476,18 @@ def elide_stale_tool_results(messages, keep_recent_user_turns=2):
     The input list and its dicts are never mutated; the function is idempotent
     (stubs that are already elided pass through unchanged).
     """
+    # Fast path: short conversations have no stale results worth eliding
+    # (unless keep_recent_user_turns == 0, in which case we must elide everything).
+    if keep_recent_user_turns > 0 and len(messages) <= 4:
+        return messages
+
     total_real_turns = _count_real_user_turns(messages)
     # Index boundary: real user turns beyond this threshold are "recent"
     keep_from_turn = total_real_turns - keep_recent_user_turns
 
     id_to_name = _build_tool_use_id_to_name(messages)
+    id_to_input = _build_tool_use_id_to_input(messages)
+    name_to_input = _build_tool_name_to_input(messages)
 
     result = []
     real_turn_index = 0  # counts real user turns seen so far
@@ -421,10 +509,14 @@ def elide_stale_tool_results(messages, keep_recent_user_turns=2):
                 # Stale — replace with stub
                 name = msg.get("name", "")
                 n = len(payload) if isinstance(payload, str) else len(str(payload))
-                preview = (payload[:_ELIDE_PREVIEW_CHARS] if isinstance(payload, str) else "")
+                preview = (
+                    payload[:_ELIDE_PREVIEW_CHARS] if isinstance(payload, str) else ""
+                )
+                args_summary = _format_tool_args_summary(name_to_input.get(name, {}))
                 stub = (
                     f"[tool result elided to save context — {name} returned {n} chars."
-                    f" Re-run the tool if the data is needed again."
+                    + (f" args: ({args_summary})" if args_summary else "")
+                    + " Re-run the tool if the data is needed again."
                     + (f" Preview: {preview}" if preview else "")
                     + "]"
                 )
@@ -437,9 +529,13 @@ def elide_stale_tool_results(messages, keep_recent_user_turns=2):
             content = msg.get("content")
 
             # Anthropic tool-result carrier: list of tool_result blocks
-            if isinstance(content, list) and content and all(
-                isinstance(b, dict) and b.get("type") == "tool_result"
-                for b in content
+            if (
+                isinstance(content, list)
+                and content
+                and all(
+                    isinstance(b, dict) and b.get("type") == "tool_result"
+                    for b in content
+                )
             ):
                 if real_turn_index > keep_from_turn:
                     # Recent — keep verbatim
@@ -467,10 +563,14 @@ def elide_stale_tool_results(messages, keep_recent_user_turns=2):
                             if isinstance(block_content, str)
                             else ""
                         )
+                        args_summary = _format_tool_args_summary(
+                            id_to_input.get(tool_use_id, {})
+                        )
                         stub = (
                             "[tool result elided to save context"
                             + (f" — {name}" if name else "")
                             + f" returned {n} chars."
+                            + (f" args: ({args_summary})" if args_summary else "")
                             + " Re-run the tool if the data is needed again."
                             + (f" Preview: {preview}" if preview else "")
                             + "]"
@@ -498,7 +598,9 @@ def _dispatch_one_tool(toolkit, executor, name, tool_input, emit, should_stop):
     is_error = False
     is_cancelled = False
     try:
-        result = tools_mod.dispatch(toolkit, executor, name, tool_input, should_stop=should_stop)
+        result = tools_mod.dispatch(
+            toolkit, executor, name, tool_input, should_stop=should_stop
+        )
         if isinstance(result, dict):
             is_error = result.get("ok") is False
             is_cancelled = bool(result.get("cancelled"))
@@ -515,21 +617,37 @@ def _dispatch_one_tool(toolkit, executor, name, tool_input, emit, should_stop):
                 " specific tool if you need the missing data.]"
             )
     except Exception as exc:
-        payload = f"Tool error: {type(exc).__name__}: {exc}"
+        import traceback as _tb
+
+        tb = _tb.format_exc()
+        payload = (
+            f"Tool error: {type(exc).__name__}: {exc}\n\n"
+            f"Traceback (first 2000 chars):\n{tb[:2000]}"
+        )
         is_error = True
-    emit(AgentEvent(EventType.TOOL_RESULT, {
-        "name": name,
-        "result": payload,
-        "is_error": is_error,
-        "cancelled": is_cancelled,
-    }))
+    emit(
+        AgentEvent(
+            EventType.TOOL_RESULT,
+            {
+                "name": name,
+                "result": payload,
+                "is_error": is_error,
+                "cancelled": is_cancelled,
+            },
+        )
+    )
     if should_stop() or is_cancelled:
         return payload, is_error, is_cancelled, result
     if name in _VISUALIZATION_TOOLS and isinstance(result, dict) and result.get("ok"):
-        emit(AgentEvent(EventType.VISUALIZATION, {
-            "type": _VISUALIZATION_TOOLS[name],
-            "data": result,
-        }))
+        emit(
+            AgentEvent(
+                EventType.VISUALIZATION,
+                {
+                    "type": _VISUALIZATION_TOOLS[name],
+                    "data": result,
+                },
+            )
+        )
     # Generic file download card: any tool returning a successful dict with a
     # file_path or download_path gets a download widget.
     if (
@@ -538,14 +656,20 @@ def _dispatch_one_tool(toolkit, executor, name, tool_input, emit, should_stop):
         and name not in _VISUALIZATION_TOOLS
         and (result.get("file_path") or result.get("download_path"))
     ):
-        emit(AgentEvent(EventType.VISUALIZATION, {
-            "type": "file",
-            "data": result,
-        }))
+        emit(
+            AgentEvent(
+                EventType.VISUALIZATION,
+                {
+                    "type": "file",
+                    "data": result,
+                },
+            )
+        )
     return payload, is_error, is_cancelled, result
 
 
 # ── Fix A3: parallel dispatch for background-safe tool batches ────────────────
+
 
 class _ToolCall:
     """Lightweight wrapper to give both Anthropic and OpenAI tool entries a
@@ -559,8 +683,9 @@ class _ToolCall:
         self._raw = raw  # original dict, kept for build_result_entry
 
 
-def _dispatch_tools_maybe_parallel(toolkit, executor, tool_calls, emit, should_stop,
-                                   build_result_entry):
+def _dispatch_tools_maybe_parallel(
+    toolkit, executor, tool_calls, emit, should_stop, build_result_entry
+):
     """Dispatch a batch of tool calls, running them in parallel when safe.
 
     Parameters
@@ -624,7 +749,12 @@ def _dispatch_tools_maybe_parallel(toolkit, executor, tool_calls, emit, should_s
                 break
             fut = pool.submit(
                 _dispatch_one_tool,
-                toolkit, executor, tc.name, tc.input, locked_emit, should_stop,
+                toolkit,
+                executor,
+                tc.name,
+                tc.input,
+                locked_emit,
+                should_stop,
             )
             futures.append((idx, tc, fut))
 

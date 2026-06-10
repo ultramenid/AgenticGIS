@@ -6,6 +6,7 @@ mode (default) and respects QGIS's own theme via neutral grays.
 """
 
 import html
+import json
 import threading
 import time
 from collections import deque
@@ -268,6 +269,7 @@ class ChatDock(QgsDockWidget):
         self._status_color = _TEXT_3
         self._status_icon = "✓"
         self._status_spinning = False
+        self._status_started_at = time.monotonic()
         self._status_session_name = DEFAULT_SESSION_NAME
         self._last_escape_press_at = 0.0
         self._build_ui()
@@ -918,6 +920,8 @@ class ChatDock(QgsDockWidget):
 
     def _set_status(self, text: str, color: str = _TEXT_3, *, spinning: bool = False, icon: str = ""):
         """Render top-left status with the same CLI spinner language as the turn."""
+        if (text or "") != self._status_text:
+            self._status_started_at = time.monotonic()
         self._status_text = text or ""
         self._status_color = color
         self._status_icon = icon
@@ -938,11 +942,18 @@ class ChatDock(QgsDockWidget):
             mark = _SPINNER_FRAMES[self._status_phase]
         else:
             mark = self._status_icon or "·"
+        status_text = self._status_text
+        if self._status_spinning:
+            seconds = int(time.monotonic() - self._status_started_at)
+            if seconds >= 60:
+                status_text = f"{status_text} · {seconds // 60}m {seconds % 60}s"
+            elif seconds >= 1:
+                status_text = f"{status_text} · {seconds}s"
         session_name = self._status_session_name or DEFAULT_SESSION_NAME
         try:
             self.status.setText(
                 f"<span style='color:{self._status_color};font-size:11px;'>{html.escape(mark)}</span> "
-                f"<span style='color:{_TEXT_3}; font-size:11px;'>{html.escape(self._status_text)}</span>"
+                f"<span style='color:{_TEXT_3}; font-size:11px;'>{html.escape(status_text)}</span>"
                 f"<span style='color:{_TEXT_4}; font-size:11px;'> - </span>"
                 f"<span style='color:{_TEXT_2}; font-size:11px;'>{html.escape(session_name)}</span>"
             )
@@ -1805,6 +1816,13 @@ class ChatDock(QgsDockWidget):
                     self._schedule_stream_render("tool")
                     return
 
+                if not delta.strip() and self._showing_tool_progress:
+                    # A whitespace-only delta must not replace the live
+                    # progress line with a bare cursor mid-wait; buffer it
+                    # so real text still arrives intact later.
+                    self._current_text += delta
+                    return
+
                 # Final-answer text begins after thinking/progress. Collapse
                 # the thinking block so the turn stays compact.
                 if self._showing_tool_progress:
@@ -1839,7 +1857,8 @@ class ChatDock(QgsDockWidget):
                 # In a tool turn, any prose emitted before the tool call is
                 # progress/reasoning. Keep it visible in the thinking block
                 # and remove it from the final-answer buffer.
-                self._append_thinking_text(self._current_text)
+                if self._current_text.strip():
+                    self._append_thinking_text(self._current_text)
                 turn.clear_streaming_text()
                 self._current_text = ""
                 self._streaming = False
@@ -1857,8 +1876,29 @@ class ChatDock(QgsDockWidget):
                     "name": tool_name,
                     "input": tool_input,
                 })
-            self._set_tool_progress(f"Processing `{tool_name}`...\n")
+            detail = tool_name
+            if tool_name == "run_processing":
+                alg_id = (tool_input or {}).get("alg_id")
+                if alg_id:
+                    detail = str(alg_id)
+            elif tool_name == "run_pyqgis":
+                code = (tool_input or {}).get("code", "")
+                detail = "Python code"
+                if code:
+                    first_line = code.strip().split("\n")[0]
+                    if first_line:
+                        detail = first_line[:60]
+            self._set_tool_progress(f"Processing `{detail}`...\n")
+            self._set_status(f"Running {detail}", _TEXT_3, spinning=True)
             self._maybe_scroll_to_bottom()
+            # Main-thread tools (e.g. run_pyqgis) block the UI for their
+            # whole duration, and the blocking call is already queued on
+            # the event loop right behind this slot — without a synchronous
+            # repaint the status above would never reach the screen.
+            try:
+                self.repaint()
+            except RuntimeError:
+                pass
 
         elif ev.type == EventType.TOOL_RESULT:
             self._flush_stream_render()
@@ -1891,10 +1931,19 @@ class ChatDock(QgsDockWidget):
                 self._set_tool_progress(f"Cancelled `{tool_name}`.")
                 self._set_status("Cancelled", _DANGER, icon="!")
             else:
+                elapsed = ""
+                if tool_name == "run_pyqgis" and not is_err:
+                    try:
+                        parsed = json.loads(str(result))
+                        slow_ms = parsed.get("slow_ms")
+                        if slow_ms is not None:
+                            elapsed = f" (took {slow_ms / 1000.0:.1f}s)"
+                    except (ValueError, TypeError):
+                        pass
                 if is_err:
-                    self._set_tool_progress(f"`{tool_name}` returned an error. Preparing next step...")
+                    self._set_tool_progress(f"`{tool_name}` failed — waiting for the model to adjust")
                 else:
-                    self._set_tool_progress(f"Finished `{tool_name}`. Preparing answer...")
+                    self._set_tool_progress(f"Finished `{tool_name}`{elapsed} — waiting for the model's next step")
                 self._set_status("Thinking", _TEXT_3, spinning=True)
             self._maybe_scroll_to_bottom()
 
@@ -2009,6 +2058,26 @@ class ChatDock(QgsDockWidget):
         self._showing_tool_progress = True
         turn.set_progress_text(self._tool_progress_text)
 
+    def _stream_render_interval(self) -> float:
+        """Render budget for streamed text — longer answers re-render less often.
+
+        QLabel rich text re-parses the whole document on every setText, so a
+        frame's cost grows with the accumulated answer. Scaling the interval
+        keeps the main thread (shared with the QGIS canvas) responsive while
+        the perceived stream stays smooth.
+        """
+        n = len(self._current_text)
+        # Frame budget: ~16ms @ 60fps.  Keep well under that at long answers
+        # so the QGIS canvas stays smooth.  50ms is the perceptual "instant"
+        # threshold for typed text; above ~100ms users feel lag.
+        if n <= 2_000:
+            return _STREAM_RENDER_INTERVAL_S
+        if n <= 8_000:
+            return 0.06
+        if n <= 24_000:
+            return 0.08
+        return 0.10
+
     def _schedule_stream_render(self, kind: str):
         """Throttle expensive rich-text rendering during stream floods."""
         self._pending_stream_render = True
@@ -2016,12 +2085,13 @@ class ChatDock(QgsDockWidget):
         self._pending_stream_scroll = self._pending_stream_scroll or not self._scroll_locked
 
         now = time.monotonic()
+        interval = self._stream_render_interval()
         elapsed = now - self._last_stream_render_at
-        if self._last_stream_render_at <= 0.0 or elapsed >= _STREAM_RENDER_INTERVAL_S:
+        if self._last_stream_render_at <= 0.0 or elapsed >= interval:
             self._flush_stream_render(now)
             return
 
-        delay_ms = max(1, int((_STREAM_RENDER_INTERVAL_S - elapsed) * 1000))
+        delay_ms = max(1, int((interval - elapsed) * 1000))
         if not self._stream_render_timer.isActive():
             self._stream_render_timer.start(delay_ms)
 

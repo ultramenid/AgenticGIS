@@ -152,6 +152,9 @@ def _map_layer_type_name(layer):
     return "other"
 
 
+_GEOMETRY_TYPE_NAMES = {0: "Point", 1: "LineString", 2: "Polygon"}
+
+
 def _layer_brief(layer):
     # Guard every call: temporary/scratch layers can have a live Python wrapper
     # but a partially-freed C++ object, causing a segfault if accessed naively.
@@ -170,15 +173,20 @@ def _layer_brief(layer):
         try:
             info["feature_count"] = layer.featureCount()
         except Exception:
-            info["feature_count"] = -1
+            info["feature_count"] = None
         try:
-            info["geometry_type"] = layer.geometryType()  # 0=point,1=line,2=polygon
+            geom_code = layer.geometryType()
+            info["geometry_type"] = _GEOMETRY_TYPE_NAMES.get(geom_code, f"Unknown({geom_code})")
         except Exception:
-            info["geometry_type"] = -1
+            info["geometry_type"] = "unknown"
         try:
             info["selected_count"] = layer.selectedFeatureCount()
         except Exception:
             info["selected_count"] = 0
+        try:
+            info["field_names"] = [f.name() for f in layer.fields()]
+        except Exception:
+            info["field_names"] = []
     return info
 
 
@@ -254,6 +262,47 @@ def _chart_row(label, value, raw_label=None):
     if raw_label is not None and str(raw_label) != str(label):
         row["raw_label"] = str(raw_label)
     return row
+
+
+def _safe_feature_count(layer):
+    """Feature count for vector layers; None when unknown/not applicable."""
+    try:
+        count = int(layer.featureCount())
+    except (AttributeError, TypeError, ValueError):
+        return None
+    except Exception:  # noqa: BLE001 — counting must never break a result
+        return None
+    return count if count >= 0 else None
+
+
+def _chart_from_data(data, chart_type, colors, title):
+    """Build a chart result from agent-supplied label/value pairs.
+
+    Lets the agent chart numbers it already computed (e.g. inside vs
+    outside counts) without fabricating a memory layer first.
+    """
+    if not isinstance(data, list) or not data:
+        return {"ok": False, "error": "data must be a non-empty list of {label, value} objects"}
+    rows = []
+    for item in data:
+        if not isinstance(item, dict) or "label" not in item or "value" not in item:
+            return {"ok": False, "error": "each data item must be an object with 'label' and 'value'"}
+        num = _coerce_number(item.get("value"))
+        if num is None:
+            return {"ok": False, "error": f"value for {item.get('label')!r} is not numeric"}
+        if num.is_integer():
+            num = int(num)
+        rows.append(_chart_row(item.get("label"), num))
+    result = {
+        "ok": True,
+        "chart_type": chart_type,
+        "title": str(title) if title else "Chart",
+        "data": rows[:20],
+        "truncated": len(rows) > 20,
+    }
+    if colors:
+        result["colors"] = colors
+    return result
 
 
 # Aggregation modes for create_chart. "count" tallies feature occurrences per
@@ -551,6 +600,36 @@ def _calculate_statistics_for_layer(layer, field_name=None, cancel=None, pump_ev
     return result
 
 
+class _EventPumpingWriter:
+    """Wraps a writer (e.g. ``io.StringIO``) and pumps the Qt event loop
+    periodically so the UI stays responsive during long-running
+    ``run_pyqgis`` execution.
+    """
+
+    def __init__(self, writer, write_threshold=20, char_threshold=2000):
+        self._writer = writer
+        self._write_count = 0
+        self._char_count = 0
+        self._write_threshold = write_threshold
+        self._char_threshold = char_threshold
+
+    def write(self, s):
+        result = self._writer.write(s)
+        self._write_count += 1
+        self._char_count += len(s)
+        if (
+            self._write_count >= self._write_threshold
+            or self._char_count >= self._char_threshold
+        ):
+            self._write_count = 0
+            self._char_count = 0
+            QCoreApplication.processEvents()
+        return result
+
+    def getvalue(self):
+        return self._writer.getvalue()
+
+
 class QgisToolkit:
     """Capability surface exposed to the agent. Construct on the main thread."""
 
@@ -598,6 +677,16 @@ class QgisToolkit:
             pass
         # Cached GEE availability flag (None = not yet checked).
         self._gee_available_cached = None
+        # Structured workspace-state registry that survives history compaction.
+        from ..core.agent_state import AgentState
+        self._agent_state = AgentState()
+
+    def agent_state_summary(self):
+        """Return a compact workspace summary suitable for injection into prompts."""
+        try:
+            return self._agent_state.to_system_prompt_section()
+        except Exception:  # nosec B110
+            return ""
 
     # ------------------------------------------------------------------ #
     # GEE availability (cheap, cached, main-thread-safe)                  #
@@ -1019,6 +1108,18 @@ class QgisToolkit:
         start = time.perf_counter()
         self._ensure_background_task_state()
         log_event("background_tool.start", tool=name, layer_id=layer_id)
+
+        # Inline-data charts never touch QGIS — no task or layer needed.
+        if name == "create_chart" and args.get("data") is not None:
+            result = self.create_chart(**args)
+            log_event(
+                "background_tool.end",
+                tool=name,
+                path="inline_data",
+                elapsed_ms=int((time.perf_counter() - start) * 1000),
+                ok=bool(result.get("ok")) if isinstance(result, dict) else None,
+            )
+            return result
 
         # ------------------------------------------------------------------
         # GEE tools — run heavy network / compute off the main thread.
@@ -1591,7 +1692,47 @@ class QgisToolkit:
 
         ns["_safe_make_valid"] = _safe_make_valid
 
-        out, err = io.StringIO(), io.StringIO()
+        # Cross-call layer handoff: keeps a non-project layer (e.g. a memory
+        # layer built here) alive so a later add_layer / run_processing call
+        # can reference it by the returned id.
+        def _register_layer(layer):
+            """Keep ``layer`` alive across tool calls; returns an id usable as
+            add_layer uri or as a run_processing param."""
+            return self._register_tool_layer(layer)
+
+        ns["_register_layer"] = _register_layer
+
+        # Universal layer lookup: project id, kept tool-output id (e.g. a
+        # run_processing TEMPORARY_OUTPUT), or layer name. Without this,
+        # output ids from previous tool calls are invisible to user code
+        # (QgsProject.mapLayer returns None for non-project layers).
+        def _get_layer(ref):
+            """Resolve a layer by project id, kept output id, or name."""
+            if isinstance(ref, QgsMapLayer):
+                return ref
+            if not isinstance(ref, str) or not ref:
+                return None
+            project = QgsProject.instance()
+            layer = project.mapLayer(ref)
+            if layer is not None:
+                return layer
+            registry = self._ensure_tool_layer_registry()
+            if ref in registry:
+                return registry[ref]
+            matches = project.mapLayersByName(ref)
+            return matches[0] if matches else None
+
+        ns["get_layer"] = _get_layer
+
+        # Explicit progress helper that prints and pumps events so the UI
+        # stays responsive during long-running agent code.
+        def _progress(msg):
+            print(msg)
+            QCoreApplication.processEvents()
+
+        ns["_progress"] = _progress
+
+        out, err = _EventPumpingWriter(io.StringIO()), _EventPumpingWriter(io.StringIO())
         result = {"ok": True, "stdout": "", "stderr": "", "result": None, "error": None}
         if not isinstance(code, str) or not code.strip():
             return {"ok": False, "error": "run_pyqgis: code must be a non-empty string", "stdout": "", "stderr": ""}
@@ -1618,7 +1759,27 @@ class QgisToolkit:
                 result["error"] = "run_pyqgis: cancelled by user"
                 result["cancelled"] = True
             elif "result" in ns:
-                result["result"] = repr(ns["result"])
+                value = ns["result"]
+                if isinstance(value, QgsMapLayer):
+                    result["result"] = self._register_tool_layer(value)
+                    result["hint"] = (
+                        "result is a layer kept in memory — pass this id to "
+                        "add_layer(uri=<id>, name=..., is_analysis=true) or as "
+                        "a run_processing param."
+                    )
+                else:
+                    # JSON-serialize structured types so the agent can consume them
+                    # programmatically. Fall back to repr for non-serializable QGIS objects.
+                    import json as _json
+                    if value is None or isinstance(value, (str, int, float, bool)):
+                        result["result"] = value
+                    elif isinstance(value, (dict, list, tuple)):
+                        try:
+                            result["result"] = _json.loads(_json.dumps(value, default=str))
+                        except (TypeError, ValueError):
+                            result["result"] = repr(value)
+                    else:
+                        result["result"] = repr(value)
         except KeyboardInterrupt:
             return {"ok": False, "error": "run_pyqgis: interrupted by user",
                     "stdout": out.getvalue(), "stderr": err.getvalue()}
@@ -1830,6 +1991,19 @@ class QgisToolkit:
             result = self._analyze_layer_object(layer, args, feedback=event)
         if isinstance(result, dict) and result.get("ok"):
             cache.set(key, result)
+            try:
+                self._agent_state.record_analysis(
+                    layer_id=layer_id,
+                    analysis_type=analysis_type or "auto",
+                    field_stats=result.get("field_stats"),
+                    top_values=result.get("top_values"),
+                    missing_values=result.get("missing_values"),
+                    sample=result.get("sample"),
+                    scanned_features=result.get("scanned_features"),
+                    truncated=result.get("truncated"),
+                )
+            except Exception:  # nosec B110
+                pass
         return result
 
     def list_plugins(self):
@@ -1865,11 +2039,69 @@ class QgisToolkit:
         """Invalidate the processing algorithm cache (call after plugin changes)."""
         self._alg_cache = None
 
+    # ------------------------------------------------------------------ #
+    # Tool-layer registry: hand temporary layers between tool calls       #
+    # ------------------------------------------------------------------ #
+    _TOOL_LAYER_REGISTRY_LIMIT = 25
+
+    def _ensure_tool_layer_registry(self):
+        """Layers produced by one tool call, reusable by the next (dev-reload safe)."""
+        if not hasattr(self, "_tool_layers"):
+            self._tool_layers = {}
+        return self._tool_layers
+
+    def _register_tool_layer(self, layer):
+        """Keep ``layer`` alive across tool calls; returns its id for chaining."""
+        reg = self._ensure_tool_layer_registry()
+        reg[layer.id()] = layer
+        while len(reg) > self._TOOL_LAYER_REGISTRY_LIMIT:
+            reg.pop(next(iter(reg)))
+        return layer.id()
+
+    def _resolve_registered_layer_params(self, params):
+        """Substitute registered tool-layer ids in ``params`` with live layers."""
+        reg = self._ensure_tool_layer_registry()
+        if not isinstance(params, dict) or not reg:
+            return dict(params or {})
+
+        evicted = []
+
+        def _sub(value):
+            if isinstance(value, str) and value in reg:
+                return reg[value]
+            if isinstance(value, list):
+                return [_sub(item) for item in value]
+            return value
+
+        result = {}
+        for key, value in params.items():
+            if isinstance(value, str) and value.startswith("output_") and value not in reg:
+                evicted.append(value)
+            result[key] = _sub(value)
+
+        if evicted:
+            # Include the hint in the params so the caller (run_processing)
+            # can surface an actionable error to the agent.
+            result["_evicted_tool_layer_ids"] = evicted
+        return result
+
     def run_processing(self, alg_id, params):
         import processing
 
         if not isinstance(alg_id, str) or not alg_id.strip():
             return {"ok": False, "error": "alg_id must be a non-empty string"}
+        params = self._resolve_registered_layer_params(params)
+        # Check for evicted tool-layer IDs before running.
+        evicted = params.pop("_evicted_tool_layer_ids", None)
+        if evicted:
+            return {
+                "ok": False,
+                "error": (
+                    f"Tool-layer registry expired: {evicted!r} no longer exist. "
+                    f"Only the last {self._TOOL_LAYER_REGISTRY_LIMIT} tool outputs are kept. "
+                    "Re-run the earlier processing algorithm to regenerate them."
+                ),
+            }
         start = time.perf_counter()
         param_keys = sorted((params or {}).keys()) if isinstance(params, dict) else []
         log_event("toolkit.run_processing.start", alg_id=alg_id, param_keys=param_keys)
@@ -1934,9 +2166,40 @@ class QgisToolkit:
 
         # processing likely mutated the canvas; mark dirty for the dock.
         self._canvas_dirty = True
-        # Outputs may contain layers / non-serialisable objects; stringify.
+        # Register layer outputs so later tool calls can reference them by id;
+        # stringify everything else.
         try:
-            result = {"ok": True, "output": {k: str(v) for k, v in (output or {}).items()}}
+            serialized = {}
+            kept = []
+            import json as _json
+            for k, v in (output or {}).items():
+                if isinstance(v, QgsMapLayer):
+                    serialized[k] = self._register_tool_layer(v)
+                    kept.append(serialized[k])
+                    count = _safe_feature_count(v)
+                    if count is not None:
+                        serialized[f"{k}_feature_count"] = count
+                else:
+                    # JSON-serialize structured outputs; stringify non-serializable objects
+                    if v is None or isinstance(v, (str, int, float, bool)):
+                        serialized[k] = v
+                    elif isinstance(v, (dict, list, tuple)):
+                        try:
+                            serialized[k] = _json.loads(_json.dumps(v, default=str))
+                        except (TypeError, ValueError):
+                            serialized[k] = str(v)
+                    else:
+                        serialized[k] = str(v)
+            result = {"ok": True, "output": serialized}
+            if kept:
+                result["hint"] = (
+                    "Output layer(s) are kept in memory. Pass the output id "
+                    "directly as a param to another run_processing call, or "
+                    "call add_layer(uri=<output id>, name=..., is_analysis=true) "
+                    "to add it to the project. Vector outputs include a "
+                    "*_feature_count — if the question only needs a count, "
+                    "that is already the answer."
+                )
         except BaseException as exc:  # noqa: BLE001
             result = {"ok": False, "error": f"failed to serialize output: {type(exc).__name__}: {exc}"}
         log_event(
@@ -1946,6 +2209,17 @@ class QgisToolkit:
             ok=bool(result.get("ok")),
             cancelled=bool(result.get("cancelled")),
         )
+        try:
+            self._agent_state.record_processing(
+                alg_id=alg_id,
+                params=params,
+                output_ids=kept,
+                success=bool(result.get("ok")),
+                error=result.get("error"),
+                elapsed_ms=int((time.perf_counter() - start) * 1000),
+            )
+        except Exception:  # nosec B110
+            pass
         return result
 
     def run_processing_background(self, executor, alg_id, params):
@@ -1961,7 +2235,9 @@ class QgisToolkit:
                 timeout = self.config.get("processing_timeout", timeout)
             except Exception:
                 timeout = 0.0
-        task_setup_timeout = None
+        # Pass the user-configured timeout through so long-running algorithms
+        # don't get killed by the default 60-second main-thread executor limit.
+        task_setup_timeout = timeout if timeout > 0 else None
         log_event(
             "toolkit.run_processing_task.start",
             alg_id=alg_id,
@@ -1974,9 +2250,10 @@ class QgisToolkit:
             result = run_processing_algorithm_task(
                 executor,
                 alg_id,
-                parameters=dict(params or {}),
+                parameters=self._resolve_registered_layer_params(params),
                 cancel=event,
                 main_thread_timeout=task_setup_timeout,
+                result_layer_sink=self._register_tool_layer,
             )
 
         if isinstance(result, dict) and result.get("ok"):
@@ -2076,7 +2353,14 @@ class QgisToolkit:
     # Project mutation helpers                                           #
     # ------------------------------------------------------------------ #
     def add_layer(self, uri, name=None, provider="ogr", zoom=False, is_analysis=False):
-        name = name or uri.split("/")[-1]
+        # A registered tool layer (run_processing output / run_pyqgis result)
+        # is added directly instead of being re-opened from a URI.
+        registered = None
+        if isinstance(uri, str):
+            registered = self._ensure_tool_layer_registry().pop(uri, None)
+        if registered is not None and name is None:
+            name = registered.name()
+        name = name or str(uri).split("/")[-1]
         # For analysis layers, preserve existing layers from previous turns.
         # If a layer with the same name already exists, rename the new one
         # with a (2), (3), etc. suffix instead of deleting the old layer.
@@ -2084,7 +2368,10 @@ class QgisToolkit:
             existing_id = self._analysis_layers.get(name)
             if existing_id and QgsProject.instance().mapLayer(existing_id) is not None:
                 name = _unique_layer_name(name)
-        if provider in ("gdal", "raster"):
+        if registered is not None:
+            layer = registered
+            layer.setName(name)
+        elif provider in ("gdal", "raster"):
             from qgis.core import QgsRasterLayer
             layer = QgsRasterLayer(uri, name)
         else:
@@ -2092,6 +2379,20 @@ class QgisToolkit:
         if not layer.isValid():
             return {"ok": False, "error": f"Layer is not valid: {uri!r}"}
         QgsProject.instance().addMapLayer(layer)
+        # Register in the agent state so the model never loses track of this layer.
+        try:
+            self._agent_state.register_layer(
+                layer_id=layer.id(),
+                name=layer.name(),
+                layer_type=_map_layer_type_name(layer),
+                crs=layer.crs().authid() if layer.crs().isValid() else None,
+                feature_count=_safe_feature_count(layer) if isinstance(layer, QgsVectorLayer) else None,
+                fields=[f.name() for f in layer.fields()] if isinstance(layer, QgsVectorLayer) else None,
+                source=str(uri),
+                is_analysis=is_analysis,
+            )
+        except Exception:  # nosec B110
+            pass
         if is_analysis:
             try:
                 layer.setCustomProperty("agenticgis/analysis", True)
@@ -3601,6 +3902,10 @@ class QgisToolkit:
 
         removed = self._layer_removal_payload(layer)
         project.removeMapLayer(layer.id())
+        try:
+            self._agent_state.unregister_layer(layer.id())
+        except Exception:  # nosec B110
+            pass
         self._canvas_dirty = True
         return {
             "ok": True,
@@ -3626,6 +3931,10 @@ class QgisToolkit:
         removed = [self._layer_removal_payload(layer) for layer in layers]
         for layer in layers:
             project.removeMapLayer(layer.id())
+        try:
+            self._agent_state.clear_layers()
+        except Exception:  # nosec B110
+            pass
         self._canvas_dirty = True
         return {
             "ok": True,
@@ -3734,9 +4043,12 @@ class QgisToolkit:
             )
             return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
 
-    def create_chart(self, layer_id, field_name, chart_type="bar", colors=None,
-                     label_field=None, value_field=None, aggregate=None):
-        """Generate chart data from a vector layer field.
+    def create_chart(self, layer_id=None, field_name=None, chart_type="bar", colors=None,
+                     label_field=None, value_field=None, aggregate=None,
+                     data=None, title=None):
+        """Generate chart data from a vector layer field, or from
+        agent-supplied ``data`` ([{label, value}, ...] with optional
+        ``title``) when the numbers are already computed.
 
         Returns structured data for the chat dock to render as a chart.
 
@@ -3760,6 +4072,10 @@ class QgisToolkit:
         clean_colors, color_error = _clean_chart_colors(colors)
         if color_error:
             return {"ok": False, "error": color_error}
+        if data is not None:
+            return _chart_from_data(data, chart_type, clean_colors, title)
+        if not layer_id or not field_name:
+            return {"ok": False, "error": "provide either data, or layer_id + field_name"}
         agg, agg_error = _resolve_chart_aggregate(aggregate, value_field)
         if agg_error:
             return {"ok": False, "error": agg_error}

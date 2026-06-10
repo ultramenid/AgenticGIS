@@ -75,6 +75,10 @@ analyse?", options=["POP2020","POP2010","AREA_KM2","NAME"]).
      field_name, "line").
    - For 2-3 comparable values → a markdown table is fine; only
      add a chart if the data has visual contrast worth showing.
+   - Values you ALREADY computed (e.g. inside vs outside counts from
+     processing results) → create_chart(data=[{"label": ..., "value": ...},
+     ...], title=...). Never build a memory layer or run run_pyqgis just to
+     chart numbers you already have.
    - For exploratory one-off computation not covered by dedicated tools →
      run_pyqgis and print the result.
    - If the user supplied a colour palette, pass it via the `colors`
@@ -85,10 +89,15 @@ analyse?", options=["POP2020","POP2010","AREA_KM2","NAME"]).
    if the question implies a map output, build a new layer the user
    can drop on the canvas. Examples:
    - Buffer / intersect / spatial join / clip → use run_processing
-     with the appropriate native / GDAL / GRASS / SAGA algorithm,
-     then add the result to the project with add_layer.
+     with the appropriate native / GDAL / GRASS / SAGA algorithm.
+     Its temporary output id stays valid: pass it directly as the next
+     algorithm's INPUT to chain steps, and pass the final output id as
+     add_layer's uri to add it to the project. Never re-derive or
+     search for an output layer — the id from the result is enough, and
+     each vector output already reports its <KEY>_feature_count.
    - Filtered subset (e.g. "show me only protected forests") →
-     use run_pyqgis to write a memory layer, then add_layer.
+     use run_pyqgis to build a memory layer and assign it to ``result``
+     (it is kept in memory; the returned id works as add_layer's uri).
    - Heatmap / kernel density / hexagon aggregation → run_processing
      with qgis:heatmap or native:hexagonalgrid, then add_layer.
    - Centroid or convex-hull summary geometry → run_pyqgis to
@@ -133,6 +142,26 @@ gives the user something to keep, and the methodology shows how it was made.
 After the analysis, end with one or two sentence suggesting the most \
 follow-up question. Do not list more than 3.
 
+## Match the response to the intent
+
+Before calling any tool, decide what the user's deliverable is:
+
+- **A changed project** (a new layer, a style, a zoom, a load/save/export) —
+  the user already knows what they want done. Execute it with the fewest
+  tool calls that complete it. Skip inspection unless the operation needs
+  information you do not have (e.g. a field name the user did not give).
+  Do not produce a table, chart, or Methodology block, and do not run
+  extra calls just to enrich the confirmation — confirm in one or two
+  sentences using only what the tool results already returned.
+- **An answer derived from the data** — the user is asking a question and
+  the deliverable is the finding. Follow the full analysis workflow below:
+  inspect first, then produce the summary, table, chart, derived layer,
+  and Methodology block as applicable.
+
+If a request contains both, perform the operation first, then analyse
+only what was actually asked. When unsure, the deliverable decides:
+a changed project means execute; an answer means analyse.
+
 ## Workflow: Analyzing with QGIS layers
 
 When the user asks to analyze, summarize, or extract insights from a
@@ -150,7 +179,16 @@ loaded QGIS layer, follow this exact methodology:
    - Spatial pattern / distribution → analyze_layer(method='histogram')
    - Time-series / trends → analyze_layer(method='date_range') or create_chart
    - Filtered subset → run_processing with extract/expression algorithms
-   - Geometry ops (buffer, dissolve, intersection) → run_pyqgis
+   - Count by spatial relation (inside / outside / near a zone) → ONE
+     native:extractbylocation per relation (predicate intersects for
+     inside, disjoint for outside) and read <KEY>_feature_count straight
+     from the result — never count features in run_pyqgis. If the request
+     implies an area of interest, restrict the features to it first
+     (clip/extract) so "outside the zone" does not include features beyond
+     the area of interest. Sanity-check: inside + outside must equal the
+     source total; if not, re-check the predicates before answering.
+   - Geometry ops (buffer, dissolve, intersection) → run_processing with
+     the native: algorithm; run_pyqgis only when no algorithm fits
 
 3. **EXECUTE** — Run the operation:
    - Prefer cached structured tools over manual loops in run_pyqgis.
@@ -166,7 +204,9 @@ loaded QGIS layer, follow this exact methodology:
    - If ambiguous, call ask_user with 1-4 thoughtful options.
    - If clear, return the final answer.
 
-Do NOT skip step 1 (inspection) and jump to code.
+Do NOT skip step 1 (inspection) when answering a data question. (When
+the deliverable is only a changed project, the intent section above
+applies instead and inspection is skipped.)
 
 ## Output style
 
@@ -190,6 +230,9 @@ Do NOT skip step 1 (inspection) and jump to code.
   samples, and missing values. Use chart/stat/stat/schema/processing tools
   before run_pyqgis; use run_pyqgis only when no structured tool covers it.
 - run_pyqgis: PyQGIS escape hatch with full QGIS + plugin access. Call directly, no preamble.
+  Fetch layers with ``get_layer(ref)`` — it resolves project layer ids,
+  kept tool-output ids ('output_...'), and layer names; project lookups
+  alone cannot see kept outputs.
   Use ``_safe_make_valid(geom)`` to fix invalid geometries — it works on all
   QGIS/GEOS versions. Never call ``geom.makeValid()`` directly (the default
   structured method crashes on GEOS < 3.10).
@@ -201,13 +244,19 @@ Do NOT skip step 1 (inspection) and jump to code.
   renders chart inline. Counts features per field_name by default; pass value_field +
   aggregate ("sum"/"mean"/"max"/"min") to plot a numeric measure per category instead.
   Use label_field for readable chart labels when field_name contains codes/IDs.
+  For numbers you already computed, skip the layer entirely:
+  create_chart(data=[{"label": ..., "value": ...}, ...], title=...).
 - get_layer_statistics(layer_id, field_name): renders stat card inline.
   Always check the ``"truncated"`` flag in the result — if true and the
   user needs an exact aggregate, fall back to run_pyqgis (see Performance
   section exception).
 - get_layer_fields / get_layer_summary: inspect layer schema
 - get_project_state / list_layers: only when you need layer IDs
-- run_processing: standard algorithms (buffer, clip, dissolve, etc.)
+- run_processing: standard algorithms (buffer, clip, dissolve, etc.).
+  Temporary output ids remain usable: chain them as INPUT into the next
+  run_processing call or pass as add_layer's uri — no detours through
+  files or run_pyqgis to recover an output. Vector outputs report
+  <KEY>_feature_count, so a count question is answered by the result itself.
 - zoom_to_layer(layer_id): fit the canvas to a result layer
 - web_fetch(url, max_length, verify_ssl): fetch a web page or API endpoint via GET
 - configure_network_cache(size_mb): enable/adjust or report QGIS's shared network
@@ -474,6 +523,11 @@ DEFAULT_SYSTEM_PROMPT = build_system_prompt(include_gee=True)
 class OpenAIBackend(AgentBackend):
     label = "API (OpenAI-compatible)"
 
+    def __init__(self, config, toolkit, executor):
+        super().__init__(config, toolkit, executor)
+        self._cached_system_key = None
+        self._cached_system_text = None
+
     # ------------------------------------------------------------------ #
     def _client(self):
         with self._active_client_lock:
@@ -525,8 +579,26 @@ class OpenAIBackend(AgentBackend):
     def _system_text(self):
         user_override = self.config.get("system_prompt")
         if user_override:
-            return user_override
-        return build_system_prompt(include_gee=self._gee_available())
+            text = user_override
+        else:
+            # Include the GEE suffix only when the plugin is available.
+            # Cache key encodes the include_gee outcome so a session that
+            # gains or loses the GEE plugin gets a fresh block.
+            include_gee = self._gee_available()
+            text = build_system_prompt(include_gee=include_gee)
+            state = ""
+            if self.toolkit is not None:
+                try:
+                    state = self.toolkit.agent_state_summary()
+                except Exception:  # nosec B110
+                    pass
+            if state:
+                text = text + "\n\n" + state
+        cache_key = text
+        if cache_key != self._cached_system_key:
+            self._cached_system_key = cache_key
+            self._cached_system_text = text
+        return self._cached_system_text
 
     def _system_arg(self):
         return self._system_text()
@@ -610,12 +682,33 @@ class OpenAIBackend(AgentBackend):
                             },
                         }
                     )
+
+            # CRITICAL: detect truncated output before saving dangling tool calls.
+            if finish_reason == "length" and tool_calls:
+                emit(AgentEvent(EventType.THINKING, {
+                    "text": "Response truncated mid-tool-call (output token limit). Asking model to retry."
+                }))
+                messages.append({
+                    "role": "user",
+                    "content": (
+                        "Your previous response was truncated because it exceeded "
+                        "the output token limit. The tool calls you started were not "
+                        "executed. Please retry with a more concise approach or break "
+                        "the task into smaller steps."
+                    ),
+                })
+                continue
+
             assistant_msg = {"role": "assistant", "content": text}
             if tool_calls:
                 assistant_msg["tool_calls"] = tool_calls
             messages.append(assistant_msg)
 
-            if finish_reason != "tool_calls" or not tool_calls:
+            # If the model produced tool calls, dispatch them regardless of
+            # finish_reason.  Some providers/stream impls send finish_reason=None
+            # or "stop" even when tool_calls are present.  Only emit DONE when
+            # there are genuinely no tool calls.
+            if not tool_calls:
                 emit(AgentEvent(EventType.DONE))
                 return messages
 
@@ -642,10 +735,12 @@ class OpenAIBackend(AgentBackend):
         else:
             if is_unlimited:
                 return messages
-            emit(
-                AgentEvent(
-                    EventType.THINKING, {"text": f"Reached max {max_iters} iterations."}
-                )
+            limit_msg = (
+                f"Reached the maximum of {max_iters} tool-iteration steps. "
+                "If the task is not complete, the user can send a follow-up "
+                "message to continue."
             )
+            emit(AgentEvent(EventType.THINKING, {"text": limit_msg}))
+            messages.append({"role": "user", "content": f"[System note: {limit_msg}]"})
             emit(AgentEvent(EventType.DONE))
         return messages

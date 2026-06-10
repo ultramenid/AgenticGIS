@@ -367,15 +367,31 @@ class AgentTurnBubble(QFrame):
         self._stream_html = ""
         self._progress_text = ""
         self._progress_phase = 0
+        self._progress_elapsed = QElapsedTimer()
         self._user_decision_lbl = None
         self._last_stream_text = ""
         self._last_stream_html = ""
+        self._done = False
         # Auto-format: switch to full _md_to_html once a complete fenced block/table appears.
         self._auto_format = False
+        # Incremental auto-format cache: full re-parse only when a new
+        # fence/table marker arrives, not on every streamed frame.
+        self._fmt_sig = None
+        self._fmt_base_len = 0
+        self._fmt_base_html = ""
         self._geo_timer = QTimer(self)
         self._geo_timer.setInterval(150)
         self._geo_timer.setSingleShot(True)
         self._geo_timer.timeout.connect(self._refresh_text_geometry)
+        # Debounce timer for expensive _md_to_html re-parses during streaming.
+        # Re-parsing the whole accumulated text on every frame is O(n) and
+        # blocks the main thread. We only re-parse when fence/table markers
+        # change AND at least 200ms have passed since the last re-parse.
+        self._fmt_debounce_timer = QTimer(self)
+        self._fmt_debounce_timer.setInterval(200)
+        self._fmt_debounce_timer.setSingleShot(True)
+        self._fmt_debounce_timer.timeout.connect(self._do_fmt_reparse)
+        self._fmt_pending_text = None
 
         self.setFrameShape(QFrame.Shape.NoFrame)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
@@ -500,16 +516,60 @@ class AgentTurnBubble(QFrame):
 
         # Auto-promote: once we see a complete fenced block or table, switch to
         # full markdown rendering so syntax highlighting and tables appear live.
+        # Cheap substring checks gate the regex scans — they would otherwise
+        # walk the whole accumulated answer on every streamed frame.
         if not self._auto_format:
-            if _count_complete_fenced_blocks(text) > 0 or _count_complete_tables(text) > 0:
+            maybe_fence = text.count("```") >= 2
+            maybe_table = "\n|" in text or text.startswith("|")
+            if (maybe_fence and _count_complete_fenced_blocks(text) > 0) or (
+                maybe_table and _count_complete_tables(text) > 0
+            ):
                 self._auto_format = True
 
         if self._auto_format:
-            # Full render path — re-parse the full text on every token.
+            # Debounced incremental render: full _md_to_html re-parse is O(n)
+            # and blocks the main thread. We only re-parse when fence/table
+            # markers change, AND only after 200ms of inactivity (so bursts of
+            # deltas don't queue expensive re-parses). Between re-parses,
+            # append inline-rendered deltas to the cached base.
+            sig = (text.count("```"), text.count("\n|"))
+            need_reparse = (
+                sig != self._fmt_sig
+                or len(text) < self._fmt_base_len
+                or not self._fmt_base_html
+            )
+            if need_reparse:
+                self._fmt_sig = sig
+                self._fmt_pending_text = text
+                # Restart the debounce timer; actual re-parse happens when
+                # text has been stable for 200ms.
+                if self._fmt_debounce_timer.isActive():
+                    self._fmt_debounce_timer.stop()
+                self._fmt_debounce_timer.start()
+                # Immediate render: use the OLD cached base + inline tail of
+                # everything since the last base length, so the user sees
+                # progress right away even though the expensive re-parse is
+                # deferred.
+                tail = text[self._fmt_base_len:] if len(text) > self._fmt_base_len else text
+                base = self._fmt_base_html or ""
+                if base.endswith("</div>"):
+                    body = base[:-len("</div>")] + _md_inline(tail) + "</div>"
+                else:
+                    body = base + _md_inline(tail) if tail else base
+            else:
+                # No new markers — use cached base + inline tail.
+                tail = text[self._fmt_base_len:]
+                base = self._fmt_base_html
+                if tail and base.endswith("</div>"):
+                    body = base[:-len("</div>")] + _md_inline(tail) + "</div>"
+                elif tail:
+                    body = base + _md_inline(tail)
+                else:
+                    body = base
             self._last_stream_text = text
-            self._last_stream_html = _md_to_html(text) if text else ""
-            self._stream_html = self._last_stream_html
-            self.text_lbl.setText(self._last_stream_html + cursor)
+            self._last_stream_html = body
+            self._stream_html = body
+            self.text_lbl.setText(body + cursor)
             if not self._geo_timer.isActive():
                 self._geo_timer.start()
             return
@@ -541,7 +601,10 @@ class AgentTurnBubble(QFrame):
             return
         if self._ticker.isVisible():
             self._ticker.hide_ticker()
-        self._progress_text = clean.rstrip(".")
+        label = clean.rstrip(".")
+        if label != self._progress_text or not self._progress_elapsed.isValid():
+            self._progress_elapsed.start()
+        self._progress_text = label
         self._stream_text = clean
         self._progress_phase = 0
         self._render_progress_text()
@@ -556,6 +619,8 @@ class AgentTurnBubble(QFrame):
         self._last_stream_text = ""
         self._last_stream_html = ""
         self._auto_format = False
+        self._reset_format_cache()
+        self._done = True
         self.text_lbl.setText(self._stream_html)
         self._refresh_text_geometry()
         self.setStyleSheet(f"""
@@ -574,6 +639,8 @@ class AgentTurnBubble(QFrame):
         self._last_stream_text = ""
         self._last_stream_html = ""
         self._auto_format = False
+        self._reset_format_cache()
+        self._done = True
         self.text_lbl.setText(self._stream_html)
         self._refresh_text_geometry()
         for group in self._groups.values():
@@ -597,6 +664,8 @@ class AgentTurnBubble(QFrame):
         self._last_stream_text = ""
         self._last_stream_html = ""
         self._auto_format = False
+        self._reset_format_cache()
+        self._done = False
         self.text_lbl.setText("")
         self.text_lbl.setMinimumHeight(0)
         self.updateGeometry()
@@ -604,10 +673,51 @@ class AgentTurnBubble(QFrame):
     def has_content(self) -> bool:
         return bool(self._groups) or bool(self._stream_text) or bool(self._progress_text) or self._ticker.isVisible()
 
+    def _reset_format_cache(self) -> None:
+        self._fmt_sig = None
+        self._fmt_base_len = 0
+        self._fmt_base_html = ""
+        self._fmt_pending_text = None
+        if self._fmt_debounce_timer.isActive():
+            self._fmt_debounce_timer.stop()
+
+    def _do_fmt_reparse(self) -> None:
+        """Debounced full re-parse of accumulated streaming text.
+
+        Called 200ms after the last fence/table marker change. Updates the
+        cached base HTML so subsequent inline-delta appends are correct.
+        """
+        text = self._last_stream_text
+        if text is None:
+            return
+        self._fmt_base_html = _md_to_html(text) if text else ""
+        self._fmt_base_len = len(text)
+        self._fmt_pending_text = None
+        # Refresh the visible label with the newly parsed base.
+        cursor = f'<span style="color:{_TEXT_3};font-weight:300;">|</span>' if not self._done else ""
+        body = self._fmt_base_html
+        self._last_stream_text = text
+        self._last_stream_html = body
+        self._stream_html = body
+        self.text_lbl.setText(body + cursor)
+        if not self._geo_timer.isActive():
+            self._geo_timer.start()
+
     def _stop_progress(self) -> None:
         if self._progress_timer.isActive():
             self._progress_timer.stop()
         self._progress_text = ""
+        self._progress_elapsed.invalidate()
+
+    def _progress_elapsed_suffix(self) -> str:
+        if not self._progress_elapsed.isValid():
+            return ""
+        seconds = int(self._progress_elapsed.elapsed() / 1000)
+        if seconds < 1:
+            return ""
+        if seconds < 60:
+            return f" {seconds}s"
+        return f" {seconds // 60}m {seconds % 60}s"
 
     def _render_progress_text(self) -> None:
         if not self._progress_text:
@@ -619,7 +729,7 @@ class AgentTurnBubble(QFrame):
             f'<span style="color:{_TEXT_3};font-weight:400;">{frame}</span>'
             f'<span style="color:{_TEXT_4};">&nbsp;&nbsp;</span>'
         )
-        body = _md_to_html(f"{self._progress_text}{tail}")
+        body = _md_to_html(f"{self._progress_text}{tail}{self._progress_elapsed_suffix()}")
         body = body.replace(">", f">{prefix}", 1)
         self._stream_html = body
         self.text_lbl.setText(body)

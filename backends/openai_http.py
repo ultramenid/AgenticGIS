@@ -247,7 +247,7 @@ class OpenAIHttpClient:
 
     def stream_message(self, model, max_tokens, system, tools, messages,
                        on_text, should_stop, timeout=None,
-                       on_connecting=None):
+                       on_connecting=None, temperature=None, top_p=None):
         """POST /v1/chat/completions with stream=True.
 
         Calls ``on_text(str)`` for each text delta. Returns
@@ -268,6 +268,10 @@ class OpenAIHttpClient:
             "stream": True,
             "stream_options": {"include_usage": True},
         }
+        if temperature is not None:
+            payload["temperature"] = temperature
+        if top_p is not None:
+            payload["top_p"] = top_p
         # B1 — Ollama keep_alive: prevent the model from being unloaded between
         # turns.  Only sent to Ollama endpoints; strict providers reject unknown
         # fields.
@@ -298,6 +302,7 @@ class OpenAIHttpClient:
             stopped = False
             first_event_logged = False
             first_text_logged = False
+            last_cache_logged = None
             stream_error = False
             done_received = False
             stalled = False
@@ -355,7 +360,7 @@ class OpenAIHttpClient:
                             transport="openai",
                         )
                         first_event_logged = True
-                    self._log_cache_usage(event)
+                    last_cache_logged = self._log_cache_usage(event, last_cache_logged)
                     choices = event.get("choices") or [{}]
                     choice = choices[0]
                     delta = choice.get("delta", {})
@@ -430,7 +435,14 @@ class OpenAIHttpClient:
             try:
                 parsed = json.loads(raw_args) if raw_args else {}
             except json.JSONDecodeError:
-                parsed = {}
+                # Return an honest error instead of silently replacing with {}.
+                # The model needs to know its output was corrupted/truncated.
+                parsed = {
+                    "_parse_error": (
+                        "Tool arguments could not be parsed as JSON — likely truncated. "
+                        f"Raw: {raw_args[:200]!r}"
+                    ),
+                }
             blocks.append({
                 "type": "tool_use",
                 "id": tc.get("id", ""),
@@ -526,19 +538,29 @@ class OpenAIHttpClient:
         raise OpenAIHttpError(f"Connection error: {last_error}")
 
     @staticmethod
-    def _log_cache_usage(event):
+    def _log_cache_usage(event, last_logged=None):
+        """Log cached-token usage, deduped per stream.
+
+        Some providers attach ``usage`` to every chunk; logging each one
+        writes a file line per token, which is pure overhead. Returns the
+        value to pass back in as ``last_logged`` on the next chunk.
+        """
         usage = event.get("usage")
         if not isinstance(usage, dict):
-            return
+            return last_logged
         details = usage.get("prompt_tokens_details") or usage.get(
             "input_tokens_details"
         )
         if isinstance(details, dict) and "cached_tokens" in details:
-            log_event(
-                "transport.cache_usage",
-                transport="openai",
-                cached_tokens=details.get("cached_tokens"),
-            )
+            cached = details.get("cached_tokens")
+            if cached != last_logged:
+                log_event(
+                    "transport.cache_usage",
+                    transport="openai",
+                    cached_tokens=cached,
+                )
+            return cached
+        return last_logged
 
     def cancel_current_request(self):
         """Best-effort cancellation of the active streaming response."""

@@ -859,6 +859,11 @@ class NormalizingStream:
         "<EXTREMELY_IMPORTANT>",
         "context-mode",
         "superpowers",
+        "[OPENCODE]",
+        "[ToolUse]",
+        "[Text]",
+        "[Assistant]",
+        "[Thinking]",
     )
 
     def __init__(self, adapter, emit, process_id=None):
@@ -867,13 +872,17 @@ class NormalizingStream:
         self.process_id = process_id
         self.session_id = ""
         self.final_text = None
-        self.pending_tool_call = None
+        self.pending_tool_calls = []
         self.had_error = False
         self.content_blocks = []
         self.finish_reason = None
         self._text_emitted = False
+        self._last_text_value = None
         self._first_event_logged = False
         self._first_text_logged = False
+        # Generate unique tool_use_id for each tool call so results can be
+        # correlated with the right call (critical for Anthropic/Claude).
+        self._tool_call_counter = 0
         # Deduplicate tool calls that arrive twice (e.g. Claude CLI may emit
         # both a content_block_delta and raw JSON for the same call).
         self._emitted_tool_call_keys = set()
@@ -898,6 +907,58 @@ class NormalizingStream:
             tool=self.adapter.id,
             pid=self.process_id,
         )
+
+    @staticmethod
+    def _extract_text_from_dict(obj):
+        """Conservative text extraction from an unrecognized CLI event.
+
+        Only looks at well-known text keys (``text``, ``message``, ``content``,
+        ``response``, ``output``, ``result``) and common nested wrappers
+        (``part``, ``delta``).  Never recurses into arbitrary dict values,
+        because that would pick up tool artifacts like ``aggregated_output``
+        or lifecycle metadata like ``step_start``.
+
+        Returns ``None`` if the extracted text looks like a UUID, is too
+        short, or resembles a system identifier rather than user-facing prose.
+        """
+        if not isinstance(obj, dict):
+            return None
+
+        # Check nested wrappers first (opencode/Codex convention)
+        for wrapper in ("part", "delta"):
+            wrapped = obj.get(wrapper)
+            if isinstance(wrapped, dict):
+                for key in ("text", "message", "content", "response"):
+                    val = wrapped.get(key)
+                    if isinstance(val, str) and val.strip():
+                        return NormalizingStream._coerce_to_prose(val.strip())
+
+        # Check top-level text keys
+        for key in ("text", "message", "content", "response", "output", "result"):
+            val = obj.get(key)
+            if isinstance(val, str) and val.strip():
+                return NormalizingStream._coerce_to_prose(val.strip())
+
+        return None
+
+    @staticmethod
+    def _coerce_to_prose(text):
+        """Return *text* if it looks like user-facing prose; otherwise ``None``.
+
+        Filters out UUIDs, short identifiers, event-type echoes, and other
+        machine-readable strings that should not appear as chat text.
+        """
+        if len(text) < 4:
+            return None
+        # Skip UUID-like strings (e.g. "019e991e-073c-71b3-ba7f-dc3d40bac178")
+        import re as _re
+        if _re.fullmatch(r"[0-9a-fA-F\-]{36}", text):
+            return None
+        # Skip event-type echoes (e.g. "step_start", "exec_command_end")
+        if text in ("step_start", "step_finish", "exec_command_end",
+                    "exec_command_start", "tool_call_start", "tool_call_finish"):
+            return None
+        return text
 
     @classmethod
     def _is_startup_noise(cls, raw_bytes: bytes, raw_obj) -> bool:
@@ -925,8 +986,9 @@ class NormalizingStream:
                     if key in self._emitted_tool_call_keys:
                         continue
                     self._emitted_tool_call_keys.add(key)
-                    if self.pending_tool_call is None:
-                        self.pending_tool_call = call
+                    call["_tool_use_id"] = f"cli_call_{self._tool_call_counter}"
+                    self._tool_call_counter += 1
+                    self.pending_tool_calls.append(call)
                     self.emit(
                         AgentEvent(
                             EventType.TOOL_USE,
@@ -939,15 +1001,30 @@ class NormalizingStream:
                 if protocol.is_final:
                     self.final_text = protocol.text or self.final_text
                 return
+        elif stripped:
+            # Lines that are NOT JSON (e.g. opencode raw text output, markdown,
+            # progress indicators, etc.) — emit as text so the agent response
+            # isn't silently lost.  Skip startup noise and very short tokens.
+            text = stripped
+            if text and not self._is_startup_noise(raw_bytes, {}) and len(text) > 2 and text != self._last_text_value:
+                self._log_first_event("text")
+                self._log_first_text()
+                self.emit(AgentEvent(EventType.TEXT, {"text": text}))
+                self._text_emitted = True
+                self._last_text_value = text
+                self.final_text = text
+                return
 
         try:
             raw = json.loads(decoded)
         except (json.JSONDecodeError, UnicodeDecodeError):
             text = stripped
-            if text and not self._is_startup_noise(raw_bytes, {}):
+            if text and not self._is_startup_noise(raw_bytes, {}) and text != self._last_text_value:
                 self._log_first_event("text")
                 self._log_first_text()
                 self.emit(AgentEvent(EventType.TEXT, {"text": text}))
+                self._text_emitted = True
+                self._last_text_value = text
                 self.final_text = text
             return
         if not isinstance(raw, dict):
@@ -956,8 +1033,13 @@ class NormalizingStream:
             return
         self._log_first_event(raw.get("type") or "unknown")
         norm = self.adapter.parse_event(raw)
+        # DEBUG: trace what the adapter returns for each event type
+        _nt = norm.text[:40] if norm and norm.text else None
+        _nf = norm.is_final if norm else None
+        print(f"[AGENTICGIS-DEBUG] feed_line: type={raw.get('type')!r}, adapter={self.adapter.id}, "
+              f"norm={norm is not None}, norm.text={_nt!r}, norm.is_final={_nf}, _text_emitted={self._text_emitted}")
         if norm is None:
-            # Fallback: check if raw JSON is the tool_calls protocol
+            # Fallback 1: check if raw JSON is the tool_calls protocol
             protocol = self.adapter.parse_protocol_text(decoded)
             if protocol is not None:
                 for call in protocol.tool_calls:
@@ -965,8 +1047,9 @@ class NormalizingStream:
                     if key in self._emitted_tool_call_keys:
                         continue
                     self._emitted_tool_call_keys.add(key)
-                    if self.pending_tool_call is None:
-                        self.pending_tool_call = call
+                    call["_tool_use_id"] = f"cli_call_{self._tool_call_counter}"
+                    self._tool_call_counter += 1
+                    self.pending_tool_calls.append(call)
                     self.emit(
                         AgentEvent(
                             EventType.TOOL_USE,
@@ -978,6 +1061,16 @@ class NormalizingStream:
                     )
                 if protocol.is_final:
                     self.final_text = protocol.text or self.final_text
+                return
+            # Fallback 2: unknown event type but might contain text somewhere
+            # in the JSON object (opencode sometimes emits new event shapes).
+            _text = self._extract_text_from_dict(raw)
+            if _text and _text != self._last_text_value:
+                self._log_first_text()
+                self.emit(AgentEvent(EventType.TEXT, {"text": _text}))
+                self._text_emitted = True
+                self._last_text_value = _text
+                self.final_text = _text
                 return
             sid = raw.get("session_id") or raw.get("sessionID") or ""
             if sid:
@@ -1000,10 +1093,17 @@ class NormalizingStream:
             else:
                 # Suppress duplicate final text when it was already
                 # streamed via deltas (e.g. Codex task_complete).
-                if not (norm.is_final and self._text_emitted):
+                # Also suppress exact duplicate text from fallbacks
+                # (e.g. Claude result events that echo the assistant text).
+                will_emit = not (norm.is_final and self._text_emitted) and norm.text != self._last_text_value
+                print(f"[AGENTICGIS-DEBUG] TEXT decision: norm.is_final={norm.is_final}, "
+                      f"_text_emitted={self._text_emitted}, will_emit={will_emit}, "
+                      f"text={norm.text[:50]!r}")
+                if will_emit:
                     self._log_first_text()
                     self.emit(AgentEvent(EventType.TEXT, {"text": norm.text}))
                     self._text_emitted = True
+                    self._last_text_value = norm.text
         for call in norm.tool_calls:
             # Deduplicate identical tool calls (Claude CLI may emit the
             # same call via both content_block_delta and raw JSON).
@@ -1011,8 +1111,9 @@ class NormalizingStream:
             if key in self._emitted_tool_call_keys:
                 continue
             self._emitted_tool_call_keys.add(key)
-            if self.pending_tool_call is None:
-                self.pending_tool_call = call
+            call["_tool_use_id"] = f"cli_call_{self._tool_call_counter}"
+            self._tool_call_counter += 1
+            self.pending_tool_calls.append(call)
             self.emit(
                 AgentEvent(
                     EventType.TOOL_USE,
@@ -1034,6 +1135,7 @@ class NormalizingStream:
                     )
                 )
         if norm.is_final:
+            print(f"[AGENTICGIS-DEBUG] Setting final_text={norm.text[:50]!r}")
             self.final_text = norm.text or self.final_text
 
 
@@ -1224,8 +1326,15 @@ class CliToolBackend(AgentBackend):
 
     def _system_prompt(self):
         base = _build_system_prompt(include_gee=self._gee_available())
+        state = ""
+        if self.toolkit is not None:
+            try:
+                state = self.toolkit.agent_state_summary()
+            except Exception:  # nosec B110
+                pass
+        state_section = f"\n\n{state}" if state else ""
         return (
-            f"{base}\n\n"
+            f"{base}{state_section}\n\n"
             "## CLI proxy rules\n\n"
             "You are running inside a CLI transport, but AgenticGIS executes "
             "all QGIS tools in-process. Do not use this CLI's own filesystem, "
@@ -1417,11 +1526,20 @@ class CliToolBackend(AgentBackend):
                 adapter, getattr(stream, "session_id", "")
             )
 
-            if stream.pending_tool_call is not None:
-                call = stream.pending_tool_call
-                name = call.get("name")
-                args = call.get("arguments", {}) or {}
-                if name in tools_mod.TOOL_BY_NAME:
+            # Support both the new list-based field and legacy single field (for tests).
+            pending = getattr(stream, "pending_tool_calls", None) or []
+            if not pending and getattr(stream, "pending_tool_call", None):
+                pending = [stream.pending_tool_call]
+            if pending:
+                tool_messages = []
+                for call in pending:
+                    name = call.get("name")
+                    args = call.get("arguments", {}) or {}
+                    tool_use_id = call.get("_tool_use_id", "")
+                    if name not in tools_mod.TOOL_BY_NAME:
+                        # Non-AgenticGIS tool (e.g. Codex command_execution).
+                        # Surface for UI display but don't execute it here.
+                        continue
                     payload, is_error, is_cancelled, _result = _dispatch_one_tool(
                         self.toolkit,
                         self.executor,
@@ -1433,21 +1551,34 @@ class CliToolBackend(AgentBackend):
                     if should_stop() or is_cancelled:
                         emit(AgentEvent(EventType.DONE))
                         return messages
-                    tool_message = {
-                        "role": "tool",
-                        "name": name,
-                        "content": payload,
-                    }
-                    messages.append(tool_message)
-                    new_messages = [tool_message]
+                    # Anthropic/Claude backends need tool_use_id correlation.
+                    # Use the same format the API backends use so continuation works.
+                    if adapter.id == "claude":
+                        tool_messages.append({
+                            "role": "tool",
+                            "tool_use_id": tool_use_id,
+                            "name": name,
+                            "content": payload,
+                        })
+                    else:
+                        tool_messages.append({
+                            "role": "tool",
+                            "name": name,
+                            "content": payload,
+                        })
+                if tool_messages:
+                    messages.extend(tool_messages)
+                    new_messages = tool_messages
                     continue
-                # Non-AgenticGIS tool (e.g. Codex command_execution surfaced
-                # for UI display only). End the turn with the assistant's text.
+                # All calls were non-AgenticGIS tools — fall through to text handling.
+            # DEBUG: trace send() final decision
+            _lval = getattr(stream, '_last_text_value', None)
+            _txt_em = getattr(stream, '_text_emitted', False)
             if stream.final_text is not None:
                 messages.append({"role": "assistant", "content": stream.final_text})
-            elif not stream.had_error and not stream._text_emitted:
-                # No text returned and no tool call — show a visible fallback
-                # so the user knows the CLI completed rather than hung.
+            elif _txt_em and _lval:
+                messages.append({"role": "assistant", "content": _lval})
+            elif not stream.had_error:
                 fallback = "The CLI agent completed without returning a response."
                 emit(AgentEvent(EventType.TEXT, {"text": fallback}))
                 messages.append({"role": "assistant", "content": fallback})
@@ -1468,14 +1599,7 @@ class CliToolBackend(AgentBackend):
     # ------------------------------------------------------------------ #
 
     def _collect_into_stream(self, proc, stream, should_stop):
-        """Read both pipes via ``select`` and feed lines into ``stream``.
-
-        Replacing the two reader threads eliminates a deadlock class where
-        one pipe's kernel buffer (64 kB on macOS) fills before the other
-        is drained — the writer blocks, the reader thread blocks on
-        ``readline``, and nothing moves. ``select`` notifies us whenever
-        *any* pipe is readable.
-        """
+        """Read both pipes via ``select`` and feed lines into ``stream``."""
         stdout = proc.stdout
         stderr = proc.stderr
         out_buf = b""
@@ -1486,9 +1610,15 @@ class CliToolBackend(AgentBackend):
             if should_stop():
                 poller_stopped = True
                 break
-            if proc.poll() is not None:
+            _poll = proc.poll()
+            if _poll is not None:
+                print(f"[AGENTICGIS-DEBUG] proc.poll() returned {_poll!r}")
                 if stdout:
-                    out_buf = self._read_into_stream(out_buf, stdout, stream)
+                    # Drain stdout in a loop after process exit
+                    while True:
+                        out_buf, did_read = self._read_into_stream(out_buf, stdout, stream, "post-exit")
+                        if not did_read:
+                            break
                 if stderr:
                     err_acc.append(self._read_all(stderr, None))
                 break
@@ -1498,19 +1628,18 @@ class CliToolBackend(AgentBackend):
                 break
             for stream_obj in rlist:
                 if stream_obj is stdout:
-                    out_buf = self._read_into_stream(out_buf, stdout, stream)
+                    out_buf, _ = self._read_into_stream(out_buf, stdout, stream, "select")
                 elif stream_obj is stderr:
                     err_acc.append(self._read_all(stderr, None))
 
         if poller_stopped:
             self._terminate_process_group(proc, kill=True)
 
-        # Persist the session id for the next turn's supported continuation.
         self._remember_session_id(stream.adapter, stream.session_id)
 
-        # If stdout was closed before we drained, pick up any leftover
-        # partial line.
+        # Pick up any leftover partial line.
         if out_buf.strip():
+            print(f"[AGENTICGIS-DEBUG] Leftover buffer: {out_buf[:200]!r}")
             stream.feed_line(out_buf)
             self._remember_session_id(stream.adapter, stream.session_id)
 
@@ -1576,6 +1705,7 @@ class CliToolBackend(AgentBackend):
                 )
             )
             stream = NormalizingStream(adapter, emit)
+            stream.had_error = True
             return stream
         try:
             stream = NormalizingStream(
@@ -1589,21 +1719,25 @@ class CliToolBackend(AgentBackend):
         return stream
 
     @staticmethod
-    def _read_into_stream(buf, stream_obj, normalizer):
+    def _read_into_stream(buf, stream_obj, normalizer, label=""):
         try:
             chunk = stream_obj.read(4096)
         except (OSError, ValueError):
-            return buf
+            print(f"[AGENTICGIS-DEBUG] _read_into_stream({label}): read failed")
+            return buf, False
         if not chunk:
-            return buf
+            print(f"[AGENTICGIS-DEBUG] _read_into_stream({label}): EOF")
+            return buf, False
         if isinstance(chunk, str):
             chunk = chunk.encode("utf-8")
+        print(f"[AGENTICGIS-DEBUG] _read_into_stream({label}): read {len(chunk)} bytes")
         buf += chunk
         while b"\n" in buf:
             line, buf = buf.split(b"\n", 1)
             if line:
+                print(f"[AGENTICGIS-DEBUG] _read_into_stream({label}): feeding line: {line[:200]!r}")
                 normalizer.feed_line(line)
-        return buf
+        return buf, True
 
     @staticmethod
     def _read_all(stream, _unused):

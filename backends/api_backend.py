@@ -125,6 +125,14 @@ class ApiBackend(AgentBackend):
             # gains or loses the GEE plugin gets a fresh block.
             include_gee = self._gee_available()
             text = build_system_prompt(include_gee=include_gee)
+            state = ""
+            if self.toolkit is not None:
+                try:
+                    state = self.toolkit.agent_state_summary()
+                except Exception:  # nosec B110
+                    pass
+            if state:
+                text = text + "\n\n" + state
         cache_key = text
         if cache_key != self._cached_system_key:
             self._cached_system_key = cache_key
@@ -204,7 +212,7 @@ class ApiBackend(AgentBackend):
             messages.append({"role": "assistant", "content": content})
 
             tool_uses = [b for b in content if b.get("type") == "tool_use"]
-            if stop_reason != "tool_use" or not tool_uses:
+            if not tool_uses:
                 emit(AgentEvent(EventType.DONE))
                 return messages
 

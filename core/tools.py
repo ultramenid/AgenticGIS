@@ -19,10 +19,16 @@ TOOL_SPECS = [
             "Execute arbitrary PyQGIS Python code in the running QGIS instance. "
             "Prefer analyze_layer and dedicated tools first. Pre-bound: iface, "
             "QgsProject, QgsApplication, processing, QgsFeatureRequest, "
-            "_iterate_features, _sample_features, all qgis.core names. "
+            "get_layer, _iterate_features, _sample_features, all qgis.core names. "
+            "Always fetch layers with get_layer(ref) — it resolves project layer "
+            "ids, kept tool-output ids (e.g. 'output_...' from run_processing), "
+            "and layer names; QgsProject.mapLayer alone cannot see kept outputs. "
             "Do not use list(layer.getFeatures()); use _sample_features() or "
             "_iterate_features(limit=...). Do not fetch geometry when only "
-            "attributes are needed. Assign `result` to return a value. "
+            "attributes are needed. Assign `result` to return a value; if "
+            "`result` is a layer it is kept in memory and its id is returned "
+            "for use with add_layer or run_processing (or call "
+            "_register_layer(layer) for extra layers). "
             "External file/URL/database access requires user permission."
         ),
         "input_schema": {
@@ -153,6 +159,12 @@ TOOL_SPECS = [
             "Run a Processing algorithm by id with a parameter dict "
             "(e.g. alg_id='native:buffer', params={'INPUT': id, 'DISTANCE': 50, "
             "'OUTPUT': 'memory:'}). Runs as a background task with cancellation. "
+            "Temporary output layers are kept in memory: pass the returned output "
+            "id (e.g. 'output_...') directly as a param to a later run_processing "
+            "call to chain algorithms, or as add_layer uri to add it to the project. "
+            "Vector outputs also report <KEY>_feature_count — when the question "
+            "only needs a count (how many inside/outside/within), read it from "
+            "the result instead of counting with run_pyqgis. "
             "File/URI/database output outside loaded layers requires user permission."
         ),
         "input_schema": {
@@ -169,9 +181,11 @@ TOOL_SPECS = [
         "method": "add_layer",
         "description": (
             "Load a layer from a file path/URI and add it to the project. "
-            "External sources require user permission. No zoom by default. "
-            "Set is_analysis=true for derived results (buffers, joins, etc.) "
-            "to track and auto-rename them. Call zoom_to_layer after."
+            "Also accepts an in-memory result id from run_processing output or "
+            "a run_pyqgis result (pass it as uri) — that exact layer is added, "
+            "not re-opened. External sources require user permission. No zoom "
+            "by default. Set is_analysis=true for derived results (buffers, "
+            "joins, etc.) to track and auto-rename them. Call zoom_to_layer after."
         ),
         "input_schema": {
             "type": "object",
@@ -454,20 +468,50 @@ TOOL_SPECS = [
         "name": "create_chart",
         "method": "create_chart",
         "description": (
-            "Create a bar/line/pie chart from a vector layer's field values. "
-            "By default counts features per distinct field_name value. For a "
-            "numeric measure (e.g. total area per category), set value_field "
-            "and aggregate='sum'/'mean'/'max'/'min'; field_name is the category "
-            "axis. Do NOT pass a numeric field directly as field_name — use "
-            "value_field instead. Use label_field for readable display labels "
-            "when field_name holds codes/IDs. Supply colors (hex strings) to "
-            "override the default palette; cycles if shorter than the data."
+            "Create a bar/line/pie chart. Two modes: (1) from a vector layer — "
+            "pass layer_id + field_name; by default counts features per distinct "
+            "field_name value. For a numeric measure (e.g. total area per "
+            "category), set value_field and aggregate='sum'/'mean'/'max'/'min'; "
+            "field_name is the category axis. Do NOT pass a numeric field "
+            "directly as field_name — use value_field instead. Use label_field "
+            "for readable display labels when field_name holds codes/IDs. "
+            "(2) from values you already computed — pass data=[{label, value}, "
+            "...] (and optionally title) with NO layer_id; never build a memory "
+            "layer just to chart numbers you already have. Supply colors (hex "
+            "strings) to override the default palette; cycles if shorter than "
+            "the data."
         ),
         "input_schema": {
             "type": "object",
             "properties": {
-                "layer_id": {"type": "string"},
-                "field_name": {"type": "string"},
+                "layer_id": {
+                    "type": "string",
+                    "description": "Layer mode only. Omit when passing data.",
+                },
+                "field_name": {
+                    "type": "string",
+                    "description": "Layer mode only. Omit when passing data.",
+                },
+                "data": {
+                    "type": "array",
+                    "description": (
+                        "Already-computed chart rows: [{'label': str, 'value': "
+                        "number}, ...]. When given, layer_id/field_name are "
+                        "ignored and no layer is read."
+                    ),
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "label": {"type": "string"},
+                            "value": {"type": "number"},
+                        },
+                        "required": ["label", "value"],
+                    },
+                },
+                "title": {
+                    "type": "string",
+                    "description": "Chart title (used with data mode).",
+                },
                 "label_field": {
                     "type": "string",
                     "description": (
@@ -507,7 +551,7 @@ TOOL_SPECS = [
                     },
                 },
             },
-            "required": ["layer_id", "field_name"],
+            "required": [],
         },
     },
     {
