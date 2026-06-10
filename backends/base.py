@@ -468,10 +468,10 @@ def elide_stale_tool_results(messages, keep_recent_user_turns=2):
                             else ""
                         )
                         stub = (
-                            f"[tool result elided to save context"
+                            "[tool result elided to save context"
                             + (f" — {name}" if name else "")
                             + f" returned {n} chars."
-                            f" Re-run the tool if the data is needed again."
+                            + " Re-run the tool if the data is needed again."
                             + (f" Preview: {preview}" if preview else "")
                             + "]"
                         )

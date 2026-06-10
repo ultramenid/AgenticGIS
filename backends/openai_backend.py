@@ -15,7 +15,6 @@ from .base import (
     AgentEvent,
     EventType,
     _ToolCall,
-    _dispatch_one_tool,
     _dispatch_tools_maybe_parallel,
     agent_iteration_steps,
     elide_stale_tool_results,

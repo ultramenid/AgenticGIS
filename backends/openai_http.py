@@ -63,7 +63,7 @@ def _looks_like_ollama(base_url):
     try:
         parsed = urllib.parse.urlparse(base_url)
         if parsed.port == 11434 and parsed.hostname in (
-            "localhost", "127.0.0.1", "0.0.0.0"
+            "localhost", "127.0.0.1", "0.0.0.0"  # nosec B104 — checking for localhost/Ollama, not binding
         ):
             return True
     except Exception:  # nosec B110 — defensive; malformed URLs are handled elsewhere
