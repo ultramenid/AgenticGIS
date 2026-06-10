@@ -24,6 +24,7 @@ from .base import (
     should_compact,
     unlimited_iterations,
 )
+from .openai_backend import DEFAULT_SYSTEM_PROMPT  # noqa: F401 — re-export for tests
 from .openai_backend import build_system_prompt
 
 
