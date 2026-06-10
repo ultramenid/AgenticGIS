@@ -16,22 +16,14 @@ TOOL_SPECS = [
         "name": "run_pyqgis",
         "method": "run_pyqgis",
         "description": (
-            "Execute arbitrary PyQGIS Python code inside the running QGIS "
-            "instance. For layer analysis, prefer dedicated tools for summaries, "
-            "statistics, charts, schema inspection, project state, and processing "
-            "algorithms, especially analyze_layer, before using arbitrary PyQGIS. "
-            "This escape hatch can reach "
-            "EVERY QGIS feature and EVERY installed plugin. Pre-bound names: iface, "
+            "Execute arbitrary PyQGIS Python code in the running QGIS instance. "
+            "Prefer analyze_layer and dedicated tools first. Pre-bound: iface, "
             "QgsProject, QgsApplication, processing, QgsFeatureRequest, "
-            "_iterate_features, _sample_features, and all qgis.core names. "
-            "For large layers: Do not use list(layer.getFeatures()), do not "
-            "materialize all features. Do not fetch geometry when only "
-            "attributes are needed; use _sample_features(...) for previews or "
-            "iterate _iterate_features(..., limit=...) in chunks. "
-            "Assign to a variable named `result` to return a value. stdout and "
-            "stderr are captured and returned. Access to external files, URLs, "
-            "databases, or other sources outside currently loaded project layers "
-            "requires explicit user permission."
+            "_iterate_features, _sample_features, all qgis.core names. "
+            "Do not use list(layer.getFeatures()); use _sample_features() or "
+            "_iterate_features(limit=...). Do not fetch geometry when only "
+            "attributes are needed. Assign `result` to return a value. "
+            "External file/URL/database access requires user permission."
         ),
         "input_schema": {
             "type": "object",
@@ -45,27 +37,26 @@ TOOL_SPECS = [
         "name": "get_project_state",
         "method": "get_project_state",
         "description": (
-            "Return the current QGIS project state: path, CRS, layer list with "
-            "brief metadata, the active layer, and the canvas extent. Call this "
-            "first to understand the workspace."
+            "Return QGIS project state: path, CRS, layer list, active layer, "
+            "and canvas extent. Call first to understand the workspace."
         ),
         "input_schema": {"type": "object", "properties": {}},
     },
     {
         "name": "list_layers",
         "method": "list_layers",
-        "description": "List layers in the project with brief metadata. Supports optional pagination.",
+        "description": "List project layers with brief metadata. Supports pagination.",
         "input_schema": {
             "type": "object",
             "properties": {
                 "limit": {
                     "type": "integer",
-                    "description": "Maximum number of layers to return.",
+                    "description": "Max layers to return.",
                     "minimum": 1,
                 },
                 "offset": {
                     "type": "integer",
-                    "description": "Number of layers to skip before returning results.",
+                    "description": "Layers to skip (default 0).",
                     "minimum": 0,
                     "default": 0,
                 },
@@ -75,7 +66,7 @@ TOOL_SPECS = [
     {
         "name": "get_layer_fields",
         "method": "get_layer_fields",
-        "description": "List the attribute fields of a vector layer by its id.",
+        "description": "List attribute fields of a vector layer.",
         "input_schema": {
             "type": "object",
             "properties": {"layer_id": {"type": "string"}},
@@ -85,7 +76,7 @@ TOOL_SPECS = [
     {
         "name": "get_layer_summary",
         "method": "get_layer_summary",
-        "description": "Detailed summary of one layer: source, extent, fields, counts.",
+        "description": "Detailed summary of a layer: source, extent, fields, counts.",
         "input_schema": {
             "type": "object",
             "properties": {"layer_id": {"type": "string"}},
@@ -96,12 +87,10 @@ TOOL_SPECS = [
         "name": "analyze_layer",
         "method": "analyze_layer",
         "description": (
-            "Preferred tool for exploratory vector layer analysis. Returns a "
-            "bounded, performance-safe summary, field statistics, top category "
-            "values, samples, and missing-value counts using no-geometry "
-            "feature requests and background processing where possible. Use "
-            "this before run_pyqgis for layer analysis, especially on large "
-            "layers."
+            "Preferred tool for exploratory vector layer analysis. Returns "
+            "bounded/performance-safe summary, field statistics, top category "
+            "values, samples, and missing-value counts. Use before run_pyqgis, "
+            "especially on large layers."
         ),
         "input_schema": {
             "type": "object",
@@ -109,31 +98,31 @@ TOOL_SPECS = [
                 "layer_id": {"type": "string"},
                 "analysis_type": {
                     "type": "string",
-                    "description": "auto, summary, field_stats, category_counts, top_values, sample, or missing_values",
+                    "description": "auto|summary|field_stats|category_counts|top_values|sample|missing_values",
                 },
                 "fields": {
                     "type": "array",
                     "items": {"type": "string"},
-                    "description": "Optional list of fields to analyze. Omit to analyze all fields.",
+                    "description": "Fields to analyze (omit for all).",
                 },
                 "field_name": {
                     "type": "string",
-                    "description": "Convenience single field to analyze when fields is omitted.",
+                    "description": "Single field shorthand when fields is omitted.",
                 },
                 "sample_limit": {
                     "type": "integer",
                     "minimum": 0,
-                    "description": "Maximum sample rows to return.",
+                    "description": "Max sample rows.",
                 },
                 "scan_limit": {
                     "type": "integer",
                     "minimum": 1,
-                    "description": "Maximum features to scan before returning truncated=true.",
+                    "description": "Max features to scan before truncated=true.",
                 },
                 "top_limit": {
                     "type": "integer",
                     "minimum": 1,
-                    "description": "Maximum top values per categorical field.",
+                    "description": "Max top values per categorical field.",
                 },
             },
             "required": ["layer_id"],
@@ -142,19 +131,13 @@ TOOL_SPECS = [
     {
         "name": "list_plugins",
         "method": "list_plugins",
-        "description": (
-            "List installed/active/loaded QGIS plugins so you know what extra "
-            "capability is available to drive via run_pyqgis or run_processing."
-        ),
+        "description": "List installed/active QGIS plugins and their capabilities.",
         "input_schema": {"type": "object", "properties": {}},
     },
     {
         "name": "list_processing_algorithms",
         "method": "list_processing_algorithms",
-        "description": (
-            "Search available Processing algorithms (native, GDAL, GRASS, SAGA "
-            "and plugin-provided). Filter by a substring of id or display name."
-        ),
+        "description": "Search available Processing algorithms (native, GDAL, GRASS, SAGA, plugins) by id or name substring.",
         "input_schema": {
             "type": "object",
             "properties": {"filter_text": {"type": "string"}},
@@ -164,11 +147,10 @@ TOOL_SPECS = [
         "name": "run_processing",
         "method": "run_processing",
         "description": (
-            "Run a Processing algorithm by id with a parameter dict, e.g. "
-            "alg_id='native:buffer', params={'INPUT': <id>, 'DISTANCE': 50, "
-            "'OUTPUT': 'memory:'}. Runs through a QGIS background task when "
-            "available, with cancellation support. File path, URI, database, or non-memory output "
-            "parameters outside loaded layers require explicit user permission."
+            "Run a Processing algorithm by id with a parameter dict "
+            "(e.g. alg_id='native:buffer', params={'INPUT': id, 'DISTANCE': 50, "
+            "'OUTPUT': 'memory:'}). Runs as a background task with cancellation. "
+            "File/URI/database output outside loaded layers requires user permission."
         ),
         "input_schema": {
             "type": "object",
@@ -183,16 +165,10 @@ TOOL_SPECS = [
         "name": "add_layer",
         "method": "add_layer",
         "description": (
-            "Load a layer from a file path / URI and add it to the project. "
-            "External sources outside currently loaded layers require explicit "
-            "user permission. By default this does not zoom or force an immediate "
-            "canvas refresh, which keeps large layer loads responsive. "
-            "Set is_analysis=true for layers you derive as analysis results "
-            "(buffers, joins, filtered subsets, etc.): these are tracked as "
-            "persistent results, preserved across turns, and automatically "
-            "renamed (e.g. 'NDVI (2)') if a layer with the same name already "
-            "exists from a previous turn. After this, call zoom_to_layer so the user "
-            "sees the result on the map."
+            "Load a layer from a file path/URI and add it to the project. "
+            "External sources require user permission. No zoom by default. "
+            "Set is_analysis=true for derived results (buffers, joins, etc.) "
+            "to track and auto-rename them. Call zoom_to_layer after."
         ),
         "input_schema": {
             "type": "object",
@@ -210,10 +186,7 @@ TOOL_SPECS = [
                 },
                 "is_analysis": {
                     "type": "boolean",
-                    "description": (
-                        "Mark this as a derived analysis/result layer so it is "
-                        "tracked, reused by name, and kept (not auto-deleted)."
-                    ),
+                    "description": "Mark as a derived result layer: tracked, reused by name, kept across turns.",
                     "default": False,
                 },
             },
@@ -224,9 +197,8 @@ TOOL_SPECS = [
         "name": "zoom_to_layer",
         "method": "zoom_to_layer",
         "description": (
-            "Fit the map canvas to a layer's extent so the user sees the "
-            "result. Provide layer_id (preferred) or an exact layer_name. Call "
-            "this after producing a result layer the user should look at."
+            "Fit the map canvas to a layer's extent. Provide layer_id (preferred) "
+            "or exact layer_name. Call after producing a result layer."
         ),
         "input_schema": {
             "type": "object",
@@ -240,14 +212,10 @@ TOOL_SPECS = [
         "name": "gee_status",
         "method": "gee_status",
         "description": (
-            "Check whether the Google Earth Engine QGIS plugin (ee_plugin) is "
-            "installed and whether Earth Engine is authenticated and "
-            "initialized. Call this FIRST, before any GEE operation, whenever "
-            "the user's request involves remote sensing, satellite imagery, "
-            "Earth Engine, NDVI or other spectral indices, land cover, or "
-            "image collections. Returns plugin_installed, ee_available, "
-            "initialized, authenticated, and a human-readable message with "
-            "next steps if setup is incomplete."
+            "Check GEE plugin status and authentication. Call FIRST before any "
+            "GEE operation (remote sensing, satellite imagery, NDVI, land cover, "
+            "image collections). Returns plugin_installed, ee_available, "
+            "initialized, authenticated, and next-step message if incomplete."
         ),
         "input_schema": {"type": "object", "properties": {}},
     },
@@ -255,25 +223,15 @@ TOOL_SPECS = [
         "name": "gee_dataset_info",
         "method": "gee_dataset_info",
         "description": (
-            "Look up the CURRENT metadata for an Earth Engine dataset from the "
-            "public Earth Engine STAC catalog (no auth needed). Call this BEFORE "
-            "writing gee_add_layer code for a dataset, so the code uses the "
-            "dataset's real, present-day band names, properties, date range, and "
-            "status — not a memorized snapshot that may be deprecated. Returns "
-            "band_names, bands (with gee:scale/offset and gsd), properties "
-            "(per-image/feature schema), date_range, type (image / "
-            "image_collection / table), and a `deprecated` flag. Example: "
-            "gee_dataset_info('COPERNICUS/S2_SR_HARMONIZED'). For cloud masking, "
-            "also look up the companion mask dataset, e.g. "
-            "'GOOGLE/CLOUD_SCORE_PLUS/V1/S2_HARMONIZED'. Also works for the "
-            "user's OWN Earth Engine assets (e.g. "
-            "'projects/<project>/assets/<name>' or 'users/<user>/<asset>'): when "
-            "the id is not in the public catalog it is resolved via the "
-            "authenticated Earth Engine API (result has source='asset'; requires "
-            "gee_status to report authenticated). "
-            "CRITICAL: after calling gee_dataset_info, IMMEDIATELY call gee_add_layer "
-            "or gee_animation next. Do NOT stop, do NOT explain the metadata, do NOT "
-            "ask the user for confirmation — this lookup is a prerequisite, not a result."
+            "Look up current metadata for an Earth Engine dataset from the public "
+            "STAC catalog (no auth needed). Call BEFORE writing gee_add_layer or "
+            "gee_animation code to get real band names, properties, date range, "
+            "and deprecated flag — not a memorized snapshot. Returns band_names, "
+            "bands (gee:scale/offset, gsd), properties, date_range, type, "
+            "deprecated. For cloud masking also look up the companion mask dataset. "
+            "Works for user assets too (source='asset'; requires gee_status authenticated). "
+            "CRITICAL: after this call, IMMEDIATELY call gee_add_layer or gee_animation "
+            "— do NOT stop or ask the user for confirmation."
         ),
         "input_schema": {
             "type": "object",
@@ -281,11 +239,8 @@ TOOL_SPECS = [
                 "dataset_id": {
                     "type": "string",
                     "description": (
-                        "Exact, case-sensitive Earth Engine dataset id, e.g. "
-                        "'COPERNICUS/S2_SR_HARMONIZED', 'LANDSAT/LC09/C02/T1_L2', "
-                        "'GOOGLE/CLOUD_SCORE_PLUS/V1/S2_HARMONIZED', or one of the "
-                        "user's own assets such as "
-                        "'projects/my-project/assets/my_image'."
+                        "Exact, case-sensitive EE dataset id (e.g. "
+                        "'COPERNICUS/S2_SR_HARMONIZED') or user asset path."
                     ),
                 },
             },
@@ -296,33 +251,13 @@ TOOL_SPECS = [
         "name": "gee_add_layer",
         "method": "gee_add_layer",
         "description": (
-            "Run an Earth Engine expression and add the result to the QGIS "
-            "canvas via the ee_plugin. Only use after gee_status confirms GEE "
-            "is ready AND the user has agreed (via ask_user) to run GEE "
-            "operations. The `code` runs with `ee`, `Map` (ee_plugin), `iface`, "
-            "`region` (an ee.Geometry built from region_layer_id in EPSG:4326 — "
-            "the layer's TRUE geometry by default, not just its bounding box), "
-            "and `features` (an ee.FeatureCollection of that layer's features, "
-            "for per-feature work like zonal stats; None when unavailable) in "
-            "scope. It MUST assign the final ee object (ee.Image / "
-            "ee.ImageCollection mosaic / ee.FeatureCollection) to a variable "
-            "named `result`. Example NDVI clipped to a QGIS layer: "
-            "\"img = ee.ImageCollection('COPERNICUS/S2_SR_HARMONIZED')"
-            ".filterBounds(region).filterDate('2023-01-01','2023-03-01').median(); "
-            "result = img.normalizedDifference(['B8','B4']).clip(region)\". "
-            "Pass vis_params for display, e.g. {'min':-0.2,'max':0.8,"
-            "'palette':['blue','white','green']}. "
-            "NOTE: vis_params 'scale' is silently ignored by the "
-            "ee_plugin — use clipToBoundsAndScale or reduceResolution "
-            "in the ee expression code itself to control resolution. "
-            "IMPORTANT: when geometry_mode is 'auto' (default) and the layer is "
-            "too large to send inline, this returns {ok:false, "
-            "needs_decision:true} instead of running. In that case call ask_user "
-            "with the offered options, then call gee_add_layer again with "
-            "geometry_mode set to 'bbox', 'simplify', or 'exact'. "
-            "For faster zoom/pan, set export_format='geotiff' — downloads the "
-            "image as a local GeoTIFF and loads it as a local raster layer "
-            "(instant zoom at the cost of upfront download time)."
+            "Run an EE expression and add the result to QGIS via ee_plugin. "
+            "Requires gee_status=ready and user consent. `code` has `ee`, `Map`, "
+            "`iface`, `region` (ee.Geometry, EPSG:4326), `features` (ee.FeatureCollection|None); "
+            "must assign ee.Image/ImageCollection/FeatureCollection to `result`. "
+            "vis_params 'scale' is ignored — use clipToBoundsAndScale in code. "
+            "geometry_mode='auto' returns needs_decision if layer too large — retry "
+            "with 'bbox'/'simplify'/'exact'. Use export_format='geotiff' for instant zoom."
         ),
         "input_schema": {
             "type": "object",
@@ -330,18 +265,15 @@ TOOL_SPECS = [
                 "code": {
                     "type": "string",
                     "description": (
-                        "Earth Engine Python expression. Must assign the ee "
-                        "object to `result`. `region` (ee.Geometry), `features` "
-                        "(ee.FeatureCollection|None) and `ee` are in scope."
+                        "EE Python expression. Must assign ee object to `result`. "
+                        "`ee`, `region` (ee.Geometry), `features` (ee.FeatureCollection|None) in scope."
                     ),
                 },
                 "vis_params": {
                     "type": "object",
                     "description": (
-                        "Earth Engine visualization params (min, max, palette, "
-                        "bands, gamma). NOTE: scale here is silently ignored "
-                        "by the ee_plugin — control resolution via "
-                        "clipToBoundsAndScale/reduceResolution in the code."
+                        "EE visualization params (min, max, palette, bands, gamma). "
+                        "scale is ignored — control resolution in code."
                     ),
                 },
                 "name": {
@@ -351,9 +283,8 @@ TOOL_SPECS = [
                 "region_layer_id": {
                     "type": "string",
                     "description": (
-                        "Optional QGIS layer id. Its features define `region` "
-                        "and `features` (EPSG:4326) for filtering/clipping, and "
-                        "it is the zoom target."
+                        "QGIS layer id whose geometry defines `region`/`features` "
+                        "(EPSG:4326) and is the zoom target."
                     ),
                 },
                 "zoom": {
@@ -365,50 +296,37 @@ TOOL_SPECS = [
                     "type": "string",
                     "enum": ["auto", "exact", "simplify", "bbox"],
                     "description": (
-                        "How to convert region_layer_id. 'auto' (default): true "
-                        "geometry, but returns needs_decision if too large. "
-                        "'exact': true geometry (subject to hard ceilings). "
-                        "'simplify': reduce vertices to fit. 'bbox': bounding "
-                        "box only. Set this on the retry after asking the user."
+                        "How to send region_layer_id geometry. 'auto': true geometry, "
+                        "returns needs_decision if too large. 'exact': true geometry "
+                        "(hard ceiling). 'simplify': reduce vertices. 'bbox': bounding box."
                     ),
                     "default": "auto",
                 },
                 "max_vertices": {
                     "type": "integer",
                     "minimum": 1,
-                    "description": (
-                        "Vertex budget for inline geometry before 'auto' asks "
-                        "the user (default 5000)."
-                    ),
+                    "description": "Vertex budget before 'auto' asks the user (default 5000).",
                     "default": 5000,
                 },
                 "max_features": {
                     "type": "integer",
                     "minimum": 1,
-                    "description": (
-                        "Feature-count budget before 'auto' asks the user "
-                        "(default 2000)."
-                    ),
+                    "description": "Feature-count budget before 'auto' asks the user (default 2000).",
                     "default": 2000,
                 },
                 "export_format": {
                     "type": "string",
                     "enum": ["map", "geotiff"],
                     "description": (
-                        "'geotiff' (default): download and load as local raster "
-                        "(instant zoom/pan). 'map': add as WMS tile layer via "
-                        "ee_plugin (slower zoom, no download wait)."
+                        "'geotiff' (default): local raster download (instant zoom). "
+                        "'map': WMS tile layer via ee_plugin (no download wait)."
                     ),
                     "default": "geotiff",
                 },
                 "export_scale": {
                     "type": "integer",
                     "minimum": 10,
-                    "description": (
-                        "Resolution in meters for GeoTIFF export when "
-                        "export_format='geotiff'. Default 250. "
-                        "Smaller = more detail but larger download."
-                    ),
+                    "description": "GeoTIFF resolution in meters (default 250). Smaller = more detail.",
                     "default": 250,
                 },
             },
@@ -419,35 +337,16 @@ TOOL_SPECS = [
         "name": "gee_animation",
         "method": "gee_animation",
         "description": (
-            "Produce an animated GIF TIMELAPSE from an Earth Engine "
-            "ImageCollection via getVideoThumbURL and show it inline in the "
-            "chat. Use for any request whose intent is to visualize change "
-            "over time, sequence frames, or create a timelapse/GIF. Match "
-            "semantic intent, not exact wording. Only use after gee_status "
-            "confirms GEE is ready AND after gee_dataset_info has been "
-            "called for all datasets you need. Do not use run_pyqgis to "
-            "create GIFs. "
-            "The `code` runs "
-            "with `ee`, `Map` (ee_plugin), `region` (an ee.Geometry built "
-            "from region_layer_id) and `features` in scope, and MUST "
-            "assign an ee.ImageCollection to a variable named `result` — one "
-            "frame per image. Typically filterDate over the period with one "
-            "composite per step, or .map(lambda img: img.visualize(**vis)) to "
-            "build RGB frames. Example monthly NDVI timelapse: "
-            "\"col = ee.ImageCollection('COPERNICUS/S2_SR_HARMONIZED')"
-            ".filterBounds(region).filterDate('2023-01-01','2024-01-01'); "
-            "months = ee.List.sequence(0, 11); "
-            "def frame(m):\\n"
-            "    start = ee.Date('2023-01-01').advance(m, 'month')\\n"
-            "    comp = col.filterDate(start, start.advance(1, 'month')).median()\\n"
-            "    ndvi = comp.normalizedDifference(['B8','B4']).clip(region)\\n"
-            "    return ndvi.visualize(min=-0.2, max=0.8, "
-            "palette=['blue','white','green'])\\n"
-            "result = ee.ImageCollection(months.map(frame))\". "
-            "IMPORTANT: Earth Engine caps an animation at 6,553,600 pixels total "
-            "(dimensions x dimensions x frame_count, e.g. 256x256x100) — keep "
-            "`dimensions` and the number of frames modest (e.g. dimensions 480 "
-            "with ~12-24 frames). Only GIF output is supported."
+            "Produce an animated GIF timelapse from an Earth Engine "
+            "ImageCollection and show it inline in the chat. Use for any "
+            "request to visualize change over time or create a timelapse/GIF. "
+            "Only use after gee_status confirms GEE is ready AND gee_dataset_info "
+            "has been called for all needed datasets. Do not use run_pyqgis for GIFs. "
+            "`code` runs with `ee`, `Map`, `region` (ee.Geometry), and `features` "
+            "in scope; must assign an ee.ImageCollection to `result` — one frame "
+            "per image (e.g. one composite per month, each visualized as RGB). "
+            "Keep `dimensions` and frame count modest: EE caps animations at "
+            "6,553,600 total pixels (e.g. 480px x ~12-24 frames). GIF only."
         ),
         "input_schema": {
             "type": "object",
@@ -455,18 +354,15 @@ TOOL_SPECS = [
                 "code": {
                     "type": "string",
                     "description": (
-                        "Earth Engine Python expression. Must assign an "
-                        "ee.ImageCollection (one frame per image) to `result`. "
-                        "`region` (ee.Geometry), `features` "
-                        "(ee.FeatureCollection|None) and `ee` are in scope."
+                        "EE Python expression. Must assign an ee.ImageCollection "
+                        "(one frame per image) to `result`. `ee`, `region`, `features` in scope."
                     ),
                 },
                 "vis_params": {
                     "type": "object",
                     "description": (
-                        "Earth Engine visualization params (min, max, palette, "
-                        "bands, gamma) merged into the video params. For RGB "
-                        "frames, prefer calling .visualize(**vis) inside `code`."
+                        "EE visualization params merged into video params. "
+                        "Prefer .visualize(**vis) inside `code` for RGB frames."
                     ),
                 },
                 "name": {
@@ -475,10 +371,7 @@ TOOL_SPECS = [
                 },
                 "region_layer_id": {
                     "type": "string",
-                    "description": (
-                        "Optional QGIS layer id. Its geometry defines `region` "
-                        "/ `features` (EPSG:4326) and the animation footprint."
-                    ),
+                    "description": "QGIS layer id whose geometry defines `region`/`features` and the animation footprint.",
                 },
                 "fps": {
                     "type": "integer",
@@ -489,21 +382,15 @@ TOOL_SPECS = [
                 "dimensions": {
                     "type": "integer",
                     "minimum": 16,
-                    "description": (
-                        "Larger side of the GIF in pixels (default 480). Keep "
-                        "dimensions x frames under the 6,553,600-pixel cap."
-                    ),
+                    "description": "Larger side in pixels (default 480). Stay under the 6,553,600-pixel cap.",
                     "default": 480,
                 },
                 "frame_labels": {
                     "type": "array",
                     "items": {"type": "string"},
                     "description": (
-                        "Optional per-frame caption list, one label per frame, "
-                        "in playback order (e.g. [\"2020\", \"2021\", ...]). "
-                        "Shown as an overlay in the chat widget. Never "
-                        "hardcode: derive from the actual date sequence "
-                        "generated in the code."
+                        "Per-frame captions in playback order (e.g. ['2020','2021']). "
+                        "Derive from the actual date sequence, never hardcode."
                     ),
                 },
             },
@@ -514,11 +401,9 @@ TOOL_SPECS = [
         "name": "remove_layer",
         "method": "remove_layer",
         "description": (
-            "Unload one currently loaded layer from the QGIS project by layer_id "
-            "or exact layer_name. This only removes the layer from the project; "
-            "it never deletes the source file, database table, or remote data. "
-            "Use only when the user explicitly asks to remove, clear, unload, "
-            "or delete a loaded layer."
+            "Unload a layer from the QGIS project by layer_id or exact layer_name. "
+            "This never deletes source files, tables, or remote data. Use only when the "
+            "user explicitly asks to remove or unload a layer."
         ),
         "input_schema": {
             "type": "object",
@@ -529,10 +414,7 @@ TOOL_SPECS = [
                 },
                 "layer_name": {
                     "type": "string",
-                    "description": (
-                        "Exact layer name. If multiple loaded layers have this "
-                        "name, the tool refuses and returns candidate layer IDs."
-                    ),
+                    "description": "Exact layer name. Refused if ambiguous (returns candidate IDs).",
                 },
             },
         },
@@ -541,18 +423,16 @@ TOOL_SPECS = [
         "name": "clear_layers",
         "method": "clear_layers",
         "description": (
-            "Unload all currently loaded layers from the QGIS project. This "
-            "only clears the project layer list/canvas; it never deletes source "
-            "files, database tables, or remote data. Use only when the user "
-            "explicitly asks to clear or remove all loaded layers. Requires "
-            "confirm=true."
+            "Unload all layers from the QGIS project (never deletes source files). "
+            "Use only when the user explicitly asks to clear all layers. "
+            "Requires confirm=true."
         ),
         "input_schema": {
             "type": "object",
             "properties": {
                 "confirm": {
                     "type": "boolean",
-                    "description": "Must be true when the user explicitly asked to clear all loaded layers.",
+                    "description": "Must be true to confirm clearing all layers.",
                 },
             },
             "required": ["confirm"],
@@ -568,22 +448,14 @@ TOOL_SPECS = [
         "name": "create_chart",
         "method": "create_chart",
         "description": (
-            "Create a chart visualization from a vector layer's field values. "
-            "Returns chart data that can be displayed as a bar, line, or pie chart. "
-            "By default the chart COUNTS how many features fall into each distinct "
-            "field_name value (a category frequency chart). To chart a NUMERIC "
-            "MEASURE instead — e.g. total/average area per category — set value_field "
-            "to the numeric field and aggregate to 'sum' (or 'mean'/'max'/'min'); "
-            "field_name is then the category axis and bar height is the aggregated "
-            "value. Do NOT chart an already-aggregated numeric field directly as "
-            "field_name (that just counts each distinct number once, giving equal "
-            "bars) — pass the category as field_name and the number as value_field. "
-            "Use optional label_field for readable display labels when field_name "
-            "contains codes/IDs and another field contains names or descriptions. "
-            "Optionally supply a custom colors list (hex strings like '#5d8aa8') "
-            "to use instead of the default palette — one color per data point "
-            "in display order; the list cycles if shorter than the data. "
-            "If colors is omitted, the chart UI uses its default A-to-B gradient."
+            "Create a bar/line/pie chart from a vector layer's field values. "
+            "By default counts features per distinct field_name value. For a "
+            "numeric measure (e.g. total area per category), set value_field "
+            "and aggregate='sum'/'mean'/'max'/'min'; field_name is the category "
+            "axis. Do NOT pass a numeric field directly as field_name — use "
+            "value_field instead. Use label_field for readable display labels "
+            "when field_name holds codes/IDs. Supply colors (hex strings) to "
+            "override the default palette; cycles if shorter than the data."
         ),
         "input_schema": {
             "type": "object",
@@ -593,29 +465,24 @@ TOOL_SPECS = [
                 "label_field": {
                     "type": "string",
                     "description": (
-                        "Optional field used only for readable display labels. "
-                        "Use this for generic code/name or id/description field "
-                        "pairs; no hardcoded field names are assumed. If invalid "
-                        "or blank, labels fall back to field_name values."
+                        "Optional field for readable display labels (e.g. name "
+                        "field paired with a code field_name). Falls back to "
+                        "field_name values if invalid or blank."
                     ),
                 },
                 "value_field": {
                     "type": "string",
                     "description": (
-                        "Optional numeric field to aggregate per category. When "
-                        "set, bar height is the aggregated value of this field "
-                        "grouped by field_name (instead of a feature count). Use "
-                        "for measures like area, length, population, or a "
-                        "pre-aggregated total. Omit to count occurrences."
+                        "Optional numeric field to aggregate per category "
+                        "(grouped by field_name). Omit to count occurrences."
                     ),
                 },
                 "aggregate": {
                     "type": "string",
                     "enum": ["count", "sum", "mean", "max", "min"],
                     "description": (
-                        "How to reduce value_field per category. Defaults to "
-                        "'count' when value_field is omitted, else 'sum'. "
-                        "'mean'/'max'/'min' also require value_field."
+                        "Aggregation for value_field. Defaults to 'count' if "
+                        "value_field is omitted, else 'sum'."
                     ),
                 },
                 "chart_type": {
@@ -625,11 +492,8 @@ TOOL_SPECS = [
                 "colors": {
                     "type": "array",
                     "description": (
-                        "Optional list of hex color strings (e.g. ['#5d8aa8', "
-                        "'#c678dd', '#98c379']). Applied to the chart in "
-                        "display order; cycles if shorter than the number "
-                        "of data points. Useful for matching a project "
-                        "palette, brand colors, or accessibility needs."
+                        "Optional hex color strings (e.g. '#5d8aa8'). Applied "
+                        "in display order; cycles if shorter than data points."
                     ),
                     "items": {
                         "type": "string",
@@ -645,7 +509,9 @@ TOOL_SPECS = [
         "method": "get_layer_statistics",
         "description": (
             "Calculate statistics for a vector layer or a specific field. "
-            "Returns count, min, max, mean, and distinct value counts."
+            "Returns count, min, max, mean, sum, and distinct value counts. "
+            "Scans at most 100k features; if `truncated` is true the values "
+            "are partial — compute exact aggregates another way."
         ),
         "input_schema": {
             "type": "object",
@@ -660,24 +526,17 @@ TOOL_SPECS = [
         "name": "configure_network_cache",
         "method": "configure_network_cache",
         "description": (
-            "Enable, adjust, or report QGIS's shared network disk cache, which "
-            "caches WMS/WMTS/XYZ tile responses (including streaming GEE "
-            "'ee_plugin' layers and web basemaps). Pass size_mb to set the "
-            "maximum cache size (size_mb > 0 enables caching; 0 disables); omit "
-            "it to just report current size, used space, and cache directory. "
-            "Note: this is QGIS's single shared network cache, not WMS-only — "
-            "it does not affect GEE 'geotiff' downloads, which save local files."
+            "Enable, adjust, or report QGIS's shared network disk cache "
+            "(WMS/WMTS/XYZ/GEE tile layers). Pass size_mb to set max cache size "
+            "(>0 enables; 0 disables); omit to report current size and directory. "
+            "Does not affect GEE geotiff downloads (those save local files)."
         ),
         "input_schema": {
             "type": "object",
             "properties": {
                 "size_mb": {
                     "type": "number",
-                    "description": (
-                        "Maximum cache size in megabytes. > 0 enables/adjusts "
-                        "the cache; 0 disables it. Omit to report current "
-                        "settings without changing anything."
-                    ),
+                    "description": "Max cache in MB (>0 enables; 0 disables). Omit to report without changing.",
                 },
             },
             "required": [],
@@ -687,12 +546,9 @@ TOOL_SPECS = [
         "name": "warm_cache",
         "method": "warm_cache",
         "description": (
-            "Pre-fetch map tiles for a loaded WMS / XYZ / GEE tile layer and "
-            "store them in the disk cache so the area is instant on the next "
-            "visit.  Good for demo preparation or when you know the user will "
-            "pan/zoom in the same area again.  Specify zoom_levels (list of "
-            "integers) to control which zoom levels to warm.  Default is "
-            "current zoom ± 1.  Has a safety cap of 500 tiles."
+            "Pre-fetch map tiles for a WMS/XYZ/GEE tile layer into the disk "
+            "cache for instant access. Useful for demo prep or repeat views. "
+            "zoom_levels defaults to current zoom ± 1; capped at 500 tiles."
         ),
         "input_schema": {
             "type": "object",
@@ -722,13 +578,10 @@ TOOL_SPECS = [
         "name": "web_fetch",
         "method": "web_fetch",
         "description": (
-            "Fetch the content of a public URL (GET only). Returns the body, "
-            "HTTP status, content-type, and parsed JSON when available. "
-            "Use this to read API documentation, GeoJSON endpoints, or small data "
-            "files accessible over HTTP/HTTPS. External URL access requires "
-            "explicit user permission. If the remote server has an untrusted or "
-            "incomplete SSL certificate chain, set verify_ssl=false to skip "
-            "certificate verification."
+            "Fetch a public URL (GET only). Returns body, HTTP status, "
+            "content-type, and parsed JSON when available. Requires explicit "
+            "user permission for external URLs. Set verify_ssl=false for "
+            "self-signed or incomplete certificate chains."
         ),
         "input_schema": {
             "type": "object",
@@ -746,10 +599,7 @@ TOOL_SPECS = [
                 },
                 "verify_ssl": {
                     "type": "boolean",
-                    "description": (
-                        "Verify remote SSL certificate (default true). "
-                        "Set false for incomplete/self-signed certificates."
-                    ),
+                    "description": "Verify SSL certificate (default true). Set false for self-signed certs.",
                     "default": True,
                 },
             },
@@ -760,19 +610,11 @@ TOOL_SPECS = [
         "name": "ask_user",
         "method": "ask_user",
         "description": (
-            "Pause and ask the user a clarifying question. Use this "
-            "PROACTIVELY and OFTEN — it is your primary tool for "
-            "resolving ambiguity instead of guessing. Call it whenever "
-            "the user's request does not specify which fields to analyse, "
-            "which layer to use, which CRS target, or any other detail "
-            "you need. Also use it reactively when a tool result looks "
-            "suspicious (no spatial index, empty result, schema mismatch, "
-            "out-of-range value). Wait for the user's reply before "
-            "continuing. Always provide 2-4 options (list the available "
-            "choices as options) with the first one being the recommended "
-            "choice. Returns a dict with 'choice' (the picked option's "
-            "label, or null), 'free_text' (typed reply, or null), and "
-            "'cancelled' (true if the user stopped the question)."
+            "Pause and ask the user a clarifying question. Use PROACTIVELY "
+            "whenever fields, layer, CRS, or any required detail is unspecified, "
+            "and reactively when a result looks suspicious. Always provide 2-4 "
+            "options (first = recommended). Returns 'choice' (picked label or "
+            "null), 'free_text' (typed reply or null), 'cancelled' (bool)."
         ),
         "input_schema": {
             "type": "object",
@@ -789,11 +631,11 @@ TOOL_SPECS = [
                         "type": "object",
                         "properties": {
                             "label": {"type": "string", "description": "Short button label."},
-                            "description": {"type": "string", "description": "Optional helper text."},
+                            "description": {"type": "string", "description": "Helper text."},
                         },
                         "required": ["label"],
                     },
-                    "description": "2-4 options. The first is the recommended choice.",
+                    "description": "2-4 choices; first is the recommended one.",
                 },
                 "allow_free_text": {
                     "type": "boolean",
@@ -807,6 +649,20 @@ TOOL_SPECS = [
 ]
 
 TOOL_BY_NAME = {spec["name"]: spec for spec in TOOL_SPECS}
+
+_GEE_TOOL_NAMES = {"gee_status", "gee_dataset_info", "gee_add_layer", "gee_animation"}
+
+
+def tool_specs(include_gee=True):
+    """Return the list of tool specs, optionally omitting the four gee_* tools.
+
+    Use this everywhere a filtered view is needed instead of referencing
+    ``TOOL_SPECS`` directly.  ``TOOL_SPECS`` itself is intentionally left
+    unchanged so existing callers keep working.
+    """
+    if include_gee:
+        return TOOL_SPECS
+    return [spec for spec in TOOL_SPECS if spec["name"] not in _GEE_TOOL_NAMES]
 
 
 def _dispatch_cancelled(should_stop):
@@ -915,7 +771,7 @@ def dispatch(toolkit, executor, name, arguments, should_stop=None):
         raise
 
 
-def anthropic_tool_list():
+def anthropic_tool_list(include_gee=True):
     """Tool definitions in Anthropic Messages API shape."""
     return [
         {
@@ -923,5 +779,5 @@ def anthropic_tool_list():
             "description": spec["description"],
             "input_schema": spec["input_schema"],
         }
-        for spec in TOOL_SPECS
+        for spec in tool_specs(include_gee=include_gee)
     ]

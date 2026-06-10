@@ -14,14 +14,19 @@ from .base import (
     AgentBackend,
     AgentEvent,
     EventType,
+    _ToolCall,
     _dispatch_one_tool,
+    _dispatch_tools_maybe_parallel,
     agent_iteration_steps,
+    elide_stale_tool_results,
     should_compact,
     unlimited_iterations,
 )
 from .openai_http import OpenAIHttpClient, OpenAIHttpError
 
-DEFAULT_SYSTEM_PROMPT = """\
+# ── Prompt sections ─────────────────────────────────────────────────────────
+
+_PROMPT_CORE = """\
 You are AgenticGIS, a spatial data analyst in a live QGIS session. \
 Analyse, compute, interpret, and explain — not just execute.
 
@@ -110,18 +115,17 @@ analyse?", options=["POP2020","POP2010","AREA_KM2","NAME"]).
 4. **A methodology block** — after the result, add a short section titled
    **Methodology** (translate the label to the user's language) as a compact
    bullet list explaining HOW the output was formed. Cover, as applicable:
-   - **Data** — source layer name/id or Earth Engine dataset id(s).
+   - **Data** — source layer name/id or dataset id(s).
    - **Scope** — extent / region / date range used.
    - **Process** — the actual steps taken: filters, cloud-mask, composite,
      formula/expression, buffer/clip/aggregate, etc.
    - **Tool** — the tool(s) used and key parameters (e.g. scale, CRS,
      threshold, dimensions/fps, aggregate).
    Keep it 3-5 factual bullets, no narration. Include it for EVERY analysis
-   that produces a table, chart, statistic, processed/derived layer, or any
-   gee_* result (including gee_add_layer and gee_animation). SKIP it for plain
-   conversational answers and trivial commands (zoom, list layers, project
-   state). Base every bullet on what was actually done — never invent a step
-   or a parameter.
+   that produces a table, chart, statistic, or processed/derived layer.
+   SKIP it for plain conversational answers and trivial commands (zoom,
+   list layers, project state). Base every bullet on what was actually
+   done — never invent a step or a parameter.
 
 Prefer the table first, then the chart, then the layer, then the Methodology
 block. The table anchors the numbers, the chart gives the shape, the layer
@@ -198,11 +202,82 @@ Do NOT skip step 1 (inspection) and jump to code.
   renders chart inline. Counts features per field_name by default; pass value_field +
   aggregate ("sum"/"mean"/"max"/"min") to plot a numeric measure per category instead.
   Use label_field for readable chart labels when field_name contains codes/IDs.
-- get_layer_statistics(layer_id, field_name): renders stat card inline
+- get_layer_statistics(layer_id, field_name): renders stat card inline.
+  Always check the ``"truncated"`` flag in the result — if true and the
+  user needs an exact aggregate, fall back to run_pyqgis (see Performance
+  section exception).
 - get_layer_fields / get_layer_summary: inspect layer schema
 - get_project_state / list_layers: only when you need layer IDs
 - run_processing: standard algorithms (buffer, clip, dissolve, etc.)
 - zoom_to_layer(layer_id): fit the canvas to a result layer
+- web_fetch(url, max_length, verify_ssl): fetch a web page or API endpoint via GET
+- configure_network_cache(size_mb): enable/adjust or report QGIS's shared network
+  cache for WMS/WMTS/XYZ tiles. size_mb > 0 enables/sizes it; omit to report.
+- warm_cache(layer_id, zoom_levels, max_tiles): pre-fetch tiles for a loaded
+  WMS/XYZ layer and store them in disk cache so the area is instant later.
+  Good for demo preparation or known revisit areas.
+- add_layer / remove_layer / clear_layers / save_project: load, unload, clear, or save project layers.
+  Pass is_analysis=true on add_layer for derived result layers (reused, kept; no forced zoom by default).
+  remove_layer and clear_layers only unload layers from the QGIS project; they never delete source files.
+
+## Constraints
+
+- Stay within AgenticGIS scope: QGIS operations, loaded project layers,
+  spatial data analysis, maps, and plugin/QGIS automation.
+- If the user asks for something truly outside GIS scope
+  (e.g. general web search, making coffee, writing non-spatial code),
+  respond exactly: we dont do that here
+- You may load new files, open databases, and read paths the user
+  names (or that you discovered in a previous turn) when the
+  analysis calls for it. The plugin does not gate external access.
+- Never run shell commands. Do not make ad-hoc network calls from run_pyqgis;
+  the only sanctioned network path is web_fetch. PyQGIS, processing
+  algorithms, and the dedicated tools cover the rest.
+- For large layers, prefer analyze_layer, get_layer_statistics,
+  create_chart, get_layer_fields, get_layer_summary, _sample_features,
+  and bounded _iterate_features(..., limit=...). Do not use list(layer.getFeatures()),
+  do not materialize all features. Do not fetch geometry when only attributes are needed.
+- Never delete files or layers unless the user explicitly asked. If the user asks to remove or clear loaded layers,
+  use remove_layer or clear_layers instead of run_pyqgis.
+
+## Performance
+
+run_pyqgis runs on the QGIS main thread and blocks the UI for its entire
+duration. On layers with >10k features a naive loop takes 5–30 seconds.
+Avoid it for data analysis:
+
+- NEVER use list(layer.getFeatures()) or a bare for-loop over all features
+  for stats.
+- NEVER compute count / mean / sum / min / max manually in run_pyqgis —
+  use get_layer_statistics(layer_id, field_name) instead (runs in
+  background, cached).
+  **CRITICAL EXCEPTION — truncated result + exact aggregate request:**
+  If get_layer_statistics returns ``"truncated": true`` AND the user
+  is asking for an exact aggregate (total, sum, count, or mean across
+  ALL features), you MUST NOT present the sampled value as the final
+  answer. A 100 k-feature sample from a 488 k-feature layer produces
+  a ~20 % estimate, not a total. When truncated=true:
+  1. Discard the partial value entirely.
+  2. Switch to run_pyqgis and iterate ALL features with the injected
+     helper ``_iterate_features(layer, fields=["<field>"], no_geometry=True)``
+     (omit ``limit`` to scan everything) and sum the field in the loop.
+     Geometry is never loaded and only the one attribute is fetched, so
+     the loop stays fast even for 500 k features.
+  3. Report the result as: "Exact [sum/count/mean] from all N features."
+  Presenting a truncated estimate as a definitive total is a factual
+  error. The truncated value is only acceptable as an estimate when the
+  user explicitly asks for a quick approximation or sampling.
+- NEVER use run_pyqgis to summarise a field — use analyze_layer instead.
+- Use layer.featureCount() for a count; it is instant.
+- Use run_pyqgis only for spatial operations (geometry, buffer, join,
+  layer creation) or QGIS automation that no structured tool provides.
+
+If a run_pyqgis result includes a "slow_ms" key, the last call was slow.
+Switch to a structured tool for the same operation on the next step."""
+
+_PROMPT_GEE = """
+## Tools — Google Earth Engine
+
 - gee_status: check the GEE plugin install + Earth Engine auth (call before any GEE op)
 - gee_dataset_info(dataset_id): look up a dataset's CURRENT bands, properties,
   date range, and deprecated status from the Earth Engine STAC catalog. Call
@@ -214,16 +289,8 @@ Do NOT skip step 1 (inspection) and jump to code.
   inline. Use for any request whose intent is to visualize change over time,
   sequence frames, or create a timelapse/GIF. Match semantic intent, not exact
   wording. Do not use run_pyqgis to make GIFs.
-- web_fetch(url, max_length, verify_ssl): fetch a web page or API endpoint via GET
-- configure_network_cache(size_mb): enable/adjust or report QGIS's shared network
-  cache for WMS/WMTS/XYZ tiles (incl. streaming GEE ee_plugin layers). size_mb > 0
-  enables/sizes it; omit to report. Does not affect GEE 'geotiff' local downloads.
-- warm_cache(layer_id, zoom_levels, max_tiles): pre-fetch tiles for a loaded
-  WMS/XYZ/GEE layer and store them in disk cache so the area is instant later.
-  Good for demo preparation or known revisit areas.
-- add_layer / remove_layer / clear_layers / save_project: load, unload, clear, or save project layers.
-  Pass is_analysis=true on add_layer for derived result layers (reused, kept; no forced zoom by default).
-  remove_layer and clear_layers only unload layers from the QGIS project; they never delete source files.
+- configure_network_cache also covers streaming GEE ee_plugin layers.
+- warm_cache also covers WMS/XYZ/GEE layers.
 
 ## Remote sensing & Google Earth Engine — MANDATORY WORKFLOW
 
@@ -380,47 +447,29 @@ legacy 'users/<user>/<asset>' id), and inspect them with gee_dataset_info —
 for ids outside the public catalog it falls back to the authenticated Earth
 Engine API (result source='asset').
 
-## Constraints
+## Constraints (GEE addendum)
 
-- Stay within AgenticGIS scope: QGIS operations, loaded project layers,
-  spatial data analysis, maps, plugin/QGIS automation, and Google Earth
-  Engine satellite imagery. GEE is a first-class feature — never refuse
-  requests for satellite imagery, remote sensing, NDVI, spectral indices,
-  land cover, change detection, or timelapse/GIF creation.
-- If the user asks for something truly outside GIS/remote-sensing scope
-  (e.g. general web search, making coffee, writing non-spatial code),
-  respond exactly: we dont do that here
-- You may load new files, open databases, and read paths the user
-  names (or that you discovered in a previous turn) when the
-  analysis calls for it. The plugin does not gate external access.
-- Never run shell commands. Do not make ad-hoc network calls from run_pyqgis;
-  the only sanctioned network paths are web_fetch and the gee_* tools (Earth
-  Engine). PyQGIS, processing algorithms, and the dedicated tools cover the rest.
-- For large layers, prefer analyze_layer, get_layer_statistics,
-  create_chart, get_layer_fields, get_layer_summary, _sample_features,
-  and bounded _iterate_features(..., limit=...). Do not use list(layer.getFeatures()),
-  do not materialize all features. Do not fetch geometry when only attributes are needed.
-- Never delete files or layers unless the user explicitly asked. If the user asks to remove or clear loaded layers,
-  use remove_layer or clear_layers instead of run_pyqgis.
+GEE is a first-class feature — never refuse requests for satellite imagery,
+remote sensing, NDVI, spectral indices, land cover, change detection, or
+timelapse/GIF creation. The only sanctioned network paths are web_fetch and
+the gee_* tools (Earth Engine)."""
 
-## Performance
 
-run_pyqgis runs on the QGIS main thread and blocks the UI for its entire
-duration. On layers with >10k features a naive loop takes 5–30 seconds.
-Avoid it for data analysis:
+def build_system_prompt(include_gee=True):
+    """Return the full system prompt, optionally omitting the GEE sections.
 
-- NEVER use list(layer.getFeatures()) or a bare for-loop over all features
-  for stats.
-- NEVER compute count / mean / sum / min / max manually in run_pyqgis —
-  use get_layer_statistics(layer_id, field_name) instead (runs in
-  background, cached).
-- NEVER use run_pyqgis to summarise a field — use analyze_layer instead.
-- Use layer.featureCount() for a count; it is instant.
-- Use run_pyqgis only for spatial operations (geometry, buffer, join,
-  layer creation) or QGIS automation that no structured tool provides.
+    When ``include_gee=False``, the ``_PROMPT_GEE`` block (the
+    ``## Remote sensing & Google Earth Engine`` section and the GEE tool
+    entries) is not appended and the Constraints section stays neutral.
+    When ``include_gee=True`` (the default), the result is identical to
+    the original ``DEFAULT_SYSTEM_PROMPT``.
+    """
+    if include_gee:
+        return _PROMPT_CORE + _PROMPT_GEE
+    return _PROMPT_CORE
 
-If a run_pyqgis result includes a "slow_ms" key, the last call was slow.
-Switch to a structured tool for the same operation on the next step."""
+
+DEFAULT_SYSTEM_PROMPT = build_system_prompt(include_gee=True)
 
 
 class OpenAIBackend(AgentBackend):
@@ -464,17 +513,37 @@ class OpenAIBackend(AgentBackend):
         except Exception:  # nosec B110
             pass
 
+    def _gee_available(self):
+        """Return True when the GEE plugin is available (or toolkit is absent)."""
+        toolkit = getattr(self, "toolkit", None)
+        if toolkit is None:
+            return True  # fail-open: no toolkit means tests / unknown context
+        try:
+            return toolkit.gee_available()
+        except Exception:  # nosec B110
+            return True
+
     def _system_text(self):
-        return self.config.get("system_prompt") or DEFAULT_SYSTEM_PROMPT
+        user_override = self.config.get("system_prompt")
+        if user_override:
+            return user_override
+        return build_system_prompt(include_gee=self._gee_available())
 
     def _system_arg(self):
         return self._system_text()
 
     def _tool_list(self):
-        if self._cached_tool_list is None:
+        include_gee = self._gee_available()
+        # Invalidate cache when the GEE flag differs from what was cached.
+        cache_valid = (
+            self._cached_tool_list is not None
+            and getattr(self, "_cached_tool_list_gee", None) == include_gee
+        )
+        if not cache_valid:
             self._cached_tool_list = OpenAIHttpClient.build_tool_list(
-                tools_mod.TOOL_SPECS
+                tools_mod.tool_specs(include_gee=include_gee)
             )
+            self._cached_tool_list_gee = include_gee
         return self._cached_tool_list
 
     # ------------------------------------------------------------------ #
@@ -489,6 +558,8 @@ class OpenAIBackend(AgentBackend):
         max_iters = self.config.get("max_iterations")
 
         messages = list(history)
+        # Fix A1: elide stale tool-result payloads before sending.
+        messages = elide_stale_tool_results(messages)
         messages.append({"role": "user", "content": message})
 
         is_unlimited = unlimited_iterations(max_iters)
@@ -548,22 +619,26 @@ class OpenAIBackend(AgentBackend):
                 emit(AgentEvent(EventType.DONE))
                 return messages
 
-            # Dispatch tools and build tool result messages
-            for tc in tool_calls:
-                if should_stop():
-                    emit(AgentEvent(EventType.DONE))
-                    return messages
-                name = tc["function"]["name"]
-                args = json.loads(tc["function"]["arguments"])
-                payload, is_error, is_cancelled, _result = _dispatch_one_tool(
-                    self.toolkit, self.executor, name, args, emit, should_stop
+            # Fix A3: run background-safe tool batches in parallel.
+            def _build_openai_result(tc, payload, is_error):
+                return OpenAIHttpClient.build_tool_result_message(tc._raw["id"], payload)
+
+            wrapped = [
+                _ToolCall(
+                    tc["function"]["name"],
+                    json.loads(tc["function"]["arguments"]),
+                    tc,
                 )
-                if should_stop() or is_cancelled:
-                    emit(AgentEvent(EventType.DONE))
-                    return messages
-                messages.append(
-                    OpenAIHttpClient.build_tool_result_message(tc["id"], payload)
-                )
+                for tc in tool_calls
+            ]
+            new_msgs, stopped, _cancelled = _dispatch_tools_maybe_parallel(
+                self.toolkit, self.executor, wrapped, emit, should_stop,
+                _build_openai_result,
+            )
+            if stopped:
+                emit(AgentEvent(EventType.DONE))
+                return messages
+            messages.extend(new_msgs)
         else:
             if is_unlimited:
                 return messages

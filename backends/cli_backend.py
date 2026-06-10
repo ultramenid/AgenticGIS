@@ -59,6 +59,7 @@ from .base import (
     agent_iteration_steps,
 )
 from .openai_backend import DEFAULT_SYSTEM_PROMPT as AGENTICGIS_SYSTEM_PROMPT
+from .openai_backend import build_system_prompt as _build_system_prompt
 
 CLI_AGENT_CATALOG = (
     {
@@ -186,7 +187,7 @@ CLI_AGENT_CATALOG = (
 _AGENT_BY_ID = {agent["id"]: agent for agent in CLI_AGENT_CATALOG}
 _BINARY_RESOLUTION_CACHE = {}
 _BINARY_RESOLUTION_LOCK = threading.Lock()
-_BINARY_MISS_TTL_SECONDS = 5.0
+_BINARY_MISS_TTL_SECONDS = 300.0
 
 
 def agent_by_id(agent_id):
@@ -1212,9 +1213,20 @@ class CliToolBackend(AgentBackend):
         return False, last_err or "CLI did not respond successfully"
 
     # ------------------------------------------------------------------ #
+    def _gee_available(self):
+        """Return True when the GEE plugin is available (or toolkit is absent)."""
+        toolkit = getattr(self, "toolkit", None)
+        if toolkit is None:
+            return True  # fail-open: no toolkit means tests / unknown context
+        try:
+            return toolkit.gee_available()
+        except Exception:  # nosec B110
+            return True
+
     def _system_prompt(self):
+        base = _build_system_prompt(include_gee=self._gee_available())
         return (
-            f"{AGENTICGIS_SYSTEM_PROMPT}\n\n"
+            f"{base}\n\n"
             "## CLI proxy rules\n\n"
             "You are running inside a CLI transport, but AgenticGIS executes "
             "all QGIS tools in-process. Do not use this CLI's own filesystem, "
@@ -1242,7 +1254,7 @@ class CliToolBackend(AgentBackend):
                 "description": spec["description"],
                 "input_schema": spec["input_schema"],
             }
-            for spec in tools_mod.TOOL_SPECS
+            for spec in tools_mod.tool_specs(include_gee=self._gee_available())
         ]
         return json.dumps(specs, default=str)
 

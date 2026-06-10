@@ -17,12 +17,15 @@ from .base import (
     AgentBackend,
     AgentEvent,
     EventType,
+    _ToolCall,
     _dispatch_one_tool,
+    _dispatch_tools_maybe_parallel,
     agent_iteration_steps,
+    elide_stale_tool_results,
     should_compact,
     unlimited_iterations,
 )
-from .openai_backend import DEFAULT_SYSTEM_PROMPT
+from .openai_backend import DEFAULT_SYSTEM_PROMPT, build_system_prompt
 
 
 def _messages_with_cache_breakpoint(messages):
@@ -102,10 +105,29 @@ class ApiBackend(AgentBackend):
         except Exception:  # nosec B110
             pass
 
+    def _gee_available(self):
+        """Return True when the GEE plugin is available (or toolkit is absent)."""
+        toolkit = getattr(self, "toolkit", None)
+        if toolkit is None:
+            return True  # fail-open: no toolkit means tests / unknown context
+        try:
+            return toolkit.gee_available()
+        except Exception:  # nosec B110
+            return True
+
     def _system_blocks(self):
-        text = self.config.get("system_prompt") or DEFAULT_SYSTEM_PROMPT
-        if text != self._cached_system_key:
-            self._cached_system_key = text
+        user_override = self.config.get("system_prompt")
+        if user_override:
+            text = user_override
+        else:
+            # Include the GEE suffix only when the plugin is available.
+            # Cache key encodes the include_gee outcome so a session that
+            # gains or loses the GEE plugin gets a fresh block.
+            include_gee = self._gee_available()
+            text = build_system_prompt(include_gee=include_gee)
+        cache_key = text
+        if cache_key != self._cached_system_key:
+            self._cached_system_key = cache_key
             self._cached_system_blocks = [
                 {"type": "text", "text": text, "cache_control": {"type": "ephemeral"}}
             ]
@@ -115,14 +137,20 @@ class ApiBackend(AgentBackend):
         return self._system_blocks()
 
     def _tool_list(self):
-        if self._cached_tool_list is None:
-            tool_list = tools_mod.anthropic_tool_list()
+        include_gee = self._gee_available()
+        cache_valid = (
+            self._cached_tool_list is not None
+            and getattr(self, "_cached_tool_list_gee", None) == include_gee
+        )
+        if not cache_valid:
+            tool_list = tools_mod.anthropic_tool_list(include_gee=include_gee)
             if tool_list:
                 tool_list[-1] = {
                     **tool_list[-1],
                     "cache_control": {"type": "ephemeral"},
                 }
             self._cached_tool_list = tool_list
+            self._cached_tool_list_gee = include_gee
         return self._cached_tool_list
 
     # ------------------------------------------------------------------ #
@@ -137,6 +165,8 @@ class ApiBackend(AgentBackend):
         max_iters = self.config.get("max_iterations")
 
         messages = list(history)
+        # Fix A1: elide stale tool-result payloads before sending.
+        messages = elide_stale_tool_results(messages)
         messages.append({"role": "user", "content": message})
 
         is_unlimited = unlimited_iterations(max_iters)
@@ -177,25 +207,23 @@ class ApiBackend(AgentBackend):
                 emit(AgentEvent(EventType.DONE))
                 return messages
 
-            tool_results = []
-            for tu in tool_uses:
-                if should_stop():
-                    emit(AgentEvent(EventType.DONE))
-                    return messages
-                payload, is_error, is_cancelled, _result = _dispatch_one_tool(
-                    self.toolkit, self.executor, tu["name"], tu["input"], emit, should_stop
-                )
-                if should_stop() or is_cancelled:
-                    emit(AgentEvent(EventType.DONE))
-                    return messages
-                tool_results.append(
-                    {
-                        "type": "tool_result",
-                        "tool_use_id": tu["id"],
-                        "content": payload,
-                        "is_error": is_error,
-                    }
-                )
+            # Fix A3: run background-safe tool batches in parallel.
+            def _build_anthropic_result(tc, payload, is_error):
+                return {
+                    "type": "tool_result",
+                    "tool_use_id": tc._raw["id"],
+                    "content": payload,
+                    "is_error": is_error,
+                }
+
+            wrapped = [_ToolCall(tu["name"], tu["input"], tu) for tu in tool_uses]
+            tool_results, stopped, _cancelled = _dispatch_tools_maybe_parallel(
+                self.toolkit, self.executor, wrapped, emit, should_stop,
+                _build_anthropic_result,
+            )
+            if stopped:
+                emit(AgentEvent(EventType.DONE))
+                return messages
             messages.append({"role": "user", "content": tool_results})
 
         else:

@@ -50,6 +50,39 @@ def _safe_urlopen(request, **kwargs):
 DEFAULT_TIMEOUT = 120.0
 
 
+def _looks_like_ollama(base_url):
+    """Return True when *base_url* points at a local Ollama instance.
+
+    Matches:
+    * host is localhost / 127.0.0.1 / 0.0.0.0 with port 11434, OR
+    * the URL string contains "ollama" (case-insensitive).
+    """
+    lower = base_url.lower()
+    if "ollama" in lower:
+        return True
+    try:
+        parsed = urllib.parse.urlparse(base_url)
+        if parsed.port == 11434 and parsed.hostname in (
+            "localhost", "127.0.0.1", "0.0.0.0"
+        ):
+            return True
+    except Exception:  # nosec B110 — defensive; malformed URLs are handled elsewhere
+        pass
+    return False
+
+
+def _looks_like_openrouter_claude(base_url, model):
+    """Return True when the request targets OpenRouter *and* a Claude model.
+
+    OpenRouter: URL contains "openrouter" (case-insensitive).
+    Claude model: model name contains "claude" or "anthropic" (case-insensitive).
+    """
+    if "openrouter" not in base_url.lower():
+        return False
+    m = model.lower()
+    return "claude" in m or "anthropic" in m
+
+
 class OpenAIHttpClient:
     def __init__(self, api_key=None, base_url=None, extra_headers=None, org=None,
                  timeout=DEFAULT_TIMEOUT):
@@ -216,15 +249,22 @@ class OpenAIHttpClient:
         cannot leave the worker blocked.
         """
         effective_timeout = self.timeout if timeout is None else timeout
+        cache_system = _looks_like_openrouter_claude(self.base_url, model)
         payload = {
             "model": model,
             "max_tokens": max_tokens,
-            "messages": self._build_messages(system, messages),
+            "messages": self._build_messages(system, messages,
+                                             cache_system=cache_system),
             "tools": tools,
             "tool_choice": "auto",
             "stream": True,
             "stream_options": {"include_usage": True},
         }
+        # B1 — Ollama keep_alive: prevent the model from being unloaded between
+        # turns.  Only sent to Ollama endpoints; strict providers reject unknown
+        # fields.
+        if _looks_like_ollama(self.base_url):
+            payload["keep_alive"] = "30m"
         data = json.dumps(payload).encode("utf-8")
         log_event(
             "transport.request_serialized",
@@ -503,16 +543,30 @@ class OpenAIHttpClient:
         self.cancel_current_request()
 
     @staticmethod
-    def _build_messages(system, messages):
+    def _build_messages(system, messages, cache_system=False):
         """Convert our internal message list to OpenAI Chat Completions shape.
 
         Internal messages are the same shape as Anthropic: role + content
         with optional tool_use / tool_result blocks. We map them to OpenAI
         roles (system, user, assistant, tool).
+
+        When *cache_system* is True the system message content is wrapped in
+        parts form with ``cache_control`` so that OpenRouter can forward
+        Anthropic-style prompt caching for Claude models.  All other providers
+        receive a plain string and byte-identical behaviour to before.
         """
         out = []
         if system:
-            out.append({"role": "system", "content": system})
+            if cache_system:
+                # B2 — OpenRouter prompt caching: wrap system string in parts so
+                # OpenRouter forwards cache_control to the Anthropic backend.
+                system_content = [
+                    {"type": "text", "text": system,
+                     "cache_control": {"type": "ephemeral"}}
+                ]
+            else:
+                system_content = system
+            out.append({"role": "system", "content": system_content})
         for m in messages:
             role = m.get("role", "user")
             content = m.get("content", "")

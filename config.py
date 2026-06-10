@@ -49,6 +49,9 @@ DEFAULTS = {
     "main_thread_timeout": 60.0,      # seconds for main-thread operations
     "processing_timeout": 0.0,        # 0 or less => unlimited processing task setup wait
     "mcp_poll_interval": 0.5,         # seconds for MCP server poll interval
+    # Latency: use a cheaper/faster model for hidden context-compaction summaries.
+    # Empty string (default) means "same model as the chat model".
+    "compaction_model": "",
 }
 
 

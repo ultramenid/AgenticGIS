@@ -596,6 +596,37 @@ class QgisToolkit:
             QgsApplication.pluginsChanged.connect(self._invalidate_alg_cache)
         except Exception:  # nosec B110
             pass
+        # Cached GEE availability flag (None = not yet checked).
+        self._gee_available_cached = None
+
+    # ------------------------------------------------------------------ #
+    # GEE availability (cheap, cached, main-thread-safe)                  #
+    # ------------------------------------------------------------------ #
+    def gee_available(self):
+        """Return True if the ee_plugin is importable/installed in this QGIS session.
+
+        The result is cached for the toolkit lifetime so subsequent calls are
+        free.  On any unexpected error the method returns True (fail-open):
+        wrongly including the GEE prompt costs a few tokens; wrongly excluding
+        it would break GEE features for users who have the plugin installed.
+        """
+        if self._gee_available_cached is not None:
+            return self._gee_available_cached
+        result = True  # fail-open default
+        try:
+            import qgis.utils as _qutils
+            if "ee_plugin" in (getattr(_qutils, "plugins", {}) or {}):
+                result = True
+            else:
+                try:
+                    import importlib.util as _ilu
+                    result = _ilu.find_spec("ee_plugin") is not None
+                except Exception:  # nosec B110
+                    result = True
+        except Exception:  # nosec B110
+            result = True
+        self._gee_available_cached = result
+        return result
 
     # ------------------------------------------------------------------ #
     # Clarifying-question flow (ask_user tool)                            #

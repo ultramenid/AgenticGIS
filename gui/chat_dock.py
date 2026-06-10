@@ -30,7 +30,7 @@ from qgis.PyQt.QtWidgets import (
     QWidget,
 )
 
-from ..backends.base import AgentEvent, EventType
+from ..backends.base import AgentEvent, EventType, should_compact
 from ..core.dev_logging import log_ttft_event, new_trace_id
 from ..core.qt_compat import QUEUED_CONNECTION
 from ..core.session_store import DEFAULT_SESSION_NAME, SessionStore
@@ -234,13 +234,14 @@ class ChatDock(QgsDockWidget):
         self._restoring_transcript = False
         self._current_turn_event = None
         self._history = []
+        self._history_generation = 0  # incremented on every send + session switch
         self._prompt_history = []
         self._prompt_history_index = None
         self._prompt_history_draft = ""
         self._worker = None
         self._stop_requested = False
         self._streaming = False
-        self._prewarmed = False
+        self._last_prewarm_at = 0.0
         self._pending_tool = None
         self._typing_widget = None
         self._current_agent_turn = None   # AgentTurnBubble for the active turn
@@ -537,26 +538,38 @@ class ChatDock(QgsDockWidget):
         # Install event filter on the input widget so Enter-to-send works
         self.input.installEventFilter(self)
 
+    def _maybe_prewarm(self):
+        """Fire prewarm in a daemon thread if the connection may have gone stale.
+
+        Throttled to at most once every 120 s and never while streaming, so
+        repeated calls (e.g. from key-press events) are essentially free.
+        """
+        if self._streaming:
+            return
+        now = time.monotonic()
+        if now - self._last_prewarm_at <= 120.0:
+            return
+        self._last_prewarm_at = now
+
+        def _prewarm():
+            try:
+                backend = self._get_backend()
+                if backend is not None:
+                    backend.prewarm()
+            except Exception:  # nosec B110
+                pass
+
+        try:
+            threading.Thread(
+                target=_prewarm, name="agenticgis-prewarm", daemon=True
+            ).start()
+        except Exception:  # nosec B110
+            pass
+
     def showEvent(self, event):
         super().showEvent(event)
         self.input.setFocus(Qt.FocusReason.OtherFocusReason)
-        if not self._prewarmed and not self._streaming:
-            self._prewarmed = True
-
-            def _prewarm():
-                try:
-                    backend = self._get_backend()
-                    if backend is not None:
-                        backend.prewarm()
-                except Exception:  # nosec B110
-                    pass
-
-            try:
-                threading.Thread(
-                    target=_prewarm, name="agenticgis-prewarm", daemon=True
-                ).start()
-            except Exception:  # nosec B110
-                pass
+        self._maybe_prewarm()
         if self._show_startup_picker and not self._startup_picker_shown and self._session_store.had_existing_sessions:
             self._startup_picker_shown = True
             QTimer.singleShot(0, self._show_startup_session_picker)
@@ -575,6 +588,7 @@ class ChatDock(QgsDockWidget):
             self.transcript_widget.setFixedWidth(event.size().width())
             return False
         if obj is self.input and event.type() == QEvent.Type.KeyPress:
+            self._maybe_prewarm()
             if event.key() == Qt.Key.Key_Escape:
                 return self._handle_input_escape()
             if event.key() in (Qt.Key.Key_Up, Qt.Key.Key_Down) and event.modifiers() == Qt.KeyboardModifier.NoModifier:
@@ -1593,6 +1607,7 @@ class ChatDock(QgsDockWidget):
             return False
         self._active_session_id = session_id
         self._history = list(session.get("backend_history") or [])
+        self._history_generation += 1  # invalidate any pending pre-compaction
         self._transcript_events = list(session.get("transcript_events") or [])
         self._import_backend_state(session.get("backend_state") or {})
         self._restore_transcript(self._transcript_events)
@@ -1620,6 +1635,7 @@ class ChatDock(QgsDockWidget):
     def _clear(self):
         self._stop_active_worker()
         self._history = []
+        self._history_generation += 1  # invalidate any pending pre-compaction
         self._transcript_events = []
         self._current_turn_event = None
         self._clear_live_ui()
@@ -1720,6 +1736,10 @@ class ChatDock(QgsDockWidget):
         self.stop_btn.setVisible(True)
         self._set_status("Thinking", _TEXT_3, spinning=True)
         self._set_tool_progress("Thinking...")
+
+        # Bump the generation counter so any in-flight background pre-compaction
+        # detects that a new send has started and discards its stale result.
+        self._history_generation += 1
 
         self._worker = ChatWorker(
             backend,
@@ -2074,6 +2094,74 @@ class ChatDock(QgsDockWidget):
         self._thinking_started = False
         self._stop_requested = False
 
+    def _maybe_precompact(self):
+        """Start a background pre-compaction pass after a turn fully finishes.
+
+        Runs only when history is above the compaction threshold and no worker
+        is active.  The daemon thread snapshots the current history, calls
+        ``backend.precompact_history()``, then posts the result back to the
+        main thread via ``QTimer.singleShot(0, ...)``.  The result is applied
+        only when the generation counter is unchanged (i.e. no new send or
+        session switch happened) and the dock is still idle — otherwise it is
+        silently discarded.  The inline compaction path inside ``send()``
+        remains the fallback and is never touched.
+        """
+        if self._worker is not None:
+            return
+        backend = None
+        try:
+            backend = self._get_backend()
+        except Exception:  # nosec B110
+            pass
+        if backend is None:
+            return
+        # Use the chat model string to decide whether compaction is needed.
+        try:
+            model = backend.config.get("model") or ""
+        except Exception:  # nosec B110
+            return
+        if not should_compact(self._history, model):
+            return
+
+        # Take a snapshot so the thread works on an immutable copy.
+        snapshot = list(self._history)
+        generation_at_start = self._history_generation
+
+        def _should_stop():
+            # Abort if a new send started (generation bumped) or dock is closing.
+            return self._history_generation != generation_at_start
+
+        def _run():
+            try:
+                result = backend.precompact_history(snapshot, _should_stop)
+            except Exception:  # nosec B110
+                return
+
+            def _apply():
+                # Re-check on the main thread before mutating any state.
+                try:
+                    if (
+                        self._history_generation != generation_at_start
+                        or self._worker is not None
+                    ):
+                        return
+                    self._history = result
+                    self._save_current_session()
+                except Exception:  # nosec B110
+                    pass
+
+            try:
+                QTimer.singleShot(0, _apply)
+            except Exception:  # nosec B110
+                pass
+
+        try:
+            threading.Thread(
+                target=_run, name="agenticgis-precompact", daemon=True
+            ).start()
+        except Exception:  # nosec B110
+            pass
+
     def _on_worker_thread_finished(self, worker):
         for signal_name in ("event", "finished_history", "finished"):
             try:
@@ -2082,3 +2170,8 @@ class ChatDock(QgsDockWidget):
                 pass
         if worker is self._worker:
             self._worker = None
+        # Fire background pre-compaction now that the turn is fully done and
+        # the worker reference has been cleared.  This runs after
+        # _on_finished() has already persisted the new history, so the session
+        # is consistent before we attempt to compact it.
+        self._maybe_precompact()
