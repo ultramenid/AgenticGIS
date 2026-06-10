@@ -58,7 +58,6 @@ from .base import (
     _dispatch_one_tool,
     agent_iteration_steps,
 )
-from .openai_backend import DEFAULT_SYSTEM_PROMPT as AGENTICGIS_SYSTEM_PROMPT
 from .openai_backend import build_system_prompt as _build_system_prompt
 
 CLI_AGENT_CATALOG = (

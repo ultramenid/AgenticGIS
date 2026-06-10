@@ -24,7 +24,7 @@ from .base import (
     should_compact,
     unlimited_iterations,
 )
-from .openai_backend import DEFAULT_SYSTEM_PROMPT, build_system_prompt
+from .openai_backend import build_system_prompt
 
 
 def _messages_with_cache_breakpoint(messages):

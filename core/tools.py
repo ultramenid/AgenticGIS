@@ -137,7 +137,10 @@ TOOL_SPECS = [
     {
         "name": "list_processing_algorithms",
         "method": "list_processing_algorithms",
-        "description": "Search available Processing algorithms (native, GDAL, GRASS, SAGA, plugins) by id or name substring.",
+        "description": (
+            "Search available Processing algorithms (native, GDAL, GRASS, "
+            "SAGA, plugins) by id or name substring."
+        ),
         "input_schema": {
             "type": "object",
             "properties": {"filter_text": {"type": "string"}},
@@ -371,7 +374,10 @@ TOOL_SPECS = [
                 },
                 "region_layer_id": {
                     "type": "string",
-                    "description": "QGIS layer id whose geometry defines `region`/`features` and the animation footprint.",
+                    "description": (
+                        "QGIS layer id whose geometry defines `region`/`features` "
+                        "and the animation footprint."
+                    ),
                 },
                 "fps": {
                     "type": "integer",
