@@ -17,6 +17,7 @@ from .base import (
     _ToolCall,
     _dispatch_tools_maybe_parallel,
     agent_iteration_steps,
+    append_transient_state,
     elide_stale_tool_results,
     should_compact,
     unlimited_iterations,
@@ -28,6 +29,30 @@ from .openai_http import OpenAIHttpClient, OpenAIHttpError
 _PROMPT_CORE = """\
 You are AgenticGIS, a spatial data analyst in a live QGIS session. \
 Analyse, compute, interpret, and explain — not just execute.
+
+## Match the response to the intent — read this FIRST
+
+Before calling any tool, decide what the user's deliverable is:
+
+- **A changed project** (a new layer, a style, a zoom, a load/save/export,
+  a download) — the user already knows what they want done. Execute it
+  with the fewest tool calls that complete it. Skip inspection unless the
+  operation needs information you do not have (e.g. a field name the user
+  did not give). The moment the operation succeeds, the task is DONE:
+  confirm in one or two sentences using only what the tool results already
+  returned, then stop. Do NOT call get_layer_fields, analyze_layer,
+  get_layer_statistics, run_pyqgis, or any other tool after completion to
+  inspect, verify, or enrich the result — and do not produce a table,
+  chart, or Methodology block the user did not ask for. Every section
+  below about analysis output applies ONLY to analysis requests.
+- **An answer derived from the data** — the user is asking a question and
+  the deliverable is the finding. Follow the full analysis workflow below:
+  inspect first, then produce the summary, table, chart, derived layer,
+  and Methodology block as applicable.
+
+If a request contains both, perform the operation first, then analyse
+only what was actually asked. When unsure, the deliverable decides:
+a changed project means execute; an answer means analyse.
 
 ## What to produce for analysis
 
@@ -141,26 +166,6 @@ gives the user something to keep, and the methodology shows how it was made.
 
 After the analysis, end with one or two sentence suggesting the most \
 follow-up question. Do not list more than 3.
-
-## Match the response to the intent
-
-Before calling any tool, decide what the user's deliverable is:
-
-- **A changed project** (a new layer, a style, a zoom, a load/save/export) —
-  the user already knows what they want done. Execute it with the fewest
-  tool calls that complete it. Skip inspection unless the operation needs
-  information you do not have (e.g. a field name the user did not give).
-  Do not produce a table, chart, or Methodology block, and do not run
-  extra calls just to enrich the confirmation — confirm in one or two
-  sentences using only what the tool results already returned.
-- **An answer derived from the data** — the user is asking a question and
-  the deliverable is the finding. Follow the full analysis workflow below:
-  inspect first, then produce the summary, table, chart, derived layer,
-  and Methodology block as applicable.
-
-If a request contains both, perform the operation first, then analyse
-only what was actually asked. When unsure, the deliverable decides:
-a changed project means execute; an answer means analyse.
 
 ## Workflow: Analyzing with QGIS layers
 
@@ -584,16 +589,12 @@ class OpenAIBackend(AgentBackend):
             # Include the GEE suffix only when the plugin is available.
             # Cache key encodes the include_gee outcome so a session that
             # gains or loses the GEE plugin gets a fresh block.
+            # Workspace state is deliberately NOT appended here — it changes
+            # after most tool calls and would invalidate the provider's
+            # prompt cache on every step. It rides as a transient trailing
+            # message instead (append_transient_state in send()).
             include_gee = self._gee_available()
             text = build_system_prompt(include_gee=include_gee)
-            state = ""
-            if self.toolkit is not None:
-                try:
-                    state = self.toolkit.agent_state_summary()
-                except Exception:  # nosec B110
-                    pass
-            if state:
-                text = text + "\n\n" + state
         cache_key = text
         if cache_key != self._cached_system_key:
             self._cached_system_key = cache_key
@@ -649,7 +650,7 @@ class OpenAIBackend(AgentBackend):
                     max_tokens=MAX_TOKENS,
                     system=self._system_text(),
                     tools=self._tool_list(),
-                    messages=messages,
+                    messages=append_transient_state(messages, self._state_text()),
                     on_text=lambda t: emit(AgentEvent(EventType.TEXT, {"text": t})),
                     should_stop=should_stop,
                     on_connecting=lambda: emit(AgentEvent(EventType.CONNECTING)),

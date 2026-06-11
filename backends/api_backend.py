@@ -20,6 +20,7 @@ from .base import (
     _ToolCall,
     _dispatch_tools_maybe_parallel,
     agent_iteration_steps,
+    append_transient_state_anthropic,
     elide_stale_tool_results,
     should_compact,
     unlimited_iterations,
@@ -123,16 +124,12 @@ class ApiBackend(AgentBackend):
             # Include the GEE suffix only when the plugin is available.
             # Cache key encodes the include_gee outcome so a session that
             # gains or loses the GEE plugin gets a fresh block.
+            # Workspace state is deliberately NOT appended here — it changes
+            # after most tool calls and would invalidate the prompt cache on
+            # every step. It rides as a transient trailing block instead
+            # (append_transient_state_anthropic in send()).
             include_gee = self._gee_available()
             text = build_system_prompt(include_gee=include_gee)
-            state = ""
-            if self.toolkit is not None:
-                try:
-                    state = self.toolkit.agent_state_summary()
-                except Exception:  # nosec B110
-                    pass
-            if state:
-                text = text + "\n\n" + state
         cache_key = text
         if cache_key != self._cached_system_key:
             self._cached_system_key = cache_key
@@ -193,7 +190,13 @@ class ApiBackend(AgentBackend):
                     max_tokens=MAX_TOKENS,
                     system=self._system_blocks(),
                     tools=self._tool_list(),
-                    messages=_messages_with_cache_breakpoint(messages),
+                    # Breakpoint first (on the stable history tail), THEN the
+                    # transient state block — so the cache write never covers
+                    # the part that changes every step.
+                    messages=append_transient_state_anthropic(
+                        _messages_with_cache_breakpoint(messages),
+                        self._state_text(),
+                    ),
                     on_text=lambda t: emit(AgentEvent(EventType.TEXT, {"text": t})),
                     should_stop=should_stop,
                     on_connecting=lambda: emit(AgentEvent(EventType.CONNECTING)),

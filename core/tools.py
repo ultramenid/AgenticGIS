@@ -628,10 +628,14 @@ TOOL_SPECS = [
         "name": "web_fetch",
         "method": "web_fetch",
         "description": (
-            "Fetch a public URL (GET only). Returns body, HTTP status, "
-            "content-type, and parsed JSON when available. Requires explicit "
-            "user permission for external URLs. Set verify_ssl=false for "
-            "self-signed or incomplete certificate chains."
+            "Fetch a public URL (GET only). Text responses return body, HTTP "
+            "status, content-type, and parsed JSON when available. Binary "
+            "responses (ZIP, GeoTIFF, images, ...) are saved to a temp file "
+            "instead — the result then has file_path and size_bytes, never "
+            "the raw bytes; pass file_path to add_layer or extract it with "
+            "run_pyqgis. Requires explicit user permission for external "
+            "URLs. Set verify_ssl=false for self-signed or incomplete "
+            "certificate chains."
         ),
         "input_schema": {
             "type": "object",

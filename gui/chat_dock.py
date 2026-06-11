@@ -33,6 +33,7 @@ from qgis.PyQt.QtWidgets import (
 
 from ..backends.base import AgentEvent, EventType, should_compact
 from ..core.dev_logging import log_ttft_event, new_trace_id
+from ..core.input_metrics import input_box_metrics
 from ..core.qt_compat import QUEUED_CONNECTION
 from ..core.session_store import DEFAULT_SESSION_NAME, SessionStore
 from .agent_turn_bubble import AgentTurnBubble, _SPINNER_FRAMES
@@ -494,7 +495,7 @@ class ChatDock(QgsDockWidget):
             }}
         """)
         self.input.textChanged.connect(self._resize_input)
-        self._update_input_vertical_inset(self._input_min_h)
+        self._resize_input()
         field_row.addWidget(self.input, 1, Qt.AlignmentFlag.AlignVCenter)
 
         # Send button — inside the field frame, right edge
@@ -683,17 +684,16 @@ class ChatDock(QgsDockWidget):
     def _resize_input(self):
         if not hasattr(self, "input") or not hasattr(self, "_input_frame"):
             return
-        doc_h = int(self.input.document().size().height()) + 2
-        input_h = max(self._input_min_h, min(self._input_max_h, doc_h))
-        frame_h = max(self._input_frame_min_h, min(self._input_frame_max_h, input_h + 10))
-        self._update_input_vertical_inset(input_h)
+        input_h, frame_h, top = input_box_metrics(
+            self.input.document().size().height(),
+            self.input.fontMetrics().lineSpacing(),
+            min_h=self._input_min_h, max_h=self._input_max_h,
+            frame_min_h=self._input_frame_min_h,
+            frame_max_h=self._input_frame_max_h,
+        )
+        self.input.setViewportMargins(0, top, 0, 0)
         self.input.setFixedHeight(input_h)
         self._input_frame.setFixedHeight(frame_h)
-
-    def _update_input_vertical_inset(self, input_h):
-        line_h = self.input.fontMetrics().lineSpacing()
-        top = max(0, int((input_h - line_h) / 2) - 1)
-        self.input.setViewportMargins(0, top, 0, 0)
 
     def _scroll_to_bottom(self):
         try:
@@ -777,7 +777,8 @@ class ChatDock(QgsDockWidget):
         has_text = bool(event.get("text"))
         has_thinking = bool(event.get("thinking"))
         has_tools = bool(event.get("tools"))
-        if has_text or has_thinking or has_tools:
+        has_files = bool(event.get("files"))
+        if has_text or has_thinking or has_tools or has_files:
             self._transcript_events.append(dict(event))
             self._save_current_session()
         self._current_turn_event = None
@@ -824,9 +825,29 @@ class ChatDock(QgsDockWidget):
         self._add_widget(GifWidget(data))
         self._record_transcript_event({"type": "gif", "data": data})
 
+    def _wrap_with_bubble_margins(self, widget):
+        """Wrap an inline widget with the same side margins as agent turn
+        bubbles (see _add_agent_turn_widget) so it aligns with the chat.
+
+        Only used when restoring legacy standalone ``file`` transcript events
+        (sessions saved before download cards moved inside the turn bubble).
+        """
+        container = QWidget()
+        container.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        vl = QVBoxLayout(container)
+        vl.setContentsMargins(16, 0, 16, 0)
+        vl.setSpacing(0)
+        vl.addWidget(widget)
+        return container
+
     def _add_file(self, data):
-        self._add_widget(DownloadWidget(data))
-        self._record_transcript_event({"type": "file", "data": data})
+        """Embed a download card inside the current agent turn bubble."""
+        turn = self._get_or_create_agent_turn()
+        turn.add_file(DownloadWidget(data))
+        self._maybe_scroll_to_bottom()
+        turn_event = self._ensure_current_turn_event()
+        if turn_event is not None:
+            turn_event.setdefault("files", []).append(dict(data or {}))
 
     def _add_compaction_notice(self):
         w = QLabel("── history compacted ──")
@@ -872,7 +893,9 @@ class ChatDock(QgsDockWidget):
                 elif etype == "gif":
                     self._add_widget(GifWidget(event.get("data") or {}))
                 elif etype == "file":
-                    self._add_widget(DownloadWidget(event.get("data") or {}))
+                    self._add_widget(
+                        self._wrap_with_bubble_margins(DownloadWidget(event.get("data") or {}))
+                    )
                 elif etype == "error":
                     self._add_widget(MessageContainer(html.escape(
                         str(event.get("text", ""))), is_user=False, is_error=True))
@@ -901,6 +924,8 @@ class ChatDock(QgsDockWidget):
             item = turn.add_tool(tool.get("name", "tool"), tool.get("input") or {})
             if "result" in tool:
                 item.set_result(str(tool.get("result", "")), bool(tool.get("is_error", False)))
+        for fdata in event.get("files") or []:
+            turn.add_file(DownloadWidget(fdata or {}))
         text = event.get("text", "")
         if text:
             turn.finalize_text(text)

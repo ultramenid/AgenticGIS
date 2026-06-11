@@ -74,6 +74,23 @@ class AgentBackend(ABC):
         pid = self.config.get("provider")
         return None if pid == "custom" else providers.get_provider(pid)
 
+    def _state_text(self):
+        """Current workspace state for transient wire-time injection.
+
+        Never raises; returns "" when no toolkit or no state. Backends
+        append this to the END of the outgoing message list (see
+        ``append_transient_state``) instead of the system prompt — a
+        mutating system prompt invalidates the provider's prompt cache
+        on every state-changing tool call.
+        """
+        toolkit = getattr(self, "toolkit", None)
+        if toolkit is None:
+            return ""
+        try:
+            return toolkit.agent_state_summary() or ""
+        except Exception:  # nosec B110
+            return ""
+
     def validate(self) -> Optional[str]:
         p = self._provider()
         key = (
@@ -244,6 +261,53 @@ _CONTEXT_WINDOWS = {
 }
 _DEFAULT_CONTEXT_WINDOW = 200_000
 _MAX_EFFECTIVE_CONTEXT_WINDOW = 200_000
+TRANSIENT_STATE_HEADER = (
+    "[Current QGIS workspace state — refreshed automatically before this "
+    "step; transient context, not a user message]"
+)
+
+
+def append_transient_state(messages, state_text):
+    """OpenAI format: copy of ``messages`` with the workspace state as a
+    trailing user message.
+
+    Wire-time only — callers must never persist the result to history,
+    or the state snapshot would bloat every later request. Returns
+    ``messages`` unchanged when there is no state.
+    """
+    if not state_text:
+        return messages
+    return list(messages) + [{
+        "role": "user",
+        "content": f"{TRANSIENT_STATE_HEADER}\n\n{state_text}",
+    }]
+
+
+def append_transient_state_anthropic(messages, state_text):
+    """Anthropic format: copy of ``messages`` with the workspace state as
+    a final text block on the trailing user message.
+
+    Appending a block (rather than a new message) keeps the user/assistant
+    alternation intact for tool_result turns. Wire-time only — never
+    persist the result. Returns ``messages`` unchanged when there is no
+    state or no messages.
+    """
+    if not state_text or not messages:
+        return messages
+    text = f"{TRANSIENT_STATE_HEADER}\n\n{state_text}"
+    out = list(messages)
+    last = out[-1]
+    if last.get("role") != "user":
+        out.append({"role": "user", "content": text})
+        return out
+    content = last.get("content")
+    if isinstance(content, list):
+        out[-1] = {**last, "content": list(content) + [{"type": "text", "text": text}]}
+    else:
+        out[-1] = {**last, "content": f"{content}\n\n{text}"}
+    return out
+
+
 _COMPACTION_THRESHOLD = 0.90
 _COMPACTION_KEEP_TAIL = 12  # keep this many recent messages verbatim
 _COMPACTION_FIXED_OVERHEAD = 30_000  # reserved for system prompt + tool schemas

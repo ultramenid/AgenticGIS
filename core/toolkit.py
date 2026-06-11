@@ -48,9 +48,20 @@ from .dev_logging import log_event
 from .layer_analysis import analyze_vector_layer
 from .processing_param_check import build_unknown_params_error
 from .processing_tasks import parameter_names, run_processing_algorithm_task
+from .web_fetch_helpers import (
+    is_binary_content,
+    safe_filename_from_url,
+    stream_response_to_file,
+)
 
 
 # ── Safe HTTP helpers (defense against non-HTTP(S) schemes) ──────────────
+
+# web_fetch: head bytes read for binary sniffing, streaming chunk size,
+# and the hard cap for binary downloads saved to disk.
+_WEB_FETCH_SNIFF_BYTES = 8192
+_WEB_FETCH_CHUNK_BYTES = 1024 * 1024
+_WEB_FETCH_MAX_DOWNLOAD_BYTES = 1024 * 1024 * 1024  # 1 GB
 
 
 def _unique_layer_name(name):
@@ -1221,6 +1232,7 @@ class QgisToolkit:
                     url=url,
                     max_length=args.get("max_length", 500000),
                     verify_ssl=args.get("verify_ssl", True),
+                    task=_task,
                 )
 
             result = self._run_qgs_task(
@@ -4052,12 +4064,95 @@ class QgisToolkit:
         ok = QgsProject.instance().write()
         return {"ok": bool(ok), "path": QgsProject.instance().fileName() or None}
 
-    def web_fetch(self, url, max_length=500000, verify_ssl=True):
+    def _save_fetch_to_file(self, resp, url, head, content_type, status, start, task=None):
+        """Stream a binary web_fetch response to a temp file.
+
+        Returns the standard web_fetch result shape with ``file_path``
+        instead of ``body`` so the archive/raster lands on disk without
+        flooding the chat history with undecodable bytes. ``task`` (the
+        wrapping QgsTask, when present) gets live progress and provides
+        user cancellation.
+        """
+        name = safe_filename_from_url(url)
+        download_dir = tempfile.mkdtemp(prefix="agenticgis_fetch_")
+        file_path = os.path.join(download_dir, name)
+        try:
+            total_bytes = int(resp.headers.get("Content-Length") or 0) or None
+        except (TypeError, ValueError):
+            total_bytes = None
+        size = 0
+        try:
+            with open(file_path, "wb") as fh:
+                size, cancelled = stream_response_to_file(
+                    resp, fh, head,
+                    chunk_size=_WEB_FETCH_CHUNK_BYTES,
+                    max_bytes=_WEB_FETCH_MAX_DOWNLOAD_BYTES,
+                    task=task,
+                    total_bytes=total_bytes,
+                )
+        except BaseException as exc:  # noqa: BLE001
+            try:
+                os.remove(file_path)
+            except OSError:
+                pass
+            log_event(
+                "toolkit.web_fetch.error",
+                url=url[:200],
+                status=status,
+                elapsed_ms=int((time.perf_counter() - start) * 1000),
+                error=str(exc),
+            )
+            return {"ok": False, "error": f"binary download failed: {exc}", "status": status}
+        if cancelled:
+            try:
+                os.remove(file_path)
+            except OSError:
+                pass
+            log_event(
+                "toolkit.web_fetch.end",
+                url=url[:200],
+                status=status,
+                elapsed_ms=int((time.perf_counter() - start) * 1000),
+                binary=True,
+                cancelled=True,
+            )
+            return {"ok": False, "error": "cancelled by user", "cancelled": True}
+        log_event(
+            "toolkit.web_fetch.end",
+            url=url[:200],
+            status=status,
+            elapsed_ms=int((time.perf_counter() - start) * 1000),
+            binary=True,
+            size_bytes=size,
+        )
+        return {
+            "ok": True,
+            "status": status,
+            "url": url,
+            "content_type": content_type,
+            "binary": True,
+            "file_path": file_path,
+            "size_bytes": size,
+            "description": f"Downloaded {name} ({size} bytes)",
+            "hint": (
+                "Binary file saved to disk (not inlined in chat). Use the "
+                "file_path directly: add_layer(uri=file_path) for rasters/"
+                "vectors, run_pyqgis with zipfile to extract archives, or "
+                "'/vsizip/<file_path>/<inner_file>' as a layer uri to read "
+                "from inside a ZIP without extracting."
+            ),
+        }
+
+    def web_fetch(self, url, max_length=500000, verify_ssl=True, task=None):
         """Fetch a public URL via HTTP GET using the stdlib (urllib).
 
         Requires external access permission via the existing guardrail.
-        Returns status, content-type, and the body (with JSON parsed when
-        the response claims to be JSON).
+        Text responses return status, content-type, and the body (with
+        JSON parsed when the response claims to be JSON). Binary responses
+        are streamed to a temp file and return ``file_path`` instead of a
+        body. ``task`` is the wrapping QgsTask (when dispatched as a
+        background task) — used for download progress and cancellation;
+        it is internal plumbing, not an agent-facing parameter.
 
         Set ``verify_ssl=False`` for servers with incomplete/self-signed
         certificate chains."""
@@ -4084,7 +4179,17 @@ class QgisToolkit:
                 status = resp.getcode()
                 headers = dict(resp.headers)
                 content_type = headers.get("Content-Type", "")
-                body = resp.read(max_length + 1)
+                # Peek at the head first: binary payloads (ZIP, GeoTIFF,
+                # images, ...) must never be inlined into chat history —
+                # they bloat every later LLM request. Stream them to a
+                # temp file and return the path instead.
+                head = resp.read(_WEB_FETCH_SNIFF_BYTES)
+                if is_binary_content(content_type, head):
+                    return self._save_fetch_to_file(
+                        resp, url, head, content_type, status, start, task=task
+                    )
+                remaining = max(0, max_length + 1 - len(head))
+                body = head + (resp.read(remaining) if remaining else b"")
                 truncated = len(body) > max_length
                 if truncated:
                     body = body[:max_length]
