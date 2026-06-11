@@ -46,7 +46,8 @@ from .cancellation import cancel_requested as _cancel_requested
 from .analysis_cache import AnalysisCache, layer_cache_token
 from .dev_logging import log_event
 from .layer_analysis import analyze_vector_layer
-from .processing_tasks import run_processing_algorithm_task
+from .processing_param_check import build_unknown_params_error
+from .processing_tasks import parameter_names, run_processing_algorithm_task
 
 
 # ── Safe HTTP helpers (defense against non-HTTP(S) schemes) ──────────────
@@ -664,6 +665,9 @@ class QgisToolkit:
         # These are meant to persist; the agent reuses them instead of
         # recreating and never auto-deletes them.
         self._analysis_layers = {}
+        # Track temp file paths for is_analysis layers so they can be cleaned
+        # up when the layer is removed or a session is reset.
+        self._temp_layer_files = {}  # layer_id -> file_path
         # Session-level approval for tool categories (e.g., "gee").
         # Reset when the user starts a new chat session.
         self._session_approved_tool_categories = set()
@@ -1064,12 +1068,23 @@ class QgisToolkit:
         """Reset the agent's workspace-state registry for a new chat session.
 
         Clears all session-specific accumulators (layers, processing history,
-        analysis results, errors) and rescans the current project so the new
-        session starts with an accurate view of the workspace.
+        analysis results, errors), deletes temp files for is_analysis layers,
+        and rescans the current project so the new session starts with an
+        accurate view of the workspace.
         """
         if self._agent_state is not None:
             self._agent_state.reset()
+        self._delete_temp_analysis_layer_files()
         self._scan_existing_layers()
+
+    def _delete_temp_analysis_layer_files(self):
+        """Delete source files for tracked is_analysis temp layers."""
+        for path in list(self._temp_layer_files.values()):
+            try:
+                os.unlink(path)
+            except Exception:  # nosec B110
+                pass
+        self._temp_layer_files.clear()
 
     # ------------------------------------------------------------------ #
     # Cancellation helpers                                                #
@@ -2127,6 +2142,28 @@ class QgisToolkit:
             result["_evicted_tool_layer_ids"] = evicted
         return result
 
+    @staticmethod
+    def _unknown_params_error(alg_id, params):
+        """Error message for mistyped parameter names, or None.
+
+        QGIS silently ignores unknown parameter keys, so a typo like
+        GROUP_FIELD instead of GROUP_BY runs the algorithm with defaults
+        and yields a wrong result instead of an error. Never blocks: any
+        failure to read the algorithm's definitions skips validation.
+        """
+        if not isinstance(params, dict) or not params:
+            return None
+        try:
+            algorithm = QgsApplication.processingRegistry().createAlgorithmById(alg_id)
+        except Exception:  # noqa: BLE001
+            return None
+        if algorithm is None:
+            # Unknown alg id — let the run itself report it.
+            return None
+        return build_unknown_params_error(
+            alg_id, list(params.keys()), parameter_names(algorithm)
+        )
+
     def run_processing(self, alg_id, params):
         import processing
 
@@ -2144,6 +2181,9 @@ class QgisToolkit:
                     "Re-run the earlier processing algorithm to regenerate them."
                 ),
             }
+        param_error = self._unknown_params_error(alg_id, params)
+        if param_error:
+            return {"ok": False, "error": param_error}
         start = time.perf_counter()
         param_keys = sorted((params or {}).keys()) if isinstance(params, dict) else []
         log_event("toolkit.run_processing.start", alg_id=alg_id, param_keys=param_keys)
@@ -2441,6 +2481,9 @@ class QgisToolkit:
             except Exception:  # nosec B110
                 pass
             self._analysis_layers[name] = layer.id()
+            # Track temp file for cleanup when layer is removed/session ends.
+            if isinstance(uri, str):
+                self._temp_layer_files[layer.id()] = str(uri)
         zoomed = self._zoom_to_layer(layer) if zoom else False
         return {
             "ok": True,
@@ -3896,11 +3939,28 @@ class QgisToolkit:
     def _layer_removal_payload(self, layer):
         return {"id": layer.id(), "name": layer.name()}
 
+    def _maybe_delete_layer_file(self, layer):
+        """Delete the source file for an is_analysis temp layer."""
+        try:
+            is_analysis = bool(layer.customProperty("agenticgis/analysis"))
+        except Exception:
+            is_analysis = False
+        if not is_analysis:
+            return
+        path = self._temp_layer_files.pop(layer.id(), None)
+        if path is None:
+            path = layer.publicSource()
+        if path:
+            try:
+                os.unlink(path)
+            except Exception:  # nosec B110
+                pass
+
     def remove_layer(self, layer_id=None, layer_name=None):
         """Unload one map layer from the current project.
 
-        This removes the layer reference from QGIS only. It never deletes the
-        source dataset from disk, a database, or a remote service.
+        For is_analysis temp layers, the source file is also deleted.
+        For other layers, the source dataset is never deleted.
         """
         layer_id = layer_id.strip() if isinstance(layer_id, str) else layer_id
         layer_name = layer_name.strip() if isinstance(layer_name, str) else layer_name
@@ -3943,6 +4003,7 @@ class QgisToolkit:
             layer = matches[0]
 
         removed = self._layer_removal_payload(layer)
+        self._maybe_delete_layer_file(layer)
         project.removeMapLayer(layer.id())
         try:
             self._agent_state.unregister_layer(layer.id())
@@ -3960,7 +4021,7 @@ class QgisToolkit:
         """Unload all map layers from the current project.
 
         Requires confirm=True so the model cannot clear the canvas by accident.
-        Source datasets are not deleted.
+        Source datasets are not deleted, but is_analysis temp layer files are.
         """
         if confirm is not True:
             return {
@@ -3972,11 +4033,13 @@ class QgisToolkit:
         layers = list(project.mapLayers().values())
         removed = [self._layer_removal_payload(layer) for layer in layers]
         for layer in layers:
+            self._maybe_delete_layer_file(layer)
             project.removeMapLayer(layer.id())
         try:
             self._agent_state.clear_layers()
         except Exception:  # nosec B110
             pass
+        self._temp_layer_files.clear()
         self._canvas_dirty = True
         return {
             "ok": True,

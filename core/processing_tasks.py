@@ -20,6 +20,15 @@ from qgis.core import (
 
 from .cancellation import cancel_requested as _cancel_requested
 from .dev_logging import log_event
+from .processing_param_check import build_unknown_params_error
+
+
+def parameter_names(algorithm):
+    """Parameter names from an algorithm's definitions; [] when unreadable."""
+    try:
+        return [d.name() for d in algorithm.parameterDefinitions()]
+    except Exception:  # noqa: BLE001 — validation must never block a run
+        return []
 
 
 def _stringify_results(results):
@@ -194,6 +203,12 @@ def run_processing_algorithm_task(
         algorithm = registry.createAlgorithmById(alg_id)
         if algorithm is None:
             raise ValueError(f"No processing algorithm found for id {alg_id!r}")
+
+        param_error = build_unknown_params_error(
+            alg_id, list(params.keys()), parameter_names(algorithm)
+        )
+        if param_error:
+            raise ValueError(param_error)
 
         context = QgsProcessingContext()
         if hasattr(context, "setProject"):
