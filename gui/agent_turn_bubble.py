@@ -8,10 +8,10 @@ import html as _html
 import json
 
 from qgis.PyQt.QtCore import Qt, QElapsedTimer, QTimer
-from qgis.PyQt.QtGui import QColor, QFont, QTextCursor
+from qgis.PyQt.QtGui import QFont
 from qgis.PyQt.QtWidgets import (
     QFrame, QHBoxLayout, QLabel,
-    QSizePolicy, QTextBrowser, QVBoxLayout, QWidget,
+    QSizePolicy, QVBoxLayout, QWidget,
 )
 
 from .downloadable import HoverDownloadButton, save_text, _safe_name
@@ -356,87 +356,6 @@ class ToolGroupRow(QWidget):
             self._timer.stop()
 
 
-class _StreamTextView(QTextBrowser):
-    """Streaming-friendly rich text area for the agent's answer.
-
-    QLabel re-parses and re-lays-out its whole document on every setText and
-    on every (uncached) heightForWidth call — O(answer length) per streamed
-    frame, measured at ~30ms per call for a 13k-char answer. This view keeps
-    ONE persistent QTextDocument: streamed deltas are appended via QTextCursor
-    (incremental layout, O(delta)), and the widget pins its own fixed height
-    from documentSizeChanged so the transcript layout never has to lay out
-    rich text to measure it.
-    """
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self._cursor_chars = 0   # plain-text chars of the trailing "|" glyph
-        self._height_px = 0
-        self.setReadOnly(True)
-        self.setFrameShape(QFrame.Shape.NoFrame)
-        self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-        self.viewport().setAutoFillBackground(False)
-        self.document().setDocumentMargin(0)
-        self.document().setDefaultStyleSheet(f"body {{ color: {_TEXT}; }}")
-        _palette = self.palette()
-        _palette.setColor(self.palette().ColorRole.Text, QColor(_TEXT))
-        self.setPalette(_palette)
-        self.document().documentLayout().documentSizeChanged.connect(self._sync_height)
-        self.setFixedHeight(0)
-
-    # -- Geometry ---------------------------------------------------------
-    def _sync_height(self, _size=None) -> None:
-        doc = self.document()
-        if doc.isEmpty():
-            h = 0
-        else:
-            m = self.contentsMargins()
-            h = int(doc.documentLayout().documentSize().height() + 0.999)
-            h += m.top() + m.bottom()
-        if h != self._height_px:
-            self._height_px = h
-            self.setFixedHeight(h)
-            self.updateGeometry()
-
-    def content_height(self) -> int:
-        return self._height_px
-
-    # -- Content ----------------------------------------------------------
-    def set_stream_html(self, html: str, cursor_html: str = "") -> None:
-        """Full replace — used for finalize, markdown re-parses, progress."""
-        self.setHtml((html or "") + cursor_html)
-        self._cursor_chars = 1 if cursor_html else 0
-        self._sync_height()
-
-    def setText(self, html: str) -> None:  # QLabel-compatible entry point
-        self.set_stream_html(html, "")
-
-    def append_stream(self, html_delta: str, cursor_html: str = "") -> None:
-        """Append a streamed delta in place — O(delta), no full re-parse."""
-        c = QTextCursor(self.document())
-        c.movePosition(QTextCursor.MoveOperation.End)
-        if self._cursor_chars:
-            c.movePosition(
-                QTextCursor.MoveOperation.PreviousCharacter,
-                QTextCursor.MoveMode.KeepAnchor, self._cursor_chars,
-            )
-            c.removeSelectedText()
-        c.insertHtml((html_delta or "") + cursor_html)
-        self._cursor_chars = 1 if cursor_html else 0
-        # documentSizeChanged only fires once something requests layout
-        # (normally the next paint); sync explicitly so height is correct
-        # even before the widget is first painted.
-        self._sync_height()
-
-    # -- Event plumbing ----------------------------------------------------
-    def wheelEvent(self, event):
-        # Content never scrolls internally (height == document height);
-        # hand the wheel to the transcript scroll area.
-        event.ignore()
-
-
 class AgentTurnBubble(QFrame):
     """One agent turn: reasoning ticker + grouped tool rows + streaming text."""
 
@@ -515,8 +434,11 @@ class AgentTurnBubble(QFrame):
         self._files_layout.setSpacing(6)
         self._outer.addWidget(self._files_area)
 
-        self.text_lbl = _StreamTextView(self)
+        self.text_lbl = QLabel("")
+        self.text_lbl.setWordWrap(True)
         self.text_lbl.setMinimumWidth(0)
+        self.text_lbl.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred)
+        self.text_lbl.setTextFormat(Qt.TextFormat.RichText)
         self.text_lbl.setTextInteractionFlags(
             Qt.TextInteractionFlag.TextBrowserInteraction | Qt.TextInteractionFlag.TextSelectableByMouse
         )
@@ -550,16 +472,16 @@ class AgentTurnBubble(QFrame):
         save_text(self, text, _safe_name(text.split("\n", 1)[0], "response", ".md"))
 
     def _refresh_text_geometry(self) -> None:
-        """Propagate the text view's size into the transcript layout.
-
-        The view pins its own fixed height from documentSizeChanged; this
-        only keeps its width in sync and nudges the parent layout chain.
-        """
+        """Propagate the text view's size into the transcript layout."""
         if self._outer is not None and self.width() > 0:
             margins = self._outer.contentsMargins()
             label_w = self.width() - margins.left() - margins.right()
             if label_w > 0:
                 self.text_lbl.setFixedWidth(label_w)
+
+        label_h = self.text_lbl.heightForWidth(self.text_lbl.width())
+        if label_h > 0:
+            self.text_lbl.setMinimumHeight(label_h)
 
         self.text_lbl.updateGeometry()
         if self._outer is not None:
@@ -671,7 +593,7 @@ class AgentTurnBubble(QFrame):
             self._last_stream_text = text
             self._last_stream_html = body
             self._stream_html = body
-            self.text_lbl.set_stream_html(body, cursor)
+            self.text_lbl.setText(body + cursor)
             self._stream_doc_dirty = False
             if not self._geo_timer.isActive():
                 self._geo_timer.start()
@@ -694,10 +616,10 @@ class AgentTurnBubble(QFrame):
             self._last_stream_html += html_delta
             self._stream_html = self._last_stream_html
         if rewound or self._stream_doc_dirty or not delta:
-            self.text_lbl.set_stream_html(self._last_stream_html, cursor)
+            self.text_lbl.setText(self._last_stream_html + cursor)
             self._stream_doc_dirty = False
         else:
-            self.text_lbl.append_stream(html_delta, cursor)
+            self.text_lbl.setText(self._last_stream_html + cursor)
 
         if not self._geo_timer.isActive():
             self._geo_timer.start()
@@ -812,7 +734,7 @@ class AgentTurnBubble(QFrame):
         self._last_stream_text = text
         self._last_stream_html = body
         self._stream_html = body
-        self.text_lbl.set_stream_html(body, cursor)
+        self.text_lbl.setText(body + cursor)
         self._stream_doc_dirty = False
         if not self._geo_timer.isActive():
             self._geo_timer.start()
@@ -879,10 +801,7 @@ class AgentTurnBubble(QFrame):
             m = self._outer.contentsMargins()
             inner_w = width - m.left() - m.right()
             if inner_w > 0:
-                # The view tracks its own document height — O(1), no rich
-                # text re-layout (QLabel.heightForWidth re-laid-out the whole
-                # document on every layout pass).
-                lh = self.text_lbl.content_height()
+                lh = self.text_lbl.heightForWidth(inner_w)
                 tools_h = (
                     self._tools_area.sizeHint().height()
                     if self._tools_area.isVisible()
