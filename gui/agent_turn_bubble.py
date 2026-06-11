@@ -8,7 +8,7 @@ import html as _html
 import json
 
 from qgis.PyQt.QtCore import Qt, QElapsedTimer, QTimer
-from qgis.PyQt.QtGui import QFont, QTextCursor
+from qgis.PyQt.QtGui import QColor, QFont, QTextCursor
 from qgis.PyQt.QtWidgets import (
     QFrame, QHBoxLayout, QLabel,
     QSizePolicy, QTextBrowser, QVBoxLayout, QWidget,
@@ -379,6 +379,10 @@ class _StreamTextView(QTextBrowser):
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.viewport().setAutoFillBackground(False)
         self.document().setDocumentMargin(0)
+        self.document().setDefaultStyleSheet(f"body {{ color: {_TEXT}; }}")
+        _palette = self.palette()
+        _palette.setColor(self.palette().ColorRole.Text, QColor(_TEXT))
+        self.setPalette(_palette)
         self.document().documentLayout().documentSizeChanged.connect(self._sync_height)
         self.setFixedHeight(0)
 
@@ -461,15 +465,15 @@ class AgentTurnBubble(QFrame):
         self._fmt_base_len = 0
         self._fmt_base_html = ""
         self._geo_timer = QTimer(self)
-        self._geo_timer.setInterval(150)
+        self._geo_timer.setInterval(50)
         self._geo_timer.setSingleShot(True)
         self._geo_timer.timeout.connect(self._refresh_text_geometry)
         # Debounce timer for expensive _md_to_html re-parses during streaming.
         # Re-parsing the whole accumulated text on every frame is O(n) and
         # blocks the main thread. We only re-parse when fence/table markers
-        # change AND at least 200ms have passed since the last re-parse.
+        # change, AND at least 80ms have passed since the last re-parse.
         self._fmt_debounce_timer = QTimer(self)
-        self._fmt_debounce_timer.setInterval(200)
+        self._fmt_debounce_timer.setInterval(80)
         self._fmt_debounce_timer.setSingleShot(True)
         self._fmt_debounce_timer.timeout.connect(self._do_fmt_reparse)
         self._fmt_pending_text = None
