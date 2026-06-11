@@ -328,6 +328,131 @@ Avoid it for data analysis:
 If a run_pyqgis result includes a "slow_ms" key, the last call was slow.
 Switch to a structured tool for the same operation on the next step."""
 
+_PROMPT_SPATIAL = """
+## Spatial Operations — Complete Algorithm Reference
+
+### native:extractbylocation — Spatial Selection (MANDATORY PREDICATE)
+Extracts features based on spatial relationship with another layer.
+
+**CRITICAL: ALWAYS set PREDICATE explicitly. NEVER omit it.**
+Default is 0 (intersect), which means "touching the zone" — this is WRONG for "outside" queries.
+
+| PREDICATE | Name | Meaning | User says... |
+|-----------|------|---------|-------------|
+| 0 | **intersect** | Features touching or overlapping the zone | "touching", "near", "along", "inside" (loose) |
+| 1 | **contain** | Features that fully contain the zone | "enclosing", "containing", "covering" |
+| 2 | **disjoint** | Features completely **OUTSIDE** the zone | "outside", "beyond", "not in", "excluding" |
+| 3 | **equal** | Features exactly matching the zone geometry | "exactly matching", "same as" |
+| 4 | **touch** | Features touching only the boundary (not inside) | "adjacent to", "bordering", "next to" |
+| 5 | **overlap** | Features partially overlapping the zone | "overlapping", "partially in" |
+| 6 | **are within** | Features fully **INSIDE** the zone (strict) | "completely inside", "fully within" |
+| 7 | **cross** | Features crossing through the zone | "crossing", "passing through", "traversing" |
+
+**Common workflows:**
+- "Find buildings inside buffer" → `PREDICATE: 0` (intersect) or `6` (strict within)
+- "Find buildings outside buffer" → `PREDICATE: 2` (disjoint) — **NOT the default!**
+- "Count inside vs outside" → Run TWICE: PREDICATE=0 then PREDICATE=2. Sum must equal total.
+- "Features along a road" → `PREDICATE: 0` with road layer as INTERSECT
+
+### native:buffer — Create Zones Around Features
+```
+run_processing("native:buffer", {
+  "INPUT": layer_id,
+  "DISTANCE": 100,        # buffer distance in layer CRS units
+  "SEGMENTS": 5,          # curve smoothness (5-10 is usually enough)
+  "END_CAP_STYLE": 0,     # 0=Round, 1=Flat, 2=Square
+  "JOIN_STYLE": 0,        # 0=Round, 1=Miter, 2=Bevel
+  "MITRE_LIMIT": 10,      # only for miter joins
+  "DISSOLVE": false       # true=merge overlapping buffers into one
+})
+```
+**Tip:** For "find features within X distance", buffer first then use extractbylocation.
+
+### native:intersection — Overlay (Keep Overlapping Parts)
+Extracts portions of features from INPUT that overlap with OVERLAY.
+Preserves attributes from BOTH layers.
+```
+run_processing("native:intersection", {
+  "INPUT": layer_a,
+  "OVERLAY": layer_b,
+  "OVERLAY_FIELDS_PREFIX": "b_"  # optional prefix for overlay fields
+})
+```
+
+### native:clip — Cut to Mask Extent
+Clips INPUT to the extent of OVERLAY. Fast, but only keeps what's inside the mask.
+```
+run_processing("native:clip", {"INPUT": layer, "OVERLAY": mask})
+```
+
+### native:dissolve — Merge Features by Attribute
+Combines features with the same field value into one geometry.
+```
+run_processing("native:dissolve", {
+  "INPUT": layer,
+  "FIELD": "category",    # optional — omit to dissolve ALL into one
+  "SEPARATE_DISJOINT": false
+})
+```
+
+### native:union — Combine Two Layers
+Merges two layers, splitting features at intersections. Output has all portions.
+```
+run_processing("native:union", {
+  "INPUT": layer_a,
+  "OVERLAY": layer_b,
+  "OVERLAY_FIELDS_PREFIX": "b_"
+})
+```
+
+### native:difference — Subtract Overlay from Input
+Keeps parts of INPUT that do NOT overlap with OVERLAY.
+```
+run_processing("native:difference", {"INPUT": layer, "OVERLAY": mask})
+```
+**For "outside" queries:** difference is often simpler than extractbylocation with PREDICATE=2.
+
+### native:symmetricaldifference — Non-Overlapping Parts Only
+Keeps areas that are in ONE layer but NOT both (like XOR).
+```
+run_processing("native:symmetricaldifference", {"INPUT": a, "OVERLAY": b})
+```
+
+### native:joinattributesbylocation — Spatial Join
+Attaches attributes from JOIN layer to INPUT based on spatial relationship.
+```
+run_processing("native:joinattributesbylocation", {
+  "INPUT": points,
+  "JOIN": zones,
+  "PREDICATE": 0,         # 0=intersect (same values as extractbylocation)
+  "METHOD": 1,            # 0=one-to-many, 1=first match, 2=largest overlap
+  "DISCARD_NONMATCHING": false,
+  "PREFIX": "zone_"
+})
+```
+
+### Spatial Workflow Patterns
+
+**"Find features within X distance of something"**
+1. Buffer the reference layer: `native:buffer` with DISTANCE=X
+2. Extract intersecting features: `native:extractbylocation` with PREDICATE=0
+
+**"Compare inside vs outside"**
+1. Define the zone (buffer, clip, or existing polygon)
+2. Inside: `extractbylocation` with PREDICATE=0 → count
+3. Outside: `extractbylocation` with PREDICATE=2 → count
+4. Sanity check: inside_count + outside_count == total_count
+
+**"Clip to study area then analyze"**
+1. Clip all layers to study area: `native:clip`
+2. Run analysis on clipped layers
+3. This ensures "outside" only means outside the zone of interest
+
+**"Spatial join attributes"**
+- Points + zones → `joinattributesbylocation` (attach zone name to each point)
+- Roads + districts → `joinattributesbylocation` (attach district to each road segment)
+"""
+
 _PROMPT_GEE = """
 ## Tools — Google Earth Engine
 
@@ -518,8 +643,8 @@ def build_system_prompt(include_gee=True):
     the original ``DEFAULT_SYSTEM_PROMPT``.
     """
     if include_gee:
-        return _PROMPT_CORE + _PROMPT_GEE
-    return _PROMPT_CORE
+        return _PROMPT_CORE + _PROMPT_SPATIAL + _PROMPT_GEE
+    return _PROMPT_CORE + _PROMPT_SPATIAL
 
 
 DEFAULT_SYSTEM_PROMPT = build_system_prompt(include_gee=True)
