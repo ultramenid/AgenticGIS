@@ -1399,7 +1399,7 @@ class ChatDock(QgsDockWidget):
         self._save_current_session(immediate=True)
         session = self._session_store.create_session(name)
         if self._toolkit is not None:
-            self._toolkit.clear_session_approvals()
+            self._toolkit.reset_agent_state()
         self._switch_to_session(session["id"], save_current=False)
 
     def _rename_current_session(self):
@@ -1625,7 +1625,7 @@ class ChatDock(QgsDockWidget):
         self._update_session_name_label()
         self._set_status("Ready", _SUCCESS, icon="✓")
         if self._toolkit is not None:
-            self._toolkit.clear_session_approvals()
+            self._toolkit.reset_agent_state()
         return True
 
     def _clear_transcript_widgets(self):

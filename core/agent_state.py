@@ -50,6 +50,13 @@ class AgentState:
         self.layers.clear()
         self.analysis_results.clear()
 
+    def reset(self):
+        """Reset all session-specific accumulators (for new chat session)."""
+        self.layers.clear()
+        self.processing_history.clear()
+        self.analysis_results.clear()
+        self.errors.clear()
+
     # ------------------------------------------------------------------ #
     # Processing history
     # ------------------------------------------------------------------ #

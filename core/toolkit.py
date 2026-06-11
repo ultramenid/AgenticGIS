@@ -1060,6 +1060,17 @@ class QgisToolkit:
         """Reset session-level tool-category approvals (e.g., when starting a new chat session)."""
         self._session_approved_tool_categories.clear()
 
+    def reset_agent_state(self):
+        """Reset the agent's workspace-state registry for a new chat session.
+
+        Clears all session-specific accumulators (layers, processing history,
+        analysis results, errors) and rescans the current project so the new
+        session starts with an accurate view of the workspace.
+        """
+        if self._agent_state is not None:
+            self._agent_state.reset()
+        self._scan_existing_layers()
+
     # ------------------------------------------------------------------ #
     # Cancellation helpers                                                #
     # ------------------------------------------------------------------ #
