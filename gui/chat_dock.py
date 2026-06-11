@@ -61,9 +61,9 @@ from .theme import (
     DOCK_SUCCESS as _SUCCESS,
     DOCK_DANGER as _DANGER,
 )
-_STREAM_COALESCE_INTERVAL_S = 0.030
-_STREAM_COALESCE_MAX_CHARS = 8192
-_STREAM_RENDER_INTERVAL_S = 0.050
+_STREAM_COALESCE_INTERVAL_S = 0.008   # ~120fps — tight enough to feel instant
+_STREAM_COALESCE_MAX_CHARS = 4096     # smaller burst ceiling for finer granularity
+_STREAM_RENDER_INTERVAL_S = 0.016     # ~60fps base — perceptually "realtime smooth"
 
 _MAX_EVENTS_BUFFERED = 1000
 _BUFFER_DROP_COUNT = 500
@@ -1864,6 +1864,7 @@ class ChatDock(QgsDockWidget):
 
                 if not self._streaming:
                     self._streaming = True
+                    self._set_status("Answering", _TEXT_3, spinning=True)
                 self._current_text += delta
                 if len(self._current_text) > _MAX_TURN_TEXT_CHARS:
                     if not self._current_text_truncated:
@@ -2086,22 +2087,19 @@ class ChatDock(QgsDockWidget):
     def _stream_render_interval(self) -> float:
         """Render budget for streamed text — longer answers re-render less often.
 
-        QLabel rich text re-parses the whole document on every setText, so a
-        frame's cost grows with the accumulated answer. Scaling the interval
-        keeps the main thread (shared with the QGIS canvas) responsive while
-        the perceived stream stays smooth.
+        QTextCursor incremental layout is O(δ), so the main thread cost stays
+        small even for long answers. We can keep a much tighter interval than
+        the old QLabel-based path. 16 ms is ~60fps; we scale gently so the QGIS
+        canvas stays smooth on massive outputs.
         """
         n = len(self._current_text)
-        # Frame budget: ~16ms @ 60fps.  Keep well under that at long answers
-        # so the QGIS canvas stays smooth.  50ms is the perceptual "instant"
-        # threshold for typed text; above ~100ms users feel lag.
         if n <= 2_000:
             return _STREAM_RENDER_INTERVAL_S
         if n <= 8_000:
-            return 0.06
+            return 0.024
         if n <= 24_000:
-            return 0.08
-        return 0.10
+            return 0.033
+        return 0.050
 
     def _schedule_stream_render(self, kind: str):
         """Throttle expensive rich-text rendering during stream floods."""
