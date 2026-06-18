@@ -1609,7 +1609,7 @@ class QgisToolkit:
     # ------------------------------------------------------------------ #
     # The catch-all: arbitrary PyQGIS execution                          #
     # ------------------------------------------------------------------ #
-    def run_pyqgis(self, code):
+    def run_pyqgis(self, code, background=False):
         """Execute arbitrary PyQGIS ``code`` and return captured output.
 
         The execution namespace pre-binds the names a PyQGIS user expects:
@@ -1621,9 +1621,19 @@ class QgisToolkit:
         it periodically can be interrupted by the Stop button. ``time.sleep``
         is wrapped to honour the same flag so a sleeping agent loop yields
         within a few hundred milliseconds.
+
+        ``background`` is a routing hint consumed by ``core.tools.dispatch``:
+        when true the call is run off the main thread (see
+        ``run_pyqgis_background``). It is accepted here so a direct call that
+        carries the key does not error — the threading decision belongs to the
+        dispatcher, so this method always runs on whatever thread it is called.
         """
         start = time.perf_counter()
-        log_event("toolkit.run_pyqgis.start", code_len=len(code) if isinstance(code, str) else None)
+        log_event(
+            "toolkit.run_pyqgis.start",
+            code_len=len(code) if isinstance(code, str) else None,
+            background=bool(background),
+        )
         with self._cancel.scope() as (event, owner):
             result = self._run_pyqgis_inner(code, event, owner)
             elapsed_ms = int((time.perf_counter() - start) * 1000)
@@ -1637,11 +1647,52 @@ class QgisToolkit:
                 result["slow_ms"] = elapsed_ms
                 result.setdefault("hint", (
                     f"This call took {elapsed_ms // 1000}s on the QGIS main thread. "
-                    "For field stats use get_layer_statistics; for summaries use analyze_layer."
+                    "For field stats use get_layer_statistics; for summaries use "
+                    "analyze_layer. For long downloads/network loops/heavy compute "
+                    "that do not touch the QGIS UI, call run_pyqgis with "
+                    "background=true so the UI stays responsive."
                 ))
             return result
 
-    def _run_pyqgis_inner(self, code, event, owner):
+    def run_pyqgis_background(self, executor, code):
+        """Run ``run_pyqgis`` code off the QGIS main thread via a ``QgsTask``.
+
+        For network / IO / compute-heavy code (e.g. downloading many layers
+        from an ArcGIS REST service) that does **not** touch the QGIS UI,
+        canvas, or project. Those objects are not thread-safe and must stay on
+        the main thread — load downloaded files afterwards with ``add_layer``.
+        The Stop button cancels the run via the shared cancellation token, and
+        event pumping is disabled (``processEvents`` only runs on the main
+        thread).
+        """
+        self._ensure_background_task_state()
+        start = time.perf_counter()
+        log_event(
+            "toolkit.run_pyqgis.start",
+            code_len=len(code) if isinstance(code, str) else None,
+            background=True,
+        )
+
+        def worker(_task):
+            with self._cancel.scope() as (event, owner):
+                return self._run_pyqgis_inner(code, event, owner, pump_events=False)
+
+        result = self._run_qgs_task(
+            executor, "AgenticGIS run_pyqgis (background)", worker
+        )
+        elapsed_ms = int((time.perf_counter() - start) * 1000)
+        log_event(
+            "toolkit.run_pyqgis.end",
+            elapsed_ms=elapsed_ms,
+            background=True,
+            ok=bool(result.get("ok")) if isinstance(result, dict) else None,
+            cancelled=bool(result.get("cancelled")) if isinstance(result, dict) else False,
+        )
+        if isinstance(result, dict):
+            result.setdefault("background", True)
+        return result
+
+    def _run_pyqgis_inner(self, code, event, owner, pump_events=True):
         import qgis.core as qgis_core
         import qgis.gui as qgis_gui
 
@@ -1709,7 +1760,7 @@ class QgisToolkit:
             for i, feature in enumerate(layer.getFeatures(req)):
                 if _cancel_check():
                     break
-                if i % EVENT_PUMP_INTERVAL == 0:
+                if pump_events and i % EVENT_PUMP_INTERVAL == 0:
                     QCoreApplication.processEvents()
                 yield feature
 
@@ -1794,14 +1845,20 @@ class QgisToolkit:
         ns["get_layer"] = _get_layer
 
         # Explicit progress helper that prints and pumps events so the UI
-        # stays responsive during long-running agent code.
+        # stays responsive during long-running agent code. In background mode
+        # the code runs off the main thread, so event pumping is skipped
+        # (``processEvents`` is a main-thread-only operation).
         def _progress(msg):
             print(msg)
-            QCoreApplication.processEvents()
+            if pump_events:
+                QCoreApplication.processEvents()
 
         ns["_progress"] = _progress
 
-        out, err = _EventPumpingWriter(io.StringIO()), _EventPumpingWriter(io.StringIO())
+        if pump_events:
+            out, err = _EventPumpingWriter(io.StringIO()), _EventPumpingWriter(io.StringIO())
+        else:
+            out, err = io.StringIO(), io.StringIO()
         result = {"ok": True, "stdout": "", "stderr": "", "result": None, "error": None}
         if not isinstance(code, str) or not code.strip():
             return {"ok": False, "error": "run_pyqgis: code must be a non-empty string", "stdout": "", "stderr": ""}
@@ -1862,7 +1919,9 @@ class QgisToolkit:
             result["stdout"] = out.getvalue()
             result["stderr"] = err.getvalue()
         # only refresh if the agent's code may have touched the canvas.
-        if self._canvas_dirty:
+        # Canvas access is main-thread-only — never touch it from the
+        # background path (background code must not mutate the canvas anyway).
+        if pump_events and self._canvas_dirty:
             try:
                 self.iface.mapCanvas().refresh()
             except Exception:  # nosec B110
@@ -3552,7 +3611,7 @@ class QgisToolkit:
             if self.frame_labels and self.gif_path and os.path.exists(self.gif_path):
                 try:
                     self._burn_labels_into_gif()
-                except Exception:  # noqa: BLE001
+                except Exception:  # noqa: BLE001  # nosec B110
                     pass  # Labels are optional; don't fail the whole operation
 
             self.setProgress(98)

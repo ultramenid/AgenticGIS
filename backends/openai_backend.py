@@ -283,9 +283,19 @@ applies instead and inspection is skipped.)
 - You may load new files, open databases, and read paths the user
   names (or that you discovered in a previous turn) when the
   analysis calls for it. The plugin does not gate external access.
-- Never run shell commands. Do not make ad-hoc network calls from run_pyqgis;
-  the only sanctioned network path is web_fetch. PyQGIS, processing
-  algorithms, and the dedicated tools cover the rest.
+- Never run shell commands. For a single URL prefer web_fetch. For multi-step
+  network work (e.g. downloading many layers from an ArcGIS REST service),
+  call run_pyqgis with background=true so the download runs off the main
+  thread and QGIS stays responsive; then load the saved files with add_layer.
+  Never do a long network download in a foreground (background=false)
+  run_pyqgis — it freezes the QGIS UI for the whole download.
+- Set background=true for ANY long-running run_pyqgis that does not touch the
+  QGIS project/canvas/UI — not just downloads. This includes converting or
+  reading/writing large files (e.g. a big GeoJSON → Shapefile with
+  QgsVectorFileWriter), zipping, and heavy pure-Python compute. Do the heavy
+  work in a background call, then add results to the project with add_layer in
+  a separate (foreground) step. A foreground call that reads/writes hundreds of
+  MB freezes the QGIS UI the same way a download does.
 - For large layers, prefer analyze_layer, get_layer_statistics,
   create_chart, get_layer_fields, get_layer_summary, _sample_features,
   and bounded _iterate_features(..., limit=...). Do not use list(layer.getFeatures()),
@@ -295,8 +305,14 @@ applies instead and inspection is skipped.)
 
 ## Performance
 
-run_pyqgis runs on the QGIS main thread and blocks the UI for its entire
-duration. On layers with >10k features a naive loop takes 5–30 seconds.
+run_pyqgis code that touches the QGIS project/canvas/UI runs on the main
+thread and blocks the UI for its entire duration. Code that does NOT touch
+the project/canvas/UI (downloads, file conversions, Processing over files,
+heavy pure-Python compute) is offloaded to a worker thread automatically so
+the UI stays responsive; passing background=true requests this explicitly.
+Keep heavy work and project/UI updates in separate run_pyqgis calls so the
+heavy part can offload. On layers with >10k features a naive loop takes 5–30
+seconds.
 Avoid it for data analysis:
 
 - NEVER use list(layer.getFeatures()) or a bare for-loop over all features

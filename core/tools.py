@@ -29,12 +29,26 @@ TOOL_SPECS = [
             "`result` is a layer it is kept in memory and its id is returned "
             "for use with add_layer or run_processing (or call "
             "_register_layer(layer) for extra layers). "
-            "External file/URL/database access requires user permission."
+            "External file/URL/database access requires user permission. "
+            "Set background=true for long downloads, network loops, or heavy "
+            "compute that do NOT touch the QGIS UI/canvas/project — the code "
+            "then runs off the main thread so QGIS stays responsive. In "
+            "background mode do not call iface, mapCanvas, or add layers to the "
+            "project; download/compute there, then load results with add_layer."
         ),
         "input_schema": {
             "type": "object",
             "properties": {
-                "code": {"type": "string", "description": "PyQGIS code to execute."}
+                "code": {"type": "string", "description": "PyQGIS code to execute."},
+                "background": {
+                    "type": "boolean",
+                    "description": (
+                        "Run off the main thread in a QgsTask (keeps QGIS "
+                        "responsive). Use for downloads/network loops/heavy "
+                        "compute that do not touch the QGIS UI, canvas, or "
+                        "project. Default false (runs on the main thread)."
+                    ),
+                },
             },
             "required": ["code"],
         },
@@ -753,6 +767,90 @@ def _log_dispatch_end(tool, path, start, result=None):
     )
 
 
+# run_pyqgis is BACKGROUND-BY-DEFAULT: code runs on a QgsTask worker thread unless
+# it touches main-thread-only QGIS state (see _PYQGIS_MAIN_THREAD_MARKERS). This
+# inverts the old allowlist (which only offloaded a hardcoded set of "heavy"
+# idioms and froze the UI on any idiom it had not seen yet). Now any long
+# operation — a download, a file conversion, a Processing run over files, a big
+# pure-Python loop — offloads automatically, even ones not enumerated here.
+#
+# The network/heavy marker lists below no longer drive the decision; they are kept
+# only to classify *why* a given snippet was offloaded in the dev log, which makes
+# diagnosing future freezes/crashes far easier.
+_PYQGIS_NETWORK_MARKERS = (
+    "urllib.request", "urlopen", "urlretrieve",
+    "requests.", "http.client", "httpx", "httplib", "urllib3",
+    "socket.socket", "ftplib", "QgsNetworkAccessManager",
+    "QgsBlockingNetworkRequest", "smtplib",
+)
+_PYQGIS_HEAVY_MARKERS = (
+    "QgsVectorFileWriter", "writeAsVectorFormat",
+    "shutil.", "zipfile", "tarfile",
+    "ogr2ogr", "gdal.Translate", "gdal.Warp", "gdal.Rasterize",
+    "processing.run",
+)
+
+# Substrings that mean the code touches main-thread-only QGIS state — the GUI,
+# the map canvas, the message bar, print layouts, or the project's layer registry.
+# These are NOT safe to run on a worker thread: doing so can crash QGIS, not just
+# hang it. Code matching any of these stays on the main thread regardless of how
+# heavy it is (the agent can split the heavy download/convert step from the UI
+# step). Project *layers* are not thread-safe to read/write from a worker, hence
+# the registry/editing/toolkit-helper markers. Keep this list conservative and
+# broad: a false negative here (an unlisted main-thread API) is a potential crash,
+# whereas a false positive only means a bit of heavy code stays foreground.
+_PYQGIS_MAIN_THREAD_MARKERS = (
+    # GUI widgets / dialogs
+    "iface", "QMessageBox", "QDialog", "QInputDialog", "QFileDialog",
+    "QProgressDialog", "QColorDialog", "QFontDialog",
+    # map canvas, rubber bands, map tools, rendering
+    "mapCanvas", "QgsRubberBand", "QgsVertexMarker", "QgsHighlight",
+    "QgsMapTool", "QgsMapRendererJob", "QgsMapSettings", "triggerRepaint",
+    # message bar / status
+    "messageBar", "pushMessage",
+    # layer tree
+    "layerTreeRoot", "layerTreeView",
+    # print / report layouts
+    "QgsLayout", "QgsPrintLayout", "QgsLayoutExporter", "layoutManager",
+    # project layer registry (reading/mutating it off-thread is unsafe)
+    "addMapLayer", "removeMapLayer", "setActiveLayer",
+    "addVectorLayer", "addRasterLayer",
+    "mapLayer(", "mapLayersByName",
+    # layer editing buffers (tied to the project layer they edit)
+    "startEditing", "commitChanges", "rollBack",
+    # toolkit helpers that read project layers on the main thread
+    "get_layer", "_iterate_features", "_sample_features", "_make_layer_cache",
+    "_register_layer",
+)
+
+
+def _should_auto_background_pyqgis(code):
+    """True when run_pyqgis ``code`` should run on a worker thread.
+
+    Background-by-default: anything that does NOT touch main-thread-only QGIS
+    state (UI, canvas, print layouts, project layers) is offloaded so a long
+    operation the model forgot to mark ``background=true`` cannot freeze the QGIS
+    UI — including heavy idioms not individually enumerated. Code that touches
+    main-thread state stays foreground because running it on a worker can crash
+    QGIS.
+    """
+    if not isinstance(code, str) or not code:
+        return False
+    return not any(marker in code for marker in _PYQGIS_MAIN_THREAD_MARKERS)
+
+
+def _pyqgis_background_reason(code):
+    """Human-readable classification of why ``code`` was offloaded — for the dev
+    log only. Falls back to a generic label so unrecognised heavy idioms still
+    get a sensible reason."""
+    if any(m in code for m in _PYQGIS_NETWORK_MARKERS):
+        return "network I/O detected; routed off main thread"
+    if any(m in code for m in _PYQGIS_HEAVY_MARKERS):
+        return "heavy local IO / processing detected; routed off main thread"
+    return ("no main-thread (UI/canvas/project) access detected; "
+            "routed off main thread by default")
+
+
 def dispatch(toolkit, executor, name, arguments, should_stop=None):
     """Run tool ``name`` with ``arguments`` against ``toolkit`` on the main
     thread (via ``executor``) and return its result. Raises ``KeyError`` for
@@ -767,6 +865,23 @@ def dispatch(toolkit, executor, name, arguments, should_stop=None):
         if _dispatch_cancelled(should_stop):
             _log_dispatch_end(name, "pre_cancelled", start, _cancelled_result())
             return _cancelled_result()
+
+        # Truncated/corrupt tool-call JSON arrives as {"_parse_error": ...}
+        # (see backends/openai_http.py). Calling the method with that key as a
+        # kwarg raises TypeError; instead hand the parse error straight back so
+        # the model knows to re-emit the call.
+        if "_parse_error" in args:
+            result = {
+                "ok": False,
+                "error": str(args["_parse_error"]),
+                "hint": (
+                    "Your previous tool call's arguments were not valid JSON "
+                    "(likely truncated). Re-issue the call with complete, valid "
+                    "JSON arguments."
+                ),
+            }
+            _log_dispatch_end(name, "parse_error", start, result)
+            return result
 
         if name == "ask_user":
             if _dispatch_cancelled(should_stop):
@@ -783,6 +898,35 @@ def dispatch(toolkit, executor, name, arguments, should_stop=None):
             if denied is not None:
                 _log_dispatch_end(name, "denied", start, denied)
                 return denied
+
+        if name == "run_pyqgis" and hasattr(toolkit, "run_pyqgis_background"):
+            wants_bg = bool(args.get("background"))
+            auto_bg = not wants_bg and _should_auto_background_pyqgis(args.get("code"))
+            if wants_bg or auto_bg:
+                if _dispatch_cancelled(should_stop):
+                    return _cancelled_result()
+                if auto_bg:
+                    log_event(
+                        "tool.dispatch.auto_background",
+                        tool=name,
+                        reason=_pyqgis_background_reason(args.get("code") or ""),
+                    )
+                result = toolkit.run_pyqgis_background(executor, args.get("code"))
+                if auto_bg and isinstance(result, dict):
+                    result.setdefault(
+                        "hint",
+                        "This code did not touch the QGIS project/canvas/UI so it "
+                        "was run off the main thread automatically to keep QGIS "
+                        "responsive. Pass background=true explicitly for "
+                        "downloads, conversions, and other long operations.",
+                    )
+                _log_dispatch_end(
+                    name,
+                    "pyqgis_background_auto" if auto_bg else "pyqgis_background",
+                    start,
+                    result,
+                )
+                return result
 
         if name == "run_processing" and hasattr(toolkit, "run_processing_background"):
             if _dispatch_cancelled(should_stop):
