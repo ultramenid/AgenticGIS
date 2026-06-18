@@ -176,14 +176,14 @@ def run_processing_algorithm_task(
                     for msg in feedback.errors():
                         if msg:
                             errors.append(str(msg))
-                except Exception:  # noqa: BLE001
+                except Exception:  # noqa: BLE001  # nosec B110
                     pass
             if task is not None and hasattr(task, "exception"):
                 try:
                     exc = task.exception()
                     if exc is not None:
                         errors.append(f"{type(exc).__name__}: {exc}")
-                except Exception:  # noqa: BLE001
+                except Exception:  # noqa: BLE001  # nosec B110
                     pass
             error_msg = (
                 "; ".join(errors)

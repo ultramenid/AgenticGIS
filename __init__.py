@@ -23,10 +23,10 @@ def classFactory(iface):  # noqa: N802 (QGIS API naming)
             if level is None:
                 level = getattr(getattr(Qgis, "MessageLevel", Qgis), "Critical", 2)
             QgsMessageLog.logMessage(msg, "AgenticGIS", level)
-        except Exception:
+        except Exception:  # nosec B110
             pass
         try:
             print(msg)  # noqa: T201
-        except Exception:
+        except Exception:  # nosec B110
             pass
         raise
