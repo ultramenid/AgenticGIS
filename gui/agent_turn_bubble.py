@@ -7,7 +7,7 @@ Tool calls group by name with braille spinners → ✓/! on completion.
 import html as _html
 import json
 
-from qgis.PyQt.QtCore import Qt, QElapsedTimer, QTimer
+from qgis.PyQt.QtCore import Qt, QElapsedTimer, QSize, QTimer
 from qgis.PyQt.QtGui import QFont
 from qgis.PyQt.QtWidgets import (
     QFrame, QHBoxLayout, QLabel,
@@ -456,6 +456,21 @@ class AgentTurnBubble(QFrame):
         self.text_lbl.setContentsMargins(12, 6, 12, 0)
         self._outer.addWidget(self.text_lbl)
 
+        # Inline visuals (charts/stats/gifs) — rendered inside this turn,
+        # below the answer text, instead of in a separate transcript bubble.
+        self._visuals_area = QWidget(self)
+        self._visuals_area.setVisible(False)
+        self._visuals_area.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        self._visuals_area.setStyleSheet("background:transparent;")
+        self._visuals_layout = QVBoxLayout(self._visuals_area)
+        self._visuals_layout.setContentsMargins(12, 6, 12, 4)
+        self._visuals_layout.setSpacing(6)
+        self._outer.addWidget(self._visuals_area)
+
+        # Absorb any surplus height at the bottom so content stays top-aligned
+        # instead of floating in the vertical centre with gaps between rows.
+        self._outer.addStretch(1)
+
         self._progress_timer = QTimer(self)
         self._progress_timer.setInterval(180)
         self._progress_timer.timeout.connect(self._render_progress_text)
@@ -473,15 +488,24 @@ class AgentTurnBubble(QFrame):
 
     def _refresh_text_geometry(self) -> None:
         """Propagate the text view's size into the transcript layout."""
+        # Compute height against the *intended* width. setFixedWidth only takes
+        # effect on the next event-loop pass, so self.text_lbl.width() may still
+        # be a stale (often too-narrow) value — feeding that to heightForWidth
+        # inflates the wrapped height and leaves the bubble much taller than its
+        # content (the "weird height / empty space" symptom).
+        target_w = self.text_lbl.width()
         if self._outer is not None and self.width() > 0:
             margins = self._outer.contentsMargins()
             label_w = self.width() - margins.left() - margins.right()
             if label_w > 0:
                 self.text_lbl.setFixedWidth(label_w)
+                target_w = label_w
 
-        label_h = self.text_lbl.heightForWidth(self.text_lbl.width())
+        label_h = self.text_lbl.heightForWidth(target_w) if target_w > 0 else -1
         if label_h > 0:
             self.text_lbl.setMinimumHeight(label_h)
+        else:
+            self.text_lbl.setMinimumHeight(0)
 
         self.text_lbl.updateGeometry()
         if self._outer is not None:
@@ -527,6 +551,13 @@ class AgentTurnBubble(QFrame):
         self._files_layout.addWidget(widget)
         self._files_area.setVisible(True)
         self.updateGeometry()
+
+    def add_visual(self, widget) -> None:
+        """Embed a chart/stats/gif widget inside this turn (below the answer)."""
+        self._visuals_layout.addWidget(widget)
+        self._visuals_area.setVisible(True)
+        self.updateGeometry()
+        self._refresh_text_geometry()
 
     def set_streaming_text(self, text: str) -> None:
         was_progress = self._progress_timer.isActive()
@@ -706,6 +737,7 @@ class AgentTurnBubble(QFrame):
         return (
             bool(self._groups) or bool(self._stream_text) or bool(self._progress_text)
             or self._ticker.isVisible() or self._files_area.isVisible()
+            or self._visuals_area.isVisible()
         )
 
     def _reset_format_cache(self) -> None:
@@ -796,30 +828,56 @@ class AgentTurnBubble(QFrame):
     def hasHeightForWidth(self):
         return True
 
+    def _content_height(self, width):
+        """Tight height the turn needs at ``width`` — sum of the visible rows.
+
+        Drives heightForWidth, sizeHint and minimumSizeHint so the transcript
+        layout never falls back to the word-wrapping QLabel's unreliable (often
+        inflated) sizeHint, which is what left big empty gaps in the bubble.
+        Returns -1 when the width is unusable.
+        """
+        if not self._outer:
+            return -1
+        m = self._outer.contentsMargins()
+        inner_w = width - m.left() - m.right()
+        if inner_w <= 0:
+            return -1
+        lh = self.text_lbl.heightForWidth(inner_w)
+        if lh < 0:
+            lh = 0
+
+        def _area_h(area):
+            return area.sizeHint().height() if area.isVisible() else 0
+
+        tools_h = _area_h(self._tools_area)
+        files_h = _area_h(self._files_area)
+        visuals_h = _area_h(self._visuals_area)
+        ticker_h = _area_h(self._ticker)
+        decision_h = (
+            self._user_decision_lbl.sizeHint().height()
+            if self._user_decision_lbl is not None and self._user_decision_lbl.isVisible()
+            else 0
+        )
+        return (
+            lh + tools_h + files_h + visuals_h + ticker_h + decision_h
+            + m.top() + m.bottom() + 8
+        )
+
     def heightForWidth(self, width):
-        if self._outer:
-            m = self._outer.contentsMargins()
-            inner_w = width - m.left() - m.right()
-            if inner_w > 0:
-                lh = self.text_lbl.heightForWidth(inner_w)
-                tools_h = (
-                    self._tools_area.sizeHint().height()
-                    if self._tools_area.isVisible()
-                    else 0
-                )
-                files_h = (
-                    self._files_area.sizeHint().height()
-                    if self._files_area.isVisible()
-                    else 0
-                )
-                ticker_h = (
-                    self._ticker.sizeHint().height()
-                    if self._ticker.isVisible()
-                    else 0
-                )
-                if lh >= 0:
-                    return lh + tools_h + files_h + ticker_h + m.top() + m.bottom() + 8
-        return -1
+        return self._content_height(width)
+
+    def sizeHint(self):
+        base = super().sizeHint()
+        w = self.width() if self.width() > 0 else base.width()
+        h = self._content_height(w)
+        if h > 0:
+            return QSize(base.width(), h)
+        return base
+
+    def minimumSizeHint(self):
+        # Match sizeHint so the layout can't reserve a taller-than-content slot
+        # for the bubble (the source of the empty space between rows).
+        return self.sizeHint()
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -828,3 +886,7 @@ class AgentTurnBubble(QFrame):
             w = event.size().width() - m.left() - m.right()
             if w > 0:
                 self.text_lbl.setFixedWidth(w)
+        # Width changed — recompute the text height and re-publish geometry so a
+        # stale (too-tall) minimum height from an earlier narrow width is reset.
+        if not self._geo_timer.isActive():
+            self._geo_timer.start()

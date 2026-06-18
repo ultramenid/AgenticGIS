@@ -778,7 +778,8 @@ class ChatDock(QgsDockWidget):
         has_thinking = bool(event.get("thinking"))
         has_tools = bool(event.get("tools"))
         has_files = bool(event.get("files"))
-        if has_text or has_thinking or has_tools or has_files:
+        has_visuals = bool(event.get("visuals"))
+        if has_text or has_thinking or has_tools or has_files or has_visuals:
             self._transcript_events.append(dict(event))
             self._save_current_session()
         self._current_turn_event = None
@@ -813,17 +814,30 @@ class ChatDock(QgsDockWidget):
         self._add_widget(container)
         return turn
 
+    def _add_visual(self, kind, widget, data):
+        """Embed a chart/stats/gif inside the current agent turn bubble.
+
+        Recorded inside the turn event (like download cards) so a restored
+        session keeps the visual in the same bubble instead of spawning a new
+        standalone one.
+        """
+        turn = self._get_or_create_agent_turn()
+        turn.add_visual(widget)
+        self._maybe_scroll_to_bottom()
+        turn_event = self._ensure_current_turn_event()
+        if turn_event is not None:
+            turn_event.setdefault("visuals", []).append(
+                {"kind": kind, "data": dict(data or {})}
+            )
+
     def _add_chart(self, chart_data):
-        self._add_widget(ChartWidget(chart_data))
-        self._record_transcript_event({"type": "chart", "data": chart_data})
+        self._add_visual("chart", ChartWidget(chart_data), chart_data)
 
     def _add_stats(self, stats_data):
-        self._add_widget(StatsWidget(stats_data))
-        self._record_transcript_event({"type": "stats", "data": stats_data})
+        self._add_visual("stats", StatsWidget(stats_data), stats_data)
 
     def _add_gif(self, data):
-        self._add_widget(GifWidget(data))
-        self._record_transcript_event({"type": "gif", "data": data})
+        self._add_visual("gif", GifWidget(data), data)
 
     def _wrap_with_bubble_margins(self, widget):
         """Wrap an inline widget with the same side margins as agent turn
@@ -929,7 +943,22 @@ class ChatDock(QgsDockWidget):
         text = event.get("text", "")
         if text:
             turn.finalize_text(text)
+        for visual in event.get("visuals") or []:
+            widget = self._build_visual_widget(
+                visual.get("kind"), visual.get("data") or {}
+            )
+            if widget is not None:
+                turn.add_visual(widget)
         turn.finalize()
+
+    def _build_visual_widget(self, kind, data):
+        if kind == "chart":
+            return ChartWidget(data)
+        if kind == "stats":
+            return StatsWidget(data)
+        if kind == "gif":
+            return GifWidget(data)
+        return None
 
     # -- Typing indicator ----------------------------------------------- #
     def _show_typing(self):
@@ -1590,7 +1619,17 @@ class ChatDock(QgsDockWidget):
         if not self._active_session_id:
             return
         if immediate:
+            # Flush any pending scheduled save first, then write current state
+            # directly so the saved snapshot is always fresh (not a stale snapshot
+            # from the last schedule_save call, which may predate the latest
+            # session_id or history update).
             self._session_store.flush_save()
+            self._session_store.save_session(
+                self._active_session_id,
+                backend_history=list(self._history),
+                transcript_events=list(self._transcript_events),
+                backend_state=self._export_backend_state(),
+            )
         else:
             self._session_store.schedule_save(
                 self._active_session_id,
@@ -1667,15 +1706,6 @@ class ChatDock(QgsDockWidget):
                 self.transcript_widget.show()
         finally:
             self.transcript_widget.setUpdatesEnabled(True)
-
-    def _clear(self):
-        self._stop_active_worker()
-        self._history = []
-        self._history_generation += 1  # invalidate any pending pre-compaction
-        self._transcript_events = []
-        self._current_turn_event = None
-        self._clear_live_ui()
-        self._save_current_session(immediate=True)
 
     def _clear_live_ui(self):
         worker_was_active = self._worker is not None
@@ -1784,6 +1814,7 @@ class ChatDock(QgsDockWidget):
             trace_id=trace_id,
             trace_started_at=trace_started_at,
         )
+        self._worker._launched_for_session = self._active_session_id
         self._worker.event.connect(self._on_event)
         self._worker.finished_history.connect(
             lambda history, worker=self._worker: self._on_finished(history, worker)
@@ -2172,6 +2203,12 @@ class ChatDock(QgsDockWidget):
 
     def _on_finished(self, history, worker=None):
         if worker is not None and self._worker is not None and worker is not self._worker:
+            return
+        # Discard result if the session was switched while this worker was running.
+        # Without this guard the queued finished_history signal fires AFTER
+        # _switch_to_session resets _active_session_id, saving old state into the
+        # new session (which then restores an old --resume session_id on next send).
+        if worker is not None and getattr(worker, "_launched_for_session", None) != self._active_session_id:
             return
         self._history = history if history is not None else self._history
         self._save_current_session()
