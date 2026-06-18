@@ -1158,6 +1158,9 @@ class CliToolBackend(AgentBackend):
         self._lock = threading.Lock()
         self._proc = None
         self._session_id = None
+        # Incremented by import_session_state so dying worker threads can detect
+        # that the session was reset and skip updating _session_id.
+        self._state_generation = 0
 
     @property
     def label(self):
@@ -1180,6 +1183,7 @@ class CliToolBackend(AgentBackend):
     def import_session_state(self, state):
         with self._lock:
             self._session_id = (state or {}).get("session_id") or None
+            self._state_generation += 1
 
     def _continuation_session_id(self, adapter):
         if not adapter.supports_continuation:
@@ -1187,10 +1191,14 @@ class CliToolBackend(AgentBackend):
         with self._lock:
             return self._session_id
 
-    def _remember_session_id(self, adapter, session_id):
+    def _remember_session_id(self, adapter, session_id, generation=None):
         if not adapter.supports_continuation or not session_id:
             return
         with self._lock:
+            # If a generation token is provided, only update when no
+            # import_session_state reset happened since this run started.
+            if generation is not None and self._state_generation != generation:
+                return
             self._session_id = session_id
 
     def cancel_current_request(self):
@@ -1510,6 +1518,8 @@ class CliToolBackend(AgentBackend):
         new_messages = [user_message]
         max_iters = self.config.get("max_iterations")
         adapter = get_adapter(self.tool)
+        with self._lock:
+            generation = self._state_generation
 
         for _ in agent_iteration_steps(max_iters):
             if should_stop():
@@ -1521,9 +1531,9 @@ class CliToolBackend(AgentBackend):
                 prompt = self._continuation_prompt(new_messages)
             else:
                 prompt = self._conversation_prompt(messages)
-            stream = self._run_stream(adapter, prompt, emit, should_stop)
+            stream = self._run_stream(adapter, prompt, emit, should_stop, generation)
             self._remember_session_id(
-                adapter, getattr(stream, "session_id", "")
+                adapter, getattr(stream, "session_id", ""), generation
             )
 
             # Support both the new list-based field and legacy single field (for tests).
@@ -1598,7 +1608,7 @@ class CliToolBackend(AgentBackend):
     # Streaming I/O — single-threaded select() loop, robust JSONL parser #
     # ------------------------------------------------------------------ #
 
-    def _collect_into_stream(self, proc, stream, should_stop):
+    def _collect_into_stream(self, proc, stream, should_stop, generation=None):
         """Read both pipes via ``select`` and feed lines into ``stream``."""
         stdout = proc.stdout
         stderr = proc.stderr
@@ -1635,13 +1645,13 @@ class CliToolBackend(AgentBackend):
         if poller_stopped:
             self._terminate_process_group(proc, kill=True)
 
-        self._remember_session_id(stream.adapter, stream.session_id)
+        self._remember_session_id(stream.adapter, stream.session_id, generation)
 
         # Pick up any leftover partial line.
         if out_buf.strip():
             print(f"[AGENTICGIS-DEBUG] Leftover buffer: {out_buf[:200]!r}")
             stream.feed_line(out_buf)
-            self._remember_session_id(stream.adapter, stream.session_id)
+            self._remember_session_id(stream.adapter, stream.session_id, generation)
 
         if err_acc and not poller_stopped:
             try:
@@ -1653,7 +1663,7 @@ class CliToolBackend(AgentBackend):
                 if joined:
                     stream.emit(AgentEvent(EventType.ERROR, {"error": joined[:2000]}))
 
-    def _run_stream(self, adapter, prompt, emit, should_stop):
+    def _run_stream(self, adapter, prompt, emit, should_stop, generation=None):  # noqa: PLR0913
         """Build the CLI command, spawn the subprocess, run the
         select()-driven reader, and return the populated NormalizingStream."""
         session_id = self._continuation_session_id(adapter)
@@ -1713,7 +1723,7 @@ class CliToolBackend(AgentBackend):
                 emit,
                 process_id=getattr(self._proc, "pid", None),
             )
-            self._collect_into_stream(self._proc, stream, should_stop)
+            self._collect_into_stream(self._proc, stream, should_stop, generation)
         finally:
             self._finalize_process(self._proc)
         return stream
