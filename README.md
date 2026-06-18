@@ -39,7 +39,7 @@ QGIS session
  │    • API key    → Anthropic / OpenAI / Groq / Gemini / DeepSeek / Ollama / …
  │    • Custom URL → any OpenAI- or Anthropic-compatible endpoint
  │    • CLI Agent  → installed local agent CLIs such as Codex, Gemini, OpenCode
- └─ Tools (every call runs on the QGIS main thread)
+ └─ Tools (heavy work runs on a worker thread; project/canvas/UI calls stay on the main thread)
       run_pyqgis         arbitrary PyQGIS — layers, canvas, plugins, console
       run_processing     GDAL / GRASS / SAGA / native algorithms
       gee_*              Google Earth Engine imagery & indices
@@ -49,8 +49,11 @@ QGIS session
 
 `run_pyqgis` is the catch-all — it executes arbitrary Python inside the live
 QGIS session, giving the agent access to everything QGIS and every installed
-plugin can do. Both transports are built on the Python standard library, so
-there is nothing to install and it works on any QGIS Python.
+plugin can do. Long-running code (downloads, file conversions, Processing over
+files, heavy compute) runs on a background worker thread so QGIS stays
+responsive; code that touches the project, map canvas, or UI runs on the main
+thread. Both transports are built on the Python standard library, so there is
+nothing to install and it works on any QGIS Python.
 
 ## Connection modes (Settings → Connect via)
 
@@ -239,6 +242,26 @@ source files.
 
 
 
+## Limitations — Google Earth Engine
+
+AgenticGIS drives Earth Engine through the **ee_plugin** (a separate QGIS
+plugin), not the native `earthengine` Python API. That keeps the install
+dependency-free, but it inherits ee_plugin's behaviour and adds real
+constraints you should understand before working with satellite imagery:
+
+- **GEE layers are remote WMS tiles**, not local rasters — every pan/zoom is a
+  network round-trip (see below).
+- **`vis_params scale` is silently ignored** — resolution must be controlled in
+  the Earth Engine expression itself.
+- **GeoTIFF downloads are size-capped** at Earth Engine's 50 MB synchronous
+  limit, so large/high-resolution areas may need a coarser scale or fall back to
+  tiles.
+- **Authentication is entirely ee_plugin's job** — AgenticGIS never logs you in.
+
+AgenticGIS calls `gee_status` before any Earth Engine operation and refuses to
+run GEE work until ee_plugin reports installed **and** authenticated, returning
+actionable guidance instead of crashing.
+
 ### Tile performance (WMS, not local)
 
 ee_plugin renders every GEE layer as **on-demand WMS tiles** — each zoom or pan
@@ -278,12 +301,6 @@ AgenticGIS does not authenticate Earth Engine itself. You must install and
 authenticate the **Google Earth Engine** QGIS plugin separately (see
 [Requirements](#requirements) above).
 
-
-## Limitations — Google Earth Engine
-
-AgenticGIS drives Earth Engine through the **ee_plugin** (a separate QGIS plugin),
-not the native `earthengine` API. This introduces constraints you should know
-before working with satellite imagery.
 
 ## Limitations — General
 
