@@ -14,7 +14,6 @@ import os
 import secrets
 import threading
 import time
-from contextlib import contextmanager
 
 _LOCK = threading.Lock()
 _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -124,23 +123,3 @@ def log_ttft_event(stage, trace_id, started_at):
     except Exception:
         # Instrumentation must never affect QGIS/plugin behavior.
         return
-
-
-@contextmanager
-def timed(event, **fields):
-    start = time.perf_counter()
-    log_event(f"{event}.start", **fields)
-    try:
-        yield
-    except BaseException as exc:
-        elapsed_ms = int((time.perf_counter() - start) * 1000)
-        log_event(
-            f"{event}.error",
-            elapsed_ms=elapsed_ms,
-            error_type=type(exc).__name__,
-            **fields,
-        )
-        raise
-    else:
-        elapsed_ms = int((time.perf_counter() - start) * 1000)
-        log_event(f"{event}.end", elapsed_ms=elapsed_ms, **fields)

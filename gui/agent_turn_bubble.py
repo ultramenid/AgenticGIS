@@ -39,6 +39,11 @@ from .theme import (
 
 _SPINNER_FRAMES = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
 
+# Past this many seconds of an unchanged "Thinking..." label, the spinner
+# looks identical whether the agent is working or the process died/hung —
+# flip it to a visible warning so a stuck session doesn't read as normal.
+_STALL_HINT_SECONDS = 45
+
 
 class ReasoningTicker(QWidget):
     """Single-line streaming reasoning display. Shows last 100 chars of LLM thinking."""
@@ -793,11 +798,22 @@ class AgentTurnBubble(QFrame):
         frame = _SPINNER_FRAMES[self._progress_phase % len(_SPINNER_FRAMES)]
         tail = "." * (self._progress_phase % 4)
         self._progress_phase += 1
+        stalled = (
+            self._progress_elapsed.isValid()
+            and self._progress_elapsed.elapsed() >= _STALL_HINT_SECONDS * 1000
+        )
+        spinner_color = _WARN if stalled else _TEXT_3
         prefix = (
-            f'<span style="color:{_TEXT_3};font-weight:400;">{frame}</span>'
+            f'<span style="color:{spinner_color};font-weight:400;">{frame}</span>'
             f'<span style="color:{_TEXT_4};">&nbsp;&nbsp;</span>'
         )
         body = _md_to_html(f"{self._progress_text}{tail}{self._progress_elapsed_suffix()}")
+        if stalled:
+            hint = (
+                f'<span style="color:{_WARN};"> — taking longer than usual, '
+                f'press Esc to stop</span>'
+            )
+            body = body[:-len("</div>")] + hint + "</div>" if body.endswith("</div>") else body + hint
         body = body.replace(">", f">{prefix}", 1)
         self._stream_html = body
         self._stream_doc_dirty = True

@@ -10,7 +10,6 @@ import os
 
 from ..core import tools as tools_mod
 from .base import (
-    MAX_TOKENS,
     AgentBackend,
     AgentEvent,
     EventType,
@@ -19,6 +18,7 @@ from .base import (
     agent_iteration_steps,
     append_transient_state,
     elide_stale_tool_results,
+    max_tokens_for,
     should_compact,
     unlimited_iterations,
 )
@@ -278,8 +278,12 @@ applies instead and inspection is skipped.)
 - Stay within AgenticGIS scope: QGIS operations, loaded project layers,
   spatial data analysis, maps, and plugin/QGIS automation.
 - If the user asks for something truly outside GIS scope
-  (e.g. general web search, making coffee, writing non-spatial code),
+  (e.g. making coffee, writing non-spatial code, general chit-chat),
   respond exactly: we dont do that here
+- Fetching or inspecting spatial data sources IS in scope: checking ArcGIS/OGC
+  REST services, WMS/WFS/WMTS endpoints, geoportals, or any URL that returns
+  geospatial data. Use web_fetch — never refuse these. "General web search"
+  means non-spatial lookups, not retrieving GIS data from a known endpoint.
 - You may load new files, open databases, and read paths the user
   names (or that you discovered in a previous turn) when the
   analysis calls for it. The plugin does not gate external access.
@@ -788,7 +792,7 @@ class OpenAIBackend(AgentBackend):
             try:
                 content, finish_reason = client.stream_message(
                     model=model,
-                    max_tokens=MAX_TOKENS,
+                    max_tokens=max_tokens_for(model),
                     system=self._system_text(),
                     tools=self._tool_list(),
                     messages=append_transient_state(messages, self._state_text()),

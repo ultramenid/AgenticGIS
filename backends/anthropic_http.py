@@ -42,7 +42,7 @@ def _safe_urlopen(request, **kwargs):
     return urllib.request.urlopen(request, **kwargs)  # nosec B310
 
 
-DEFAULT_BASE_URL = "https://api.anthropic.com"
+DEFAULT_BASE_URL = "https://api.anthropic.com/v1"
 ANTHROPIC_VERSION = "2023-06-01"
 
 
@@ -52,11 +52,13 @@ class AnthropicHttpError(Exception):
 
 class AnthropicHttpClient:
     def __init__(self, api_key=None, auth_token=None, base_url=None,
-                 version=ANTHROPIC_VERSION):
+                 version=ANTHROPIC_VERSION, config=None):
         self.api_key = api_key
         self.auth_token = auth_token
         self.base_url = (base_url or DEFAULT_BASE_URL).rstrip("/")
         self.version = version
+        self.config = config
+        self._base_path = urllib.parse.urlparse(self.base_url).path.rstrip("/")
         self._conn = None          # http.client.HTTPSConnection
         self._conn_host = None
         # serialise access to the connection slot. Cheap uncontended.
@@ -68,21 +70,34 @@ class AnthropicHttpClient:
             "content-type": "application/json",
             "anthropic-version": self.version,
         }
-        # Prefer a raw API key; fall back to a bearer token (subscription/OAuth).
+        # Send both conventions: real Anthropic reads x-api-key and ignores
+        # Authorization; custom/local servers (e.g. LM Studio) often only
+        # check Authorization: Bearer and ignore x-api-key. Sending both
+        # keeps every "Anthropic-compatible" server happy regardless of
+        # which convention it implements.
         if self.api_key:
             headers["x-api-key"] = self.api_key
+            headers["authorization"] = f"Bearer {self.api_key}"
         elif self.auth_token:
             headers["authorization"] = f"Bearer {self.auth_token}"
         return headers
 
+    def _messages_path(self):
+        """Append ``/messages`` to the base URL's path as given, no ``/v1`` guessing."""
+        if self._base_path.endswith("/messages"):
+            return self._base_path
+        return f"{self._base_path}/messages"
+
     def list_models(self, timeout=15):
-        """GET /v1/models. Doubles as a connection test.
+        """GET ``{base_url}/models``. Doubles as a connection test.
 
         Returns ``(sorted_model_ids, None)`` on success or
-        ``([], error_message)`` on failure.
+        ``([], error_message)`` on failure. No ``/v1`` is guessed or
+        inserted — the base URL must already include any version segment
+        the server needs (e.g. ``https://api.anthropic.com/v1``).
         """
         request = urllib.request.Request(
-            f"{self.base_url}/v1/models", headers=self._headers(), method="GET"
+            f"{self.base_url}/models", headers=self._headers(), method="GET"
         )
         try:
             response = _safe_urlopen(request, timeout=timeout)  # nosec B310
@@ -172,10 +187,12 @@ class AnthropicHttpClient:
             "messages": messages,
             "stream": True,
         }
+        # Omit "thinking" entirely unless the user opted in — that's already
+        # Anthropic's own default (non-extended-thinking) behavior, and
+        # third-party Anthropic-compatible servers (LM Studio, etc.) may not
+        # implement the field and can hang rather than error on it.
         if thinking_config:
             base_payload["thinking"] = thinking_config
-        else:
-            base_payload["thinking"] = {"type": "disabled"}
         if temperature is not None:
             base_payload["temperature"] = temperature
         payload = json.dumps(base_payload).encode("utf-8")
@@ -196,7 +213,7 @@ class AnthropicHttpClient:
             except Exception:  # nosec B110
                 pass
         try:
-            conn.request("POST", "/v1/messages", body=payload, headers=headers)
+            conn.request("POST", self._messages_path(), body=payload, headers=headers)
             response = conn.getresponse()
         except (OSError, http.client.HTTPException, socket.timeout):  # noqa: F821
             # Stale connection; retry once with a fresh one
@@ -210,7 +227,7 @@ class AnthropicHttpClient:
                 except Exception:  # nosec B110
                     pass
             try:
-                conn.request("POST", "/v1/messages", body=payload, headers=headers)
+                conn.request("POST", self._messages_path(), body=payload, headers=headers)
                 response = conn.getresponse()
             except (OSError, http.client.HTTPException, socket.timeout):  # noqa: F821
                 self._close_conn()

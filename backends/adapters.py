@@ -272,9 +272,16 @@ class ClaudeAdapter(CliAdapter):
 
     auth_detail_parser = _auth_detail
 
+    def stdin_prompt(self, prompt):
+        # Pipe the prompt via stdin instead of argv: the system prompt + tool
+        # specs + conversation easily exceed Windows' ~32K command-line limit
+        # (WinError 206). `claude -p` reads the prompt from stdin when no
+        # positional prompt is given. See issue #2.
+        return prompt
+
     def build_command(self, *, binary, prompt, extra_args, runtime_dir):
         return [
-            binary, "-p", prompt, *extra_args,
+            binary, "-p", *extra_args,
             "--output-format", "stream-json", "--verbose",
             "--setting-sources", "local", "--settings", "{}",
             "--disable-slash-commands",
@@ -285,7 +292,7 @@ class ClaudeAdapter(CliAdapter):
         self, *, binary, prompt, extra_args, runtime_dir, session_id,
     ):
         return [
-            binary, "-p", prompt, *extra_args,
+            binary, "-p", *extra_args,
             "--resume", session_id,
             "--output-format", "stream-json", "--verbose",
             "--setting-sources", "local", "--settings", "{}",

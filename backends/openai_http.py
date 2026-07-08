@@ -87,7 +87,7 @@ class OpenAIHttpClient:
     def __init__(self, api_key=None, base_url=None, extra_headers=None, org=None,
                  timeout=DEFAULT_TIMEOUT):
         self.api_key = api_key
-        self.base_url = (base_url or "https://api.openai.com").rstrip("/")
+        self.base_url = (base_url or "https://api.openai.com/v1").rstrip("/")
         self.extra_headers = extra_headers or {}
         self.org = org
         self.timeout = timeout
@@ -110,12 +110,16 @@ class OpenAIHttpClient:
         return parsed
 
     def _chat_path(self):
+        """Append ``/chat/completions`` to the base URL's path as given.
+
+        No ``/v1`` is inserted or guessed — the base URL (built-in provider
+        default or user-entered) must already include any version segment
+        the server requires (e.g. ``https://api.openai.com/v1``).
+        """
         path = (self._parsed_base_url.path or "").rstrip("/")
         if path.endswith("/chat/completions"):
-            return path or "/v1/chat/completions"
-        if path.endswith("/v1"):
-            return f"{path}/chat/completions"
-        return f"{path}/v1/chat/completions" or "/v1/chat/completions"
+            return path
+        return f"{path}/chat/completions"
 
     def _ensure_conn(self, timeout):
         """Return a live connection, creating one if necessary.
@@ -206,44 +210,39 @@ class OpenAIHttpClient:
         return headers
 
     def list_models(self, timeout=15):
-        """GET the models list. Doubles as a connection test.
+        """GET ``{base_url}/models``. Doubles as a connection test.
 
         Returns ``(sorted_model_ids, None)`` on success or
         ``([], error_message)`` on failure (the message explains why, e.g.
-        ``HTTP 401`` for a bad key). Tries ``/v1/models`` then ``/models`` to
-        tolerate base-URL path differences across OpenAI-compatible providers.
+        ``HTTP 401`` for a bad key). No ``/v1`` is guessed or inserted — the
+        base URL must already include any version segment the server needs.
         """
-        last_err = ""
-        for path in ("/v1/models", "/models"):
-            request = urllib.request.Request(
-                f"{self.base_url}{path}", headers=self._headers(), method="GET"
-            )
+        request = urllib.request.Request(
+            f"{self.base_url}/models", headers=self._headers(), method="GET"
+        )
+        try:
+            response = _safe_urlopen(request, timeout=timeout)  # nosec B310
+            body = response.read().decode("utf-8", "replace")
+            data = json.loads(body)
+            items = data.get("data") if isinstance(data, dict) else data
+            models = []
+            for it in items or []:
+                if isinstance(it, dict) and it.get("id"):
+                    models.append(it["id"])
+                elif isinstance(it, str):
+                    models.append(it)
+            return sorted(set(models)), None
+        except urllib.error.HTTPError as exc:
             try:
-                response = _safe_urlopen(request, timeout=timeout)  # nosec B310
-                body = response.read().decode("utf-8", "replace")
-                data = json.loads(body)
-                items = data.get("data") if isinstance(data, dict) else data
-                models = []
-                for it in items or []:
-                    if isinstance(it, dict) and it.get("id"):
-                        models.append(it["id"])
-                    elif isinstance(it, str):
-                        models.append(it)
-                return sorted(set(models)), None
-            except urllib.error.HTTPError as exc:
-                try:
-                    detail = exc.read().decode("utf-8", "replace")
-                except Exception:
-                    detail = ""
-                last_err = f"HTTP {exc.code}: {detail[:300]}" if detail else f"HTTP {exc.code}"
-                # Auth/permission errors won't be fixed by the other path.
-                if exc.code in (401, 403):
-                    return [], last_err
-            except urllib.error.URLError as exc:
-                return [], f"Connection error: {exc.reason}"
-            except Exception as exc:  # noqa: BLE001
-                last_err = f"{type(exc).__name__}: {exc}"
-        return [], last_err or "Unknown error"
+                detail = exc.read().decode("utf-8", "replace")
+            except Exception:
+                detail = ""
+            err = f"HTTP {exc.code}: {detail[:300]}" if detail else f"HTTP {exc.code}"
+            return [], err
+        except urllib.error.URLError as exc:
+            return [], f"Connection error: {exc.reason}"
+        except Exception as exc:  # noqa: BLE001
+            return [], f"{type(exc).__name__}: {exc}"
 
     def stream_message(self, model, max_tokens, system, tools, messages,
                        on_text, should_stop, timeout=None,
@@ -639,17 +638,16 @@ class OpenAIHttpClient:
     def build_tool_list(tool_specs):
         """Convert our Anthropic-shaped tool specs to OpenAI function-calling format.
 
-        Each input_schema dict becomes a JSON Schema ``parameters`` object.
-        Empty properties objects are replaced with an empty object schema to
-        satisfy strict providers (DeepSeek, etc.).
+        Each input_schema dict becomes a JSON Schema ``parameters`` object,
+        passed through as-is. Some providers (LM Studio) require
+        ``parameters.properties`` to always be a present object, even empty;
+        dropping it for no-arg tools causes an HTTP 400. Always keeping
+        ``properties`` (defaulting to ``{}``) is valid JSON Schema and matches
+        OpenAI's own no-arg tool examples, so it is the safer default.
         """
         tools = []
         for spec in tool_specs:
-            schema = spec.get("input_schema", {"type": "object"})
-            # Some providers reject empty properties objects; expand to a generic
-            # empty object if needed.
-            if schema.get("type") == "object" and not schema.get("properties"):
-                schema = {"type": "object"}
+            schema = spec.get("input_schema") or {"type": "object", "properties": {}}
             tools.append({
                 "type": "function",
                 "function": {

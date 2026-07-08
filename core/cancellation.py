@@ -59,10 +59,6 @@ class CancellationRegistry:
         with self._lock:
             return self._event is not None and self._event.is_set()
 
-    def event(self):
-        with self._lock:
-            return self._event
-
 
 def cancel_requested(cancel):
     if cancel is None:

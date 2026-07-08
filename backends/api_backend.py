@@ -13,7 +13,6 @@ import os
 from ..core import tools as tools_mod
 from .anthropic_http import AnthropicHttpClient, AnthropicHttpError
 from .base import (
-    MAX_TOKENS,
     AgentBackend,
     AgentEvent,
     EventType,
@@ -22,6 +21,7 @@ from .base import (
     agent_iteration_steps,
     append_transient_state_anthropic,
     elide_stale_tool_results,
+    max_tokens_for,
     should_compact,
     unlimited_iterations,
 )
@@ -87,6 +87,7 @@ class ApiBackend(AgentBackend):
                     api_key=api_key or None,
                     auth_token=None,
                     base_url=base_url,
+                    config=self.config,
                 )
             return self._active_client
 
@@ -187,7 +188,7 @@ class ApiBackend(AgentBackend):
             try:
                 content, stop_reason = client.stream_message(
                     model=model,
-                    max_tokens=MAX_TOKENS,
+                    max_tokens=max_tokens_for(model),
                     system=self._system_blocks(),
                     tools=self._tool_list(),
                     # Breakpoint first (on the stable history tail), THEN the

@@ -261,6 +261,48 @@ _CONTEXT_WINDOWS = {
 }
 _DEFAULT_CONTEXT_WINDOW = 200_000
 _MAX_EFFECTIVE_CONTEXT_WINDOW = 200_000
+
+# Real provider-enforced max *output* tokens per model family — distinct from
+# context window above (input+output). Requesting more than a provider's
+# actual cap is a hard HTTP 400 on strict APIs, so these lean conservative
+# where the exact current figure isn't certain; same substring/ordering
+# convention as _CONTEXT_WINDOWS (specific keys before their prefixes).
+_MAX_OUTPUT_TOKENS = {
+    "claude": 8_192,       # safe without the extended-output beta header
+    "gpt-4o": 16_384,
+    "gpt-4-turbo": 4_096,
+    "gpt-4.1": 32_768,
+    "o4": 100_000,
+    "o1": 100_000,
+    "o3": 100_000,
+    "gemini": 8_192,
+    "gpt-4": 8_192,
+    "gpt-3.5": 4_096,
+    "deepseek": 8_192,
+    "mistral": 8_192,
+    "llama": 8_192,
+    "qwen": 8_192,
+}
+_DEFAULT_MAX_OUTPUT_TOKENS = 16_384  # unrecognized model, matches prior flat constant
+
+
+def max_tokens_for(model: str) -> int:
+    """Return the output-token budget to request for *model*.
+
+    Known providers use their real documented cap (see _MAX_OUTPUT_TOKENS)
+    so we never under-ask a model that can return more than the old flat
+    16384. Unrecognized model names — custom/local connections (LM Studio,
+    llama.cpp, etc.) — scale with the guessed context window instead: those
+    servers clamp generation to whatever actually fits rather than
+    rejecting an over-large request, so it's safe to ask for more here.
+    """
+    m = (model or "").lower()
+    for key, size in _MAX_OUTPUT_TOKENS.items():
+        if key in m:
+            return size
+    return min(context_window_for(model) // 2, 32_768)
+
+
 TRANSIENT_STATE_HEADER = (
     "[Current QGIS workspace state — refreshed automatically before this "
     "step; transient context, not a user message]"
@@ -371,7 +413,6 @@ def agent_iteration_steps(max_iterations: Any):
         return range(0)
 
 
-MAX_TOKENS = 16384
 # Maximum characters stored in conversation history for a single tool result.
 # Keeping this small reduces per-turn token cost: this payload is re-sent on
 # every subsequent request for the remainder of the session.
