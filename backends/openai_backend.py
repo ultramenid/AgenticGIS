@@ -19,7 +19,6 @@ from .base import (
     append_transient_state,
     elide_stale_tool_results,
     max_tokens_for,
-    should_compact,
     unlimited_iterations,
 )
 from .openai_http import OpenAIHttpClient, OpenAIHttpError
@@ -125,6 +124,9 @@ analyse?", options=["POP2020","POP2010","AREA_KM2","NAME"]).
      (it is kept in memory; the returned id works as add_layer's uri).
    - Heatmap / kernel density / hexagon aggregation → run_processing
      with qgis:heatmap or native:hexagonalgrid, then add_layer.
+     Algorithm IDs use `native:`, `qgis:`, or provider-specific prefixes
+     (e.g. `gdal:`, `grass:`). When unsure of an algorithm ID, call
+     `list_processing_algorithms` to verify — do not guess.
    - Centroid or convex-hull summary geometry → run_pyqgis to
      compute, then add_layer.
    Skip this step when the question is purely descriptive ("what is
@@ -171,6 +173,9 @@ follow-up question. Do not list more than 3.
 
 When the user asks to analyze, summarize, or extract insights from a
 loaded QGIS layer, follow this exact methodology:
+
+- For any request needing 3+ tool calls, first state a brief 2-3 line
+  plan of what you will do, then execute step by step.
 
 1. **INSPECT** — Understand the data first:
    - Call get_layer_summary(layer_id) or get_layer_fields(layer_id) for
@@ -226,6 +231,9 @@ applies instead and inspection is skipped.)
   field names as options.
 - For ambiguous requests, call ask_user(question, options) with 1-4 \
   thoughtful options.
+- If you have called the same tool 3+ times with similar arguments without
+  progress, stop, summarize what is failing, and ask the user for guidance.
+  Do not silently retry the same failing approach.
 - For conversational questions, answer directly in one short paragraph.
 - Act first, explain after. Do not narrate what you are about to do.
 
@@ -244,6 +252,11 @@ applies instead and inspection is skipped.)
   If your code writes a file (GeoTIFF, Shapefile, GeoJSON, CSV, PNG), set
   ``result = {"file_path": "<absolute_path>", "description": "what it is"}``
   so the user sees a download card for the file in the chat.
+- Do not use run_pyqgis to remove, rename, or delete project layers, or
+  to overwrite existing files on disk. Use remove_layer / clear_layers
+  for layer removal (they have guardrails), and ask the user before any
+  file overwrite. These guardrails do not apply inside run_pyqgis — be
+  explicit and cautious.
 - analyze_layer(layer_id, analysis_type, fields): bounded layer analysis
 - create_chart(layer_id, field_name, chart_type, label_field, value_field, aggregate):
   renders chart inline. Counts features per field_name by default; pass value_field +
@@ -262,6 +275,25 @@ applies instead and inspection is skipped.)
   run_processing call or pass as add_layer's uri — no detours through
   files or run_pyqgis to recover an output. Vector outputs report
   <KEY>_feature_count, so a count question is answered by the result itself.
+- list_processing_algorithms(query): search available processing
+  algorithms by name. Use it to discover algorithm IDs and verify they
+  exist before calling run_processing — do not guess algorithm IDs from
+  memory.
+- get_algorithm_parameters(algorithm_id): Returns the parameter
+  definitions (name, type, required, default) for a processing algorithm.
+  Call this after list_processing_algorithms to learn what parameters to
+  pass to run_processing — do not guess parameter names.
+- list_plugins(): list installed QGIS plugins and their status.
+- Selection: use `select_by_attribute`, `select_by_expression`,
+  `select_within`, `invert_selection`, `clear_selection` to manage
+  feature selections.
+- Raster analysis: use `analyze_raster` for band statistics
+  (min/max/mean/std). For raster calculator, use run_processing with
+  `native:rastercalc`.
+- Field calculator: use `field_calculator` to add a calculated field
+  from a QGIS expression.
+- CRS: use `set_project_crs` to set the project CRS, `reproject_layer`
+  to reproject a layer.
 - zoom_to_layer(layer_id): fit the canvas to a result layer
 - web_fetch(url, max_length, verify_ssl): fetch a web page or API endpoint via GET
 - configure_network_cache(size_mb): enable/adjust or report QGIS's shared network
@@ -272,14 +304,53 @@ applies instead and inspection is skipped.)
 - add_layer / remove_layer / clear_layers / save_project: load, unload, clear, or save project layers.
   Pass is_analysis=true on add_layer for derived result layers (reused, kept; no forced zoom by default).
   remove_layer and clear_layers only unload layers from the QGIS project; they never delete source files.
+- save_project(confirm=true): overwrites the project file on disk. Only
+  call when the user explicitly asks to save. Use save_project_as(path)
+  to save to a new file. Never call save_project without confirm=true.
+
+## Styling & symbology
+
+- Use `set_layer_style` to apply symbology to a vector layer: style_type
+  (single, categorized, graduated, rule_based, heatmap), the field to
+  classify by, and optionally a color_ramp (hex list) or color_ramp_name
+  (e.g. "Viridis"), classes (for graduated), and opacity.
+- Confirm the field exists via `get_layer_fields` before styling.
+- For complex custom styles not covered by set_layer_style, use run_pyqgis
+  with QgsGraduatedSymbolRenderer / QgsCategorizedSymbolRenderer /
+  QgsRuleBasedRenderer, set layer.renderer(), call layer.triggerRepaint().
+- Do not use run_pyqgis to bypass set_layer_style when set_layer_style
+  covers the need.
+
+## Layouts & export
+
+- QGIS print layouts (QgsPrintLayout) are available via run_pyqgis for
+  creating map layouts, adding legend/scalebar items, and exporting to
+  PDF/PNG via QgsLayoutExporter. These are main-thread operations.
+- For reprojection, use `reproject_layer(layer_id, target_crs)` rather
+  than run_pyqgis. Before any overlay/intersect/clip, confirm both layers
+  share a CRS via get_layer_summary; if not, reproject first — overlaying
+  layers in different CRSs silently produces wrong geometry.
+
+## Context & memory
+
+- Your workspace state (layers, project, canvas) is re-injected every
+  step, so you always have fresh context — do not rely on remembering it
+  from earlier turns.
+- Older tool results may be summarized or elided to fit the context
+  window. If you need exact values from an earlier tool result, re-run
+  the tool rather than trusting memory.
 
 ## Constraints
 
 - Stay within AgenticGIS scope: QGIS operations, loaded project layers,
   spatial data analysis, maps, and plugin/QGIS automation.
-- If the user asks for something truly outside GIS scope
-  (e.g. making coffee, writing non-spatial code, general chit-chat),
-  respond exactly: we dont do that here
+- Greetings and casual conversation (hi, hello, thanks, good morning) are
+  always welcome: respond warmly and briefly, then ask what the user would
+  like to do in QGIS. Never refuse a greeting.
+- If the user asks for a genuine out-of-scope TASK (e.g. making coffee,
+  writing unrelated non-spatial code), politely decline by explaining that
+  AgenticGIS focuses on QGIS and spatial work, and suggest a GIS-related
+  alternative instead. Do not use a fixed canned refusal phrase.
 - Fetching or inspecting spatial data sources IS in scope: checking ArcGIS/OGC
   REST services, WMS/WFS/WMTS endpoints, geoportals, or any URL that returns
   geospatial data. Use web_fetch — never refuse these. "General web search"
@@ -679,26 +750,50 @@ class OpenAIBackend(AgentBackend):
         self._cached_system_text = None
 
     # ------------------------------------------------------------------ #
+    def _client_kwargs(self):
+        """Resolve credentials/base_url for building an OpenAIHttpClient.
+
+        Shared by the live-turn ``_client`` and the dedicated precompaction
+        client so both use identical config/credentials.
+        """
+        p = self._provider()
+        if p:
+            api_key = self.config.get("api_key") or os.environ.get(
+                p["key_env"], ""
+            )
+            configured_url = (
+                self.config.get("api_base_url") or ""
+            ).strip()
+            base_url = configured_url or p["base_url"]
+        else:
+            api_key = self.config.get("custom_api_key") or ""
+            base_url = self.config.get("custom_base_url")
+        return {
+            "api_key": api_key or None,
+            "base_url": base_url,
+        }
+
     def _client(self):
         with self._active_client_lock:
             if self._active_client is None:
-                p = self._provider()
-                if p:
-                    api_key = self.config.get("api_key") or os.environ.get(
-                        p["key_env"], ""
-                    )
-                    configured_url = (
-                        self.config.get("api_base_url") or ""
-                    ).strip()
-                    base_url = configured_url or p["base_url"]
-                else:
-                    api_key = self.config.get("custom_api_key") or ""
-                    base_url = self.config.get("custom_base_url")
                 self._active_client = OpenAIHttpClient(
-                    api_key=api_key or None,
-                    base_url=base_url,
+                    **self._client_kwargs()
                 )
             return self._active_client
+
+    def _precompact_client(self):
+        """A dedicated HTTP client for background pre-compaction.
+
+        Separate from ``self._active_client`` so a stalled compaction can never
+        hold the request lock the live turn uses — the next user message would
+        otherwise hang waiting for the compaction request to finish.
+        """
+        with self._precompact_client_lock:
+            if self._precompact_client is None:
+                self._precompact_client = OpenAIHttpClient(
+                    **self._client_kwargs()
+                )
+            return self._precompact_client
 
     def close(self):
         with self._active_client_lock:
@@ -706,6 +801,11 @@ class OpenAIBackend(AgentBackend):
             self._active_client = None
         if client is not None:
             client.close()
+        with self._precompact_client_lock:
+            precompact = self._precompact_client
+            self._precompact_client = None
+        if precompact is not None:
+            precompact.close()
 
     def prewarm(self):
         err = self.validate()
@@ -786,8 +886,16 @@ class OpenAIBackend(AgentBackend):
                 emit(AgentEvent(EventType.DONE))
                 return messages
 
-            if should_compact(messages, model or ""):
-                messages = self._compact_history(messages, emit, should_stop)
+            # Pre-flight context-size guard: compact before streaming if the
+            # conversation exceeds the model's window. Raises a clear error
+            # rather than sending an over-long request that will 400.
+            try:
+                messages = self._check_and_compact(
+                    messages, model, emit, should_stop
+                )
+            except Exception as exc:  # noqa: BLE001
+                emit(AgentEvent(EventType.ERROR, {"error": str(exc)}))
+                return messages
 
             try:
                 content, finish_reason = client.stream_message(

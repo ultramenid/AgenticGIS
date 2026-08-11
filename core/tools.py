@@ -208,7 +208,8 @@ TOOL_SPECS = [
                 "name": {"type": "string"},
                 "provider": {
                     "type": "string",
-                    "description": "ogr (vector, default), gdal (raster), postgres, etc.",
+                    "enum": ["ogr", "gdal", "postgres", "spatialite", "wms", "wfs", "wcs", "wmts", "xyz", "vector-tile", "mdal", "ept", "copc", "las", "laz", "delimitedtext", "gpx"],
+                    "description": "Data provider (one of the enum values). ogr = vector (default), gdal = raster, postgres/spatialite = databases, wms/wfs/wcs/wmts/xyz/vector-tile = web services, mdal/ept/copc/las/laz = mesh/point cloud, delimitedtext/gpx = other.",
                 },
                 "zoom": {
                     "type": "boolean",
@@ -475,8 +476,21 @@ TOOL_SPECS = [
     {
         "name": "save_project",
         "method": "save_project",
-        "description": "Save the current QGIS project to its file.",
-        "input_schema": {"type": "object", "properties": {}},
+        "description": (
+            "Save the current QGIS project to its file. Saving overwrites the "
+            "project file on disk. Pass confirm=true to proceed. Use "
+            "save_project_as to save to a new path."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "confirm": {
+                    "type": "boolean",
+                    "description": "Must be true to confirm overwriting the project file on disk.",
+                    "default": False,
+                },
+            },
+        },
     },
     {
         "name": "create_chart",
@@ -551,7 +565,8 @@ TOOL_SPECS = [
                 },
                 "chart_type": {
                     "type": "string",
-                    "description": "bar (default), line, or pie",
+                    "enum": ["bar", "line", "pie"],
+                    "description": "Chart type: bar (default), line, or pie.",
                 },
                 "colors": {
                     "type": "array",
@@ -714,6 +729,342 @@ TOOL_SPECS = [
             "required": ["question", "options"],
         },
     },
+    {
+        "name": "set_layer_style",
+        "method": "set_layer_style",
+        "description": (
+            "Apply symbology/style to a vector layer. Use for categorized, "
+            "graduated, rule-based, single symbol, or heatmap rendering. Runs "
+            "on the main thread."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "layer_id": {"type": "string"},
+                "style_type": {
+                    "type": "string",
+                    "enum": ["single", "categorized", "graduated", "rule_based", "heatmap"],
+                    "description": "Renderer type to apply.",
+                },
+                "field": {
+                    "type": "string",
+                    "description": "Classification field for categorized/graduated/heatmap.",
+                },
+                "color_ramp": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Hex color strings defining the ramp, in order.",
+                },
+                "color_ramp_name": {
+                    "type": "string",
+                    "description": "Named QGIS color ramp (e.g. 'Viridis').",
+                },
+                "classes": {
+                    "type": "integer",
+                    "description": "Number of classes for graduated rendering.",
+                    "minimum": 1,
+                },
+                "opacity": {
+                    "type": "number",
+                    "description": "Layer opacity (0-100).",
+                    "minimum": 0,
+                    "maximum": 100,
+                },
+                "rules": {
+                    "type": "array",
+                    "description": "Rule definitions for rule_based rendering.",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "label": {"type": "string"},
+                            "expression": {"type": "string", "description": "QGIS expression."},
+                            "color": {"type": "string", "description": "Hex color string."},
+                        },
+                        "required": ["label", "expression", "color"],
+                    },
+                },
+            },
+            "required": ["layer_id", "style_type"],
+        },
+    },
+    {
+        "name": "select_by_attribute",
+        "method": "select_by_attribute",
+        "description": "Select features in a layer by attribute value comparison.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "layer_id": {"type": "string"},
+                "field": {"type": "string"},
+                "op": {
+                    "type": "string",
+                    "enum": ["eq", "ne", "lt", "le", "gt", "ge", "like", "isnull"],
+                    "description": "Comparison operator.",
+                },
+                "value": {
+                    "description": "Value to compare against. Not needed for isnull.",
+                },
+            },
+            "required": ["layer_id", "field", "op"],
+        },
+    },
+    {
+        "name": "select_by_expression",
+        "method": "select_by_expression",
+        "description": "Select features in a layer using a QGIS expression string.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "layer_id": {"type": "string"},
+                "expression": {
+                    "type": "string",
+                    "description": "A QGIS expression, e.g. \\\"population\\\" > 1000.",
+                },
+            },
+            "required": ["layer_id", "expression"],
+        },
+    },
+    {
+        "name": "select_within",
+        "method": "select_within",
+        "description": (
+            "Select features in a layer that are within features of an overlay "
+            "layer (spatial selection)."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "layer_id": {
+                    "type": "string",
+                    "description": "Target layer whose features are selected.",
+                },
+                "overlay_layer_id": {
+                    "type": "string",
+                    "description": "Overlay layer whose features form the selection geometry.",
+                },
+            },
+            "required": ["layer_id", "overlay_layer_id"],
+        },
+    },
+    {
+        "name": "clear_selection",
+        "method": "clear_selection",
+        "description": "Clear the current selection in a layer.",
+        "input_schema": {
+            "type": "object",
+            "properties": {"layer_id": {"type": "string"}},
+            "required": ["layer_id"],
+        },
+    },
+    {
+        "name": "invert_selection",
+        "method": "invert_selection",
+        "description": "Invert the current selection in a layer.",
+        "input_schema": {
+            "type": "object",
+            "properties": {"layer_id": {"type": "string"}},
+            "required": ["layer_id"],
+        },
+    },
+    {
+        "name": "reproject_layer",
+        "method": "reproject_layer",
+        "description": (
+            "Reproject a layer to a target CRS and add the result as a new layer."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "layer_id": {"type": "string"},
+                "target_crs": {
+                    "type": "string",
+                    "description": "Target CRS as an EPSG code (e.g. 'EPSG:4326') or authid.",
+                },
+            },
+            "required": ["layer_id", "target_crs"],
+        },
+    },
+    {
+        "name": "set_project_crs",
+        "method": "set_project_crs",
+        "description": "Set the CRS of the current QGIS project.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "crs": {
+                    "type": "string",
+                    "description": "EPSG code (e.g. 'EPSG:4326') or authid.",
+                },
+            },
+            "required": ["crs"],
+        },
+    },
+    {
+        "name": "analyze_raster",
+        "method": "analyze_raster",
+        "description": (
+            "Get band statistics for a raster layer (min, max, mean, std dev, "
+            "sum, range)."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "layer_id": {"type": "string"},
+                "band": {
+                    "type": "integer",
+                    "description": "Raster band number (1-based).",
+                    "minimum": 1,
+                    "default": 1,
+                },
+            },
+            "required": ["layer_id"],
+        },
+    },
+    {
+        "name": "get_algorithm_parameters",
+        "method": "get_algorithm_parameters",
+        "description": (
+            "Get the parameter definitions for a QGIS processing algorithm. "
+            "Use this to discover required and optional parameters before "
+            "calling run_processing."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "algorithm_id": {
+                    "type": "string",
+                    "description": "Algorithm id, e.g. 'native:buffer'.",
+                },
+            },
+            "required": ["algorithm_id"],
+        },
+    },
+    {
+        "name": "field_calculator",
+        "method": "field_calculator",
+        "description": (
+            "Add a new field calculated from an expression to a vector layer. "
+            "Returns a new layer with the field added."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "layer_id": {"type": "string"},
+                "field_name": {"type": "string"},
+                "expression": {
+                    "type": "string",
+                    "description": "QGIS expression to compute the field value.",
+                },
+                "field_type": {
+                    "type": "string",
+                    "enum": ["double", "integer", "string", "date"],
+                    "default": "double",
+                    "description": "Type of the new field.",
+                },
+                "field_length": {
+                    "type": "integer",
+                    "default": 80,
+                    "description": "Field length.",
+                },
+                "field_precision": {
+                    "type": "integer",
+                    "default": 0,
+                    "description": "Field precision (decimal places).",
+                },
+                "virtual": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "If true, create a virtual field instead of a permanent one.",
+                },
+            },
+            "required": ["layer_id", "field_name", "expression"],
+        },
+    },
+    {
+        "name": "save_project_as",
+        "method": "save_project_as",
+        "description": (
+            "Save the current project to a new path. The path must end with "
+            ".qgs or .qgz."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "Destination file path ending in .qgs or .qgz.",
+                },
+            },
+            "required": ["path"],
+        },
+    },
+    {
+        "name": "create_layout",
+        "method": "create_layout",
+        "description": (
+            "Create a print layout in the current QGIS project with a map item "
+            "showing the specified layers. Use for preparing map layouts for "
+            "export. Runs on the main thread."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "title": {
+                    "type": "string",
+                    "description": "Layout name (must be unique in the project).",
+                },
+                "layers": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": (
+                        "Layer IDs or names to include in the map item. If "
+                        "omitted, uses all visible layers."
+                    ),
+                },
+                "page_size": {
+                    "type": "string",
+                    "enum": ["A4", "A3", "A2", "A1", "Letter", "Legal"],
+                    "description": "Page size (default A4).",
+                },
+                "orientation": {
+                    "type": "string",
+                    "enum": ["portrait", "landscape"],
+                    "description": "Page orientation (default portrait).",
+                },
+            },
+            "required": ["title"],
+        },
+    },
+    {
+        "name": "export_layout",
+        "method": "export_layout",
+        "description": (
+            "Export a print layout to PDF or PNG. The layout must already exist "
+            "in the project (create it with create_layout first)."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "layout_id": {
+                    "type": "string",
+                    "description": "Name of the layout to export.",
+                },
+                "output_path": {
+                    "type": "string",
+                    "description": (
+                        "File path for the output. Must end with .pdf or .png "
+                        "matching the format."
+                    ),
+                },
+                "format": {
+                    "type": "string",
+                    "enum": ["pdf", "png"],
+                    "description": "Export format (default pdf).",
+                },
+            },
+            "required": ["layout_id", "output_path"],
+        },
+    },
 ]
 
 TOOL_BY_NAME = {spec["name"]: spec for spec in TOOL_SPECS}
@@ -853,9 +1204,20 @@ def _pyqgis_background_reason(code):
 
 def dispatch(toolkit, executor, name, arguments, should_stop=None):
     """Run tool ``name`` with ``arguments`` against ``toolkit`` on the main
-    thread (via ``executor``) and return its result. Raises ``KeyError`` for
-    an unknown tool name."""
-    spec = TOOL_BY_NAME[name]
+    thread (via ``executor``) and return its result. Returns a structured
+    error dict for an unknown tool name instead of raising ``KeyError``."""
+    spec = TOOL_BY_NAME.get(name)
+    if spec is None:
+        result = {
+            "ok": False,
+            "error": (
+                f"Unknown tool: {name}. Available tools: "
+                f"{', '.join(sorted(TOOL_BY_NAME.keys()))}"
+            ),
+            "hint": "Use one of the listed tools.",
+        }
+        log_event("tool.dispatch.error", tool=name, error_type="UnknownTool", error=result["error"])
+        return result
     method = getattr(toolkit, spec["method"])
     args = dict(arguments or {})
     start = time.perf_counter()

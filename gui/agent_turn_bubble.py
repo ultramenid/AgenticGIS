@@ -10,7 +10,7 @@ import json
 from qgis.PyQt.QtCore import Qt, QElapsedTimer, QSize, QTimer
 from qgis.PyQt.QtGui import QFont
 from qgis.PyQt.QtWidgets import (
-    QFrame, QHBoxLayout, QLabel,
+    QFrame, QHBoxLayout, QLabel, QPushButton,
     QSizePolicy, QVBoxLayout, QWidget,
 )
 
@@ -132,15 +132,23 @@ class ToolSubItem(QWidget):
         self._done = False
         self._bubble = None   # set by AgentTurnBubble.add_tool()
         self._result = ""
+        self._input = tool_input
+        self._input_json = json.dumps(tool_input, default=str)
+        self._expanded = False
 
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.setStyleSheet("background:transparent;")
 
+        # Outer vertical layout: tool row on top, collapsible details below.
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 1, 0, 1)
+        outer.setSpacing(0)
+
         mono = QFont("JetBrains Mono", 10)
         mono.setStyleHint(QFont.StyleHint.Monospace)
 
-        hbox = QHBoxLayout(self)
-        hbox.setContentsMargins(20, 1, 12, 1)
+        hbox = QHBoxLayout()
+        hbox.setContentsMargins(20, 0, 12, 0)
         hbox.setSpacing(4)
 
         self._conn_lbl = QLabel("└─" if is_last else "├─")
@@ -160,7 +168,7 @@ class ToolSubItem(QWidget):
         key_lbl.setTextFormat(Qt.TextFormat.PlainText)
         hbox.addWidget(key_lbl)
 
-        json_str = json.dumps(tool_input, default=str)
+        json_str = self._input_json
         if len(json_str) > 60:
             json_str = json_str[:60] + "…"
         json_lbl = QLabel(json_str)
@@ -169,6 +177,27 @@ class ToolSubItem(QWidget):
         json_lbl.setTextFormat(Qt.TextFormat.PlainText)
         hbox.addWidget(json_lbl)
         hbox.addStretch()
+
+        # Collapsible "Details" toggle — hidden until a result is set.
+        self._toggle = QPushButton("▸ Details")
+        self._toggle.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._toggle.setFlat(True)
+        self._toggle.setFont(mono)
+        self._toggle.setStyleSheet(
+            f"QPushButton {{ color:{_TEXT_3}; background:transparent;"
+            f" border:none; padding:0 4px; font-size:10px; }}"
+            f"QPushButton:hover {{ color:{_TEXT_2}; }}"
+        )
+        self._toggle.setFixedHeight(16)
+        self._toggle.setVisible(False)
+        self._toggle.clicked.connect(self._toggle_details)
+        hbox.addWidget(self._toggle)
+
+        outer.addLayout(hbox)
+
+        # Details panel (input + result) — created lazily, hidden by default.
+        self._details = None
+        self._outer = outer
 
     # ── Public API ────────────────────────────────────────────────────────
 
@@ -195,13 +224,99 @@ class ToolSubItem(QWidget):
             pass
 
     def set_result(self, result_str: str, is_error: bool = False) -> None:
-        """Called by chat_dock.py. Marks done and notifies parent group."""
+        """Called by chat_dock.py. Marks done, stores result, shows toggle."""
         if self._done:
             return
         self._result = result_str
         self.mark_done(is_error=is_error)
         if self._group is not None:
             self._group.on_item_done(self, is_error=is_error)
+        # Reveal the Details toggle now that there is something to show.
+        try:
+            self._toggle.setVisible(True)
+        except RuntimeError:
+            pass
+
+    def _toggle_details(self) -> None:
+        self._expanded = not self._expanded
+        try:
+            if self._expanded:
+                self._toggle.setText("▾ Details")
+                if self._details is None:
+                    self._build_details()
+                self._details.setVisible(True)
+            else:
+                self._toggle.setText("▸ Details")
+                if self._details is not None:
+                    self._details.setVisible(False)
+        except RuntimeError:
+            pass
+        # Notify the parent layout that our height changed.
+        try:
+            self.updateGeometry()
+            if self._bubble is not None:
+                self._bubble._refresh_text_geometry()
+        except RuntimeError:
+            pass
+
+    def _build_details(self) -> None:
+        """Build the collapsed-details panel showing input + result."""
+        panel = QFrame()
+        panel.setStyleSheet(
+            f"QFrame {{ background:{_SURFACE_2}; border:1px solid {_BORDER_SOFT};"
+            f" border-radius:4px; }}"
+        )
+        col = QVBoxLayout(panel)
+        col.setContentsMargins(10, 6, 10, 6)
+        col.setSpacing(4)
+
+        mono = QFont("JetBrains Mono", 10)
+        mono.setStyleHint(QFont.StyleHint.Monospace)
+
+        def _section(label_text: str, body_text: str, copyable: bool = False):
+            head_row = QHBoxLayout()
+            head_row.setContentsMargins(0, 0, 0, 0)
+            head_row.setSpacing(6)
+            head = QLabel(label_text)
+            head.setFont(mono)
+            head.setStyleSheet(f"color:{_TEXT_3}; background:transparent; font-size:10px;")
+            head_row.addWidget(head)
+            head_row.addStretch()
+            if copyable and body_text:
+                btn = QPushButton("Copy")
+                btn.setCursor(Qt.CursorShape.PointingHandCursor)
+                btn.setFlat(True)
+                btn.setFont(mono)
+                btn.setStyleSheet(
+                    f"QPushButton {{ color:{_TEXT_3}; background:transparent;"
+                    f" border:none; padding:0 2px; font-size:10px; }}"
+                    f"QPushButton:hover {{ color:{_TEXT_2}; }}"
+                )
+                import qgis.PyQt.QtGui as _qtgui
+
+                def _copy(_checked=False, _text=body_text):
+                    clip = _qtgui.QGuiApplication.clipboard()
+                    if clip is not None:
+                        clip.setText(_text)
+
+                btn.clicked.connect(_copy)
+                head_row.addWidget(btn)
+            col.addLayout(head_row)
+            body = QLabel(body_text if body_text else "(none)")
+            body.setFont(mono)
+            body.setWordWrap(True)
+            body.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+            body.setTextFormat(Qt.TextFormat.PlainText)
+            body.setStyleSheet(
+                f"color:{_TEXT_2}; background:transparent; font-size:10px;"
+                f" border:none;"
+            )
+            col.addWidget(body)
+
+        _section("Input", self._input_json, copyable=False)
+        _section("Result", self._result, copyable=True)
+        self._details = panel
+        self._outer.addWidget(self._details)
 
     def append_reasoning(self, delta: str) -> None:
         """Called by chat_dock.py. Delegates to parent bubble's ReasoningTicker.
@@ -713,6 +828,34 @@ class AgentTurnBubble(QFrame):
         self._refresh_text_geometry()
         for group in self._groups.values():
             group.force_finalize()
+
+    def mark_stopped(self) -> None:
+        """Mark this turn as stopped by the user, keeping any partial output.
+
+        Finalizes in-progress streaming text in place (no full markdown
+        re-parse — the partial text stays as-is), stops all spinners, and
+        appends a small "— Stopped —" note below the answer text so it's
+        clear the turn was interrupted rather than complete.
+        """
+        self._stop_progress()
+        self._ticker.hide_ticker()
+        self._auto_format = False
+        self._reset_format_cache()
+        self._done = True
+        self._stream_doc_dirty = True
+        # Finalize the text with whatever was streamed so far so the cursor
+        # is dropped and the document holds the partial answer.
+        if self._stream_text:
+            self._stream_html = _md_to_html(self._stream_text)
+            self.text_lbl.setText(self._stream_html)
+        self._refresh_text_geometry()
+        for group in self._groups.values():
+            group.force_finalize()
+        # Append a visible "Stopped" note if not already present.
+        if self._user_decision_lbl is None or "Stopped" not in (
+            self._user_decision_lbl.text() if self._user_decision_lbl else ""
+        ):
+            self.set_user_decision("— Stopped —")
 
     # ── Backward-compat shims for chat_dock.py ────────────────────────────
 

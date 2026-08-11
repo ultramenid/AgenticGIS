@@ -68,28 +68,52 @@ class ApiBackend(AgentBackend):
         self._cached_system_blocks = None
 
     # ------------------------------------------------------------------ #
+    def _client_kwargs(self):
+        """Resolve credentials/base_url for building an AnthropicHttpClient.
+
+        Shared by the live-turn ``_client`` and the dedicated precompaction
+        client so both use identical config/credentials.
+        """
+        p = self._provider()
+        if p:
+            api_key = self.config.get("api_key") or os.environ.get(
+                p["key_env"], ""
+            )
+            configured_url = (
+                self.config.get("api_base_url") or ""
+            ).strip()
+            base_url = configured_url or p["base_url"]
+        else:
+            api_key = self.config.get("custom_api_key") or ""
+            base_url = self.config.get("custom_base_url") or None
+        return {
+            "api_key": api_key or None,
+            "auth_token": None,
+            "base_url": base_url,
+            "config": self.config,
+        }
+
     def _client(self):
         with self._active_client_lock:
             if self._active_client is None:
-                p = self._provider()
-                if p:
-                    api_key = self.config.get("api_key") or os.environ.get(
-                        p["key_env"], ""
-                    )
-                    configured_url = (
-                        self.config.get("api_base_url") or ""
-                    ).strip()
-                    base_url = configured_url or p["base_url"]
-                else:
-                    api_key = self.config.get("custom_api_key") or ""
-                    base_url = self.config.get("custom_base_url") or None
                 self._active_client = AnthropicHttpClient(
-                    api_key=api_key or None,
-                    auth_token=None,
-                    base_url=base_url,
-                    config=self.config,
+                    **self._client_kwargs()
                 )
             return self._active_client
+
+    def _precompact_client(self):
+        """A dedicated HTTP client for background pre-compaction.
+
+        Separate from ``self._active_client`` so a stalled compaction can never
+        hold the request lock the live turn uses — the next user message would
+        otherwise hang waiting for the compaction request to finish.
+        """
+        with self._precompact_client_lock:
+            if self._precompact_client is None:
+                self._precompact_client = AnthropicHttpClient(
+                    **self._client_kwargs()
+                )
+            return self._precompact_client
 
     def close(self):
         with self._active_client_lock:
@@ -97,6 +121,11 @@ class ApiBackend(AgentBackend):
             self._active_client = None
         if client is not None:
             client.close()
+        with self._precompact_client_lock:
+            precompact = self._precompact_client
+            self._precompact_client = None
+        if precompact is not None:
+            precompact.close()
 
     def prewarm(self):
         err = self.validate()
@@ -180,10 +209,18 @@ class ApiBackend(AgentBackend):
             if should_stop():
                 emit(AgentEvent(EventType.THINKING, {"text": "Stopped."}))
                 emit(AgentEvent(EventType.DONE))
-                return messages
+                return self._finalize_cancelled_messages(messages)
 
-            if should_compact(messages, model or ""):
-                messages = self._compact_history(messages, emit, should_stop)
+            # Pre-flight context-size guard: compact before streaming if the
+            # conversation exceeds the model's window. Raises a clear error
+            # rather than sending an over-long request that will 400.
+            try:
+                messages = self._check_and_compact(
+                    messages, model, emit, should_stop
+                )
+            except Exception as exc:  # noqa: BLE001
+                emit(AgentEvent(EventType.ERROR, {"error": str(exc)}))
+                return messages
 
             try:
                 content, stop_reason = client.stream_message(
@@ -204,18 +241,38 @@ class ApiBackend(AgentBackend):
                 )
             except AnthropicHttpError as exc:
                 emit(AgentEvent(EventType.ERROR, {"error": str(exc)}))
-                return messages
+                return self._finalize_cancelled_messages(messages)
             except Exception as exc:  # noqa: BLE001
                 emit(
                     AgentEvent(
                         EventType.ERROR, {"error": f"{type(exc).__name__}: {exc}"}
                     )
                 )
-                return messages
+                return self._finalize_cancelled_messages(messages)
+
+            tool_uses = [b for b in content if b.get("type") == "tool_use"]
+
+            # CRITICAL: detect truncated output before saving dangling tool
+            # calls. On Anthropic, a truncated tool_use has input={} (the JSON
+            # fallback), so dispatching it would run a tool with empty args.
+            # Mirror the OpenAI backend's finish_reason=="length" guard.
+            if stop_reason == "max_tokens" and tool_uses:
+                emit(AgentEvent(EventType.THINKING, {
+                    "text": "Response truncated mid-tool-call (max_tokens reached). Asking model to retry with complete arguments."
+                }))
+                messages.append({
+                    "role": "user",
+                    "content": (
+                        "Your previous response was truncated because it reached "
+                        "the max_tokens output limit. The tool calls you started "
+                        "were not executed. Please re-emit your tool calls with "
+                        "complete arguments, or break the task into smaller steps."
+                    ),
+                })
+                continue
 
             messages.append({"role": "assistant", "content": content})
 
-            tool_uses = [b for b in content if b.get("type") == "tool_use"]
             if not tool_uses:
                 emit(AgentEvent(EventType.DONE))
                 return messages
@@ -236,7 +293,7 @@ class ApiBackend(AgentBackend):
             )
             if stopped:
                 emit(AgentEvent(EventType.DONE))
-                return messages
+                return self._finalize_cancelled_messages(messages)
             messages.append({"role": "user", "content": tool_results})
 
         else:
@@ -248,4 +305,67 @@ class ApiBackend(AgentBackend):
                 )
             )
             emit(AgentEvent(EventType.DONE))
+        return messages
+
+    # ------------------------------------------------------------------ #
+    @staticmethod
+    def _dangling_tool_use_ids(messages):
+        """Return tool_use_ids from the last assistant message that have no
+        matching tool_result block appended afterwards.
+
+        Anthropic requires a tool_result for every tool_use; a partial
+        assistant message left behind by a cancel would otherwise 400 the
+        next turn.
+        """
+        if not messages:
+            return []
+        last = messages[-1]
+        if last.get("role") != "assistant":
+            return []
+        content = last.get("content")
+        if not isinstance(content, list):
+            return []
+        tool_use_ids = [
+            b.get("id")
+            for b in content
+            if isinstance(b, dict) and b.get("type") == "tool_use" and b.get("id")
+        ]
+        if not tool_use_ids:
+            return []
+        answered = set()
+        for msg in messages:
+            if msg.get("role") != "user":
+                continue
+            blocks = msg.get("content")
+            if not isinstance(blocks, list):
+                continue
+            for b in blocks:
+                if isinstance(b, dict) and b.get("type") == "tool_result":
+                    tid = b.get("tool_use_id")
+                    if tid:
+                        answered.add(tid)
+        return [tid for tid in tool_use_ids if tid not in answered]
+
+    def _finalize_cancelled_messages(self, messages):
+        """Append synthetic tool_result blocks for any dangling tool_use on the
+        last assistant message, so the next turn doesn't 400.
+
+        Called from every early-return path in ``send`` (cancel/stop/error).
+        Returns ``messages`` (possibly with an extra user-role carrier message
+        holding the synthetic results). Preserves the assistant message.
+        """
+        dangling = self._dangling_tool_use_ids(messages)
+        if not dangling:
+            return messages
+        synthetic = [
+            {
+                "type": "tool_result",
+                "tool_use_id": tid,
+                "content": "Cancelled by user.",
+                "is_error": True,
+            }
+            for tid in dangling
+        ]
+        messages = list(messages)
+        messages.append({"role": "user", "content": synthetic})
         return messages

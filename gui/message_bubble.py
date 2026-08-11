@@ -583,7 +583,7 @@ class MessageBubble(QFrame):
         layout.setContentsMargins(10, 7, 10, 7)
         layout.setSpacing(0)
 
-        initial_html = html.escape(self.text) if self.text else ""
+        initial_html = html.escape(self.text).replace("\n", "<br>") if self.text else ""
 
         self.text_label = QLabel(initial_html)
         self.text_label.setWordWrap(True)
@@ -742,7 +742,7 @@ class MessageBubble(QFrame):
         if not self.is_user and not self.is_tool and not self.is_error:
             self.text_label.setText(_md_to_html(text))
         else:
-            self.text_label.setText(html.escape(text))
+            self.text_label.setText(html.escape(text).replace("\n", "<br>"))
 
 
 class MessageContainer(QWidget):
@@ -784,7 +784,7 @@ class MessageContainer(QWidget):
         self.bubble = MessageBubble(text, sender_name, is_user, is_error, is_tool)
 
         if is_user:
-            self.bubble.setMaximumWidth(280)
+            self.bubble.setMaximumWidth(420)
             self.bubble.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Minimum)
             row.addStretch(1)
             row.addWidget(self.bubble)

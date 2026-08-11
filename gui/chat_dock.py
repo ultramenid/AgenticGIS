@@ -7,6 +7,7 @@ mode (default) and respects QGIS's own theme via neutral grays.
 
 import html
 import json
+import sys
 import threading
 import time
 from collections import deque
@@ -70,6 +71,7 @@ _BUFFER_DROP_COUNT = 500
 
 _MAX_TURN_TEXT_CHARS = 200_000
 _MAX_THINKING_TEXT_CHARS = 50_000
+_MAX_PASTE_CHARS = 20_000  # warn before pasting blocks larger than this
 
 
 class ChatWorker(QThread):
@@ -122,9 +124,13 @@ class ChatWorker(QThread):
             self.finished_history.emit(history)
         except Exception:
             import traceback
+            e = sys.exc_info()[1]
             try:
                 self._flush_coalesced_event()
-                self.event.emit(AgentEvent(EventType.ERROR, {"error": traceback.format_exc()}))
+                self.event.emit(AgentEvent(EventType.ERROR, {
+                    "error": f"{type(e).__name__}: {str(e)[:200]}",
+                    "traceback": traceback.format_exc(),
+                }))
             except RuntimeError:
                 # Widget already deleted (QGIS shutting down)
                 pass
@@ -383,6 +389,7 @@ class ChatDock(QgsDockWidget):
         divider.setFixedHeight(1)
         divider.setStyleSheet(f"background-color: {_BORDER}; border: none;")
         layout.addWidget(divider)
+        self._top_bar_divider = divider
 
         # -- Scrollable transcript --------------------------------------- #
         self.scroll = QScrollArea()
@@ -500,7 +507,7 @@ class ChatDock(QgsDockWidget):
 
         # Send button — inside the field frame, right edge
         self.send_btn = QPushButton("→")
-        self.send_btn.setToolTip("Send (Enter)")
+        self.send_btn.setToolTip("Send (Enter) · New line (Shift+Enter)")
         self.send_btn.setFixedSize(28, 28)
         self.send_btn.setStyleSheet(f"""
             QPushButton {{
@@ -597,10 +604,35 @@ class ChatDock(QgsDockWidget):
             if event.key() in (Qt.Key.Key_Up, Qt.Key.Key_Down) and event.modifiers() == Qt.KeyboardModifier.NoModifier:
                 if self._handle_prompt_history_key(event.key()):
                     return True
+            if event.key() == Qt.Key.Key_V and bool(event.modifiers() & Qt.KeyboardModifier.ControlModifier):
+                # Intercept Ctrl+V so we can warn on very large pastes before
+                # the text is inserted into the input box.
+                from qgis.PyQt.QtWidgets import QApplication, QMessageBox
+                clip_text = QApplication.clipboard().text()
+                if len(clip_text) > _MAX_PASTE_CHARS:
+                    reply = QMessageBox.question(
+                        self,
+                        "Large paste",
+                        f"You are pasting {len(clip_text):,} characters.\n\n"
+                        f"This may exceed the model's context window and could "
+                        f"cause errors. Paste anyway?",
+                        QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                        QMessageBox.StandardButton.No,
+                    )
+                    if reply == QMessageBox.StandardButton.No:
+                        return True  # consume, don't paste
+                # fall through to let QTextEdit handle the paste normally
             if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
                 if self._newline_modifier(event.modifiers()):
                     self.input.insertPlainText("\n")
                     self._resize_input()
+                    return True
+                if self._worker is not None:
+                    # A turn is in progress — flash a transient warning instead
+                    # of silently swallowing the keystroke. Keep the typed text
+                    # so the user doesn't lose what they wrote; the status will
+                    # be overwritten when the current turn finishes.
+                    self._set_status("Wait for the current turn to finish", _DANGER)
                     return True
                 self._on_send()
                 return True
@@ -672,13 +704,12 @@ class ChatDock(QgsDockWidget):
         if self._worker is None:
             self._last_escape_press_at = 0.0
             return False
-        now = time.monotonic()
-        if self._last_escape_press_at > 0.0 and now - self._last_escape_press_at <= 1.2:
-            self._last_escape_press_at = 0.0
-            self._on_stop()
-        else:
-            self._last_escape_press_at = now
-            self._set_status("Esc again to stop", _DANGER, spinning=True)
+        # A single Esc stops the running worker directly — do not rely on the
+        # Stop button (it may be stuck disabled) and do not require a
+        # double-press, which made Esc feel broken. We call the same handler
+        # the Stop button uses, so stop logic stays in one place.
+        self._last_escape_press_at = 0.0
+        self._on_stop()
         return True
 
     def _resize_input(self):
@@ -1142,8 +1173,20 @@ class ChatDock(QgsDockWidget):
         Covers the chat body and input area, but skips the top status
         bar. Coordinates are in the parent (dock widget) frame.
         """
-        # The dock widget's body rect, in dock-local coordinates.
-        return self.rect()
+        rect = self.rect()
+        # Exclude the top status bar + hairline divider. The divider widget
+        # is the last row of the top bar; its bottom edge in dock-local
+        # coordinates is where the scrollable transcript begins.
+        top_offset = 0
+        divider = getattr(self, "_top_bar_divider", None)
+        if divider is not None:
+            try:
+                bottom = divider.mapTo(self, divider.rect().bottomLeft()).y()
+                if 0 < bottom < rect.height():
+                    top_offset = bottom
+            except RuntimeError:
+                pass
+        return rect.adjusted(0, top_offset, 0, 0)
 
     def _position_ask_card(self):
         if not hasattr(self, "_ask_overlay") or self._ask_overlay is None:
@@ -1172,7 +1215,7 @@ class ChatDock(QgsDockWidget):
     def resizeEvent(self, event):
         # Keep the ask_user overlay sized to the dock if it's visible.
         if hasattr(self, "_ask_overlay") and self._ask_overlay is not None and self._ask_overlay.isVisible():
-            self._ask_overlay.setGeometry(self.rect())
+            self._ask_overlay.setGeometry(self._overlay_rect())
             self._position_ask_card()
         super().resizeEvent(event)
 
@@ -1603,7 +1646,14 @@ class ChatDock(QgsDockWidget):
         if self._worker is None:
             return False
         self._stop_requested = True
-        self._worker.stop()
+        worker = self._worker
+        # Detach the worker first so any late ``finished_history`` signal is
+        # ignored by ``_on_finished`` (it guards on ``worker is self._worker``)
+        # and ``_on_worker_thread_finished`` clears ``self._worker`` only when
+        # it still matches.  This lets us recover the UI even when a worker
+        # thread is blocked/hung and never returns from ``run()``.
+        self._worker = None
+        worker.stop()
         if self._request_cancel is not None:
             try:
                 self._request_cancel()
@@ -1613,6 +1663,7 @@ class ChatDock(QgsDockWidget):
             self._toolkit._resolve_ask_user({
                 "choice": None, "free_text": None, "cancelled": True,
             })
+        self._reset_run_ui()
         return True
 
     def _save_current_session(self, immediate=False):
@@ -1675,6 +1726,7 @@ class ChatDock(QgsDockWidget):
         if save_current and session_id != self._active_session_id:
             self._save_current_session(immediate=True)
         self._stop_active_worker()
+        self._reset_run_ui()
         if not self._session_store.set_active_session(session_id):
             return False
         session = self._session_store.get_session(session_id)
@@ -1828,7 +1880,16 @@ class ChatDock(QgsDockWidget):
         if self._worker is not None:
             self._stop_requested = True
             self._worker.stop()
-            self._remove_current_agent_turn()
+            # Finalize the partial turn in place instead of deleting it, so
+            # the user keeps any text that was already streamed.
+            self._finish_streaming()
+            if self._current_agent_turn is not None:
+                try:
+                    self._current_agent_turn.mark_stopped()
+                except Exception:  # nosec B110
+                    pass
+                self._finalize_current_turn_event()
+                self._current_agent_turn = None
             self._current_tool_row = None
             self._pending_tool = None
             self._current_text = ""
@@ -2050,7 +2111,15 @@ class ChatDock(QgsDockWidget):
             self._flush_stream_render()
             self._hide_typing()
             self._finish_streaming()
-            self._add_error_message(str(ev.data.get("error", "")))
+            short_error = str(ev.data.get("error", ""))
+            tb = str(ev.data.get("traceback", ""))
+            if tb and tb.strip():
+                # Show the readable summary first, then the full traceback
+                # after a separator so debugging detail is still available.
+                full_text = f"{short_error}\n\n— Traceback —\n{tb}"
+            else:
+                full_text = short_error
+            self._add_error_message(full_text)
             self._save_current_session()
 
         elif ev.type == EventType.DONE:
@@ -2201,6 +2270,26 @@ class ChatDock(QgsDockWidget):
         if turn_event is not None:
             turn_event["thinking"] = self._thinking_text
 
+    def _reset_run_ui(self):
+        """Restore the Send/Stop buttons and status to the idle state.
+
+        Centralizes the button restoration that used to live only in
+        ``_on_finished`` so it can be reused by the stop/session-switch paths
+        when a worker is blocked and never emits its ``finished_history``
+        signal.  Qt raises ``RuntimeError`` on access to a deleted C++ widget;
+        such errors are swallowed so cleanup of a hung worker always restores
+        the UI rather than leaving the Stop button disabled forever.
+        """
+        try:
+            self.send_btn.setEnabled(True)
+            self.send_btn.setVisible(True)
+            self.stop_btn.setEnabled(False)
+            self.stop_btn.setVisible(False)
+            self._set_status("Ready", _SUCCESS, icon="✓")
+        except RuntimeError:
+            pass
+        self._stop_requested = False
+
     def _on_finished(self, history, worker=None):
         if worker is not None and self._worker is not None and worker is not self._worker:
             return
@@ -2218,17 +2307,9 @@ class ChatDock(QgsDockWidget):
         # finalize_text(self._current_text) on it, producing a second bubble
         # with the same text (the "double response" bug).
         self._hide_typing()
-        try:
-            self.send_btn.setEnabled(True)
-            self.send_btn.setVisible(True)
-            self.stop_btn.setEnabled(False)
-            self.stop_btn.setVisible(False)
-            self._set_status("Ready", _SUCCESS, icon="✓")
-        except RuntimeError:
-            pass
+        self._reset_run_ui()
         self._scroll_locked = False
         self._thinking_started = False
-        self._stop_requested = False
 
     def _maybe_precompact(self):
         """Start a background pre-compaction pass after a turn fully finishes.

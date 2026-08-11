@@ -9,7 +9,7 @@ descriptions. This prompt is used for permission and clarification moments, so
 readability matters more than compactness.
 """
 
-from qgis.PyQt.QtCore import Qt, QSize, pyqtSignal
+from qgis.PyQt.QtCore import Qt, QSize, QEvent, pyqtSignal
 from qgis.PyQt.QtGui import QFont
 from qgis.PyQt.QtWidgets import (
     QFrame,
@@ -164,6 +164,13 @@ class _OptionRow(QFrame):
             self.clicked.emit(self._label)
             event.accept()
             return
+        if event.key() == Qt.Key.Key_Escape:
+            # Forward Esc to the AskUserCard so it emits the cancelled payload.
+            card = self.window()
+            if isinstance(card, AskUserCard):
+                card._on_cancel()
+                event.accept()
+                return
         super().keyPressEvent(event)
 
 
@@ -262,6 +269,7 @@ class AskUserCard(QFrame):
             send.setCursor(Qt.CursorShape.PointingHandCursor)
             send.setMinimumHeight(36)
             send.setMinimumWidth(72)
+            send.setEnabled(False)
             send.setFont(_mono(10, QFont.Weight.DemiBold))
             send.setStyleSheet(f"""
                 QPushButton {{
@@ -277,10 +285,50 @@ class AskUserCard(QFrame):
                 QPushButton:disabled {{ background-color: {_BORDER}; color: {_TEXT_3}; }}
             """)
             send.clicked.connect(self._on_free_text)
+            self._free_text.textChanged.connect(
+                lambda text: send.setEnabled(bool(text.strip()))
+            )
             ft_row.addWidget(send)
             outer.addLayout(ft_row)
         else:
             self._free_text = None
+
+        # ── Cancel / dismiss ─────────────────────────────────────────────
+        # A user who ignores the card wedges the worker forever. This small
+        # secondary button resolves the ask-user as cancelled via the same
+        # ``submitted`` signal the option buttons use; ``_resolve_ask_user``
+        # in chat_dock.py already forwards ``cancelled: True`` to the toolkit.
+        cancel_row = QHBoxLayout()
+        cancel_row.setContentsMargins(0, 0, 0, 0)
+        cancel_row.addStretch(1)
+        cancel = QPushButton("Cancel")
+        cancel.setCursor(Qt.CursorShape.PointingHandCursor)
+        cancel.setMinimumHeight(30)
+        cancel.setFont(_mono(10))
+        cancel.setStyleSheet(f"""
+            QPushButton {{
+                background-color: transparent;
+                color: {_TEXT_3};
+                border: 1px solid {_BORDER_SOFT};
+                border-radius: 6px;
+                padding: 5px 12px;
+                font-size: 11px;
+            }}
+            QPushButton:hover {{
+                background-color: {_SURFACE_2};
+                color: {_TEXT_2};
+                border-color: {_BORDER};
+            }}
+        """)
+        cancel.clicked.connect(self._on_cancel)
+        cancel_row.addWidget(cancel)
+        outer.addLayout(cancel_row)
+
+        # Install an event filter on the card (and its frame) so Escape is
+        # intercepted here, before it can bubble to the dock's Esc-to-stop
+        # handler. The dock only filters Esc on its input widget, but we also
+        # install on ourselves to be defensive against any global shortcut.
+        self.installEventFilter(self)
 
     def sizeHint(self):
         size = super().sizeHint()
@@ -296,6 +344,16 @@ class AskUserCard(QFrame):
             height = super().sizeHint().height()
         return height
 
+    def eventFilter(self, obj, event):
+        # Intercept Escape at the card level so it cancels this ask-user
+        # instead of bubbling up to the dock (whose Esc handler stops the
+        # worker). We accept the event to prevent further propagation.
+        if event.type() == QEvent.Type.KeyPress and event.key() == Qt.Key.Key_Escape:
+            self._on_cancel()
+            event.accept()
+            return True
+        return super().eventFilter(obj, event)
+
     def _on_option(self, label):
         self.submitted.emit({"choice": label, "free_text": None})
 
@@ -306,3 +364,6 @@ class AskUserCard(QFrame):
         if not text:
             return
         self.submitted.emit({"choice": None, "free_text": text})
+
+    def _on_cancel(self):
+        self.submitted.emit({"choice": None, "free_text": None, "cancelled": True})

@@ -14,6 +14,8 @@ from dataclasses import dataclass, field
 from itertools import count
 from typing import Any, Callable, Dict, List, Optional
 
+from ..core.dev_logging import log_event
+
 
 class EventType:
     TEXT = "text"  # assistant text delta (data: {"text": str})
@@ -52,6 +54,13 @@ class AgentBackend(ABC):
         self._cached_tool_list = None
         self._active_client = None
         self._active_client_lock = threading.Lock()
+        # Dedicated HTTP client for background pre-compaction. Separate from
+        # ``_active_client`` so a stalled compaction can never hold the request
+        # lock the live turn uses (which would hang the next user message).
+        # Backends that support HTTP compaction populate this in their
+        # ``_precompact_client()`` override; it stays None for CLI backends.
+        self._precompact_client = None
+        self._precompact_client_lock = threading.Lock()
 
     @abstractmethod
     def send(
@@ -169,7 +178,8 @@ class AgentBackend(ABC):
                 emit=lambda _event: None,  # no UI events from background pass
                 should_stop=should_stop,
             )
-        except Exception:  # nosec B110
+        except Exception as exc:  # nosec B110
+            log_event("compaction.failed", stage="precompact", error=str(exc))
             return messages
 
     # Hook for shared compaction — must be overridden.
@@ -204,7 +214,14 @@ class AgentBackend(ABC):
             }
         ]
         try:
-            client = self._active_client or self._client()
+            # Use a dedicated precompaction HTTP client (when the backend
+            # provides one) instead of the shared ``_active_client``. A stalled
+            # compaction must not hold the live turn's request lock, or the
+            # next user message hangs waiting for compaction to finish.
+            if callable(getattr(self, "_precompact_client", None)):
+                client = self._precompact_client()
+            else:
+                client = self._active_client or self._client()
             # Fix A2: use the cheaper compaction_model when set; fall back to chat model.
             model = self.config.get("compaction_model") or self.config.get("model")
             content, _ = client.stream_message(
@@ -219,7 +236,8 @@ class AgentBackend(ABC):
             summary = "".join(
                 b.get("text", "") for b in content if b.get("type") == "text"
             ).strip()
-        except Exception:
+        except Exception as exc:
+            log_event("compaction.failed", stage="inline", error=str(exc))
             return messages
         if not summary:
             return messages
@@ -232,6 +250,35 @@ class AgentBackend(ABC):
         ] + list(tail)
         emit(AgentEvent(EventType.COMPACTION, {}))
         return compacted
+
+    def _check_and_compact(self, messages, model, emit, should_stop):
+        """Pre-flight context-size guard run before each ``stream_message`` call.
+
+        If the estimated token usage of ``messages`` plus the fixed system/tool
+        overhead exceeds the model's compaction threshold, compact the history
+        first. Compaction may itself fail or produce no summary — in that case
+        we re-check the size: if the messages are STILL over the window, raise a
+        clear error rather than sending an over-long request that the provider
+        will 400 on. Returns the (possibly compacted) ``messages`` list.
+        """
+        if not should_compact(messages, model or ""):
+            return messages
+        compacted = self._compact_history(messages, emit, should_stop)
+        if compacted is not messages:
+            messages = compacted
+        # Compaction may have failed silently and returned the original list.
+        # Re-check: if we are still over the hard context window, bail out
+        # cleanly instead of sending an over-long request.
+        limit = context_window_for(model or "")
+        estimated = estimate_message_tokens(messages) + _COMPACTION_FIXED_OVERHEAD
+        if estimated > limit:
+            raise RuntimeError(
+                f"Conversation context ({estimated} est. tokens) exceeds the "
+                f"model's context window ({limit} tokens) even after "
+                f"compaction. Start a new chat or switch to a model with a "
+                f"larger context window."
+            )
+        return messages
 
 
 # ── Context compaction helpers ─────────────────────────────────────────────

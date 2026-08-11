@@ -22,9 +22,11 @@ import tempfile
 import threading
 import time
 import traceback
+from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as _FutureTimeoutError
 from contextlib import redirect_stderr, redirect_stdout
 
-from qgis.PyQt.QtCore import QCoreApplication
+from qgis.PyQt.QtCore import QCoreApplication, QThread
 from qgis.core import Qgis
 from qgis.core import (
     QgsApplication,
@@ -62,6 +64,26 @@ from .web_fetch_helpers import (
 _WEB_FETCH_SNIFF_BYTES = 8192
 _WEB_FETCH_CHUNK_BYTES = 1024 * 1024
 _WEB_FETCH_MAX_DOWNLOAD_BYTES = 1024 * 1024 * 1024  # 1 GB
+
+
+def _on_main_thread():
+    """True when the caller is on the Qt main (GUI) thread.
+
+    ``QCoreApplication.processEvents()`` is only safe to call from the main
+    thread; from a QgsTask worker it is a no-op at best and unsafe at worst.
+    """
+    try:
+        from qgis.PyQt.QtWidgets import QApplication
+        app = QApplication.instance()
+        return app is not None and QThread.currentThread() == app.thread()
+    except Exception:  # pragma: no cover
+        return False
+
+
+def _pump_events():
+    """Pump the Qt event loop, but only when on the main thread."""
+    if _on_main_thread():
+        QCoreApplication.processEvents()
 
 
 def _unique_layer_name(name):
@@ -139,6 +161,36 @@ def _make_qgs_feedback(event):
 
     fb.isCanceled = _check_and_pump
     return fb
+
+
+def _run_blocking_with_cancel(fn, is_canceled, timeout=120.0, timeout_msg="operation timed out"):
+    """Run a blocking ``fn()`` in a worker thread while polling cancellation.
+
+    Used inside ``QgsTask.run()`` for synchronous Earth Engine RPCs that have
+    no native timeout. Returns ``(ok, value_or_error_msg)``:
+
+    - ``(True, result)`` when ``fn`` returned within ``timeout``.
+    - ``(False, "Cancelled by user")`` when ``is_canceled()`` became True.
+    - ``(False, timeout_msg)`` when ``timeout`` elapsed.
+    - ``(False, f"{type(exc).__name__}: {exc}")`` when ``fn`` raised.
+
+    The executor is deliberately short-lived (one call, one thread).
+    """
+    with ThreadPoolExecutor(max_workers=1) as ex:
+        fut = ex.submit(fn)
+        deadline = time.monotonic() + timeout
+        while True:
+            try:
+                value = fut.result(timeout=0.1)
+                return True, value
+            except _FutureTimeoutError:
+                pass
+            except Exception as exc:  # noqa: BLE001 - fn raised
+                return False, f"{type(exc).__name__}: {exc}"
+            if is_canceled():
+                return False, "Cancelled by user"
+            if time.monotonic() > deadline:
+                return False, timeout_msg
 
 
 def _map_layer_type_name(layer):
@@ -662,6 +714,9 @@ class QgisToolkit:
         self._ns_template = None  # cached exec namespace
         # dirty flag — set when a tool may have mutated project state.
         self._canvas_dirty = False
+        # Temp .qgz path of the last project snapshot taken before a
+        # destructive run_pyqgis run; None when no snapshot is available.
+        self._last_project_snapshot = None
         # Track GeoTIFF temp files from gee_add_layer export_format='geotiff'
         # for automatic cleanup on layer removal / plugin unload.
         self._gee_tiff_sources = {}  # layer_id -> file_path
@@ -818,8 +873,26 @@ class QgisToolkit:
                 self._ask_emitter(question, list(options), bool(allow_free_text))
 
             # Wait for the dock (or a test) to fire _resolve_ask_user.
-            wait_evt, _ = self._ask_user_pending
-            wait_evt.wait()
+            # Bound the wait so a forgotten card doesn't wedge the worker
+            # forever; default 10 minutes, configurable via the toolkit config.
+            ask_timeout = 600.0
+            if self.config is not None:
+                ask_timeout = self.config.get("ask_user_timeout", ask_timeout)
+            wait_evt, slot = self._ask_user_pending
+            if not wait_evt.wait(timeout=ask_timeout):
+                # Timed out waiting for the user — resolve as cancelled so
+                # the slot shape matches _resolve_ask_user({cancelled: True}).
+                log_event(
+                    "ask_user.timeout",
+                    question=question[:200],
+                    timeout_s=ask_timeout,
+                )
+                with self._ask_user_lock:
+                    if self._ask_user_pending is not None:
+                        slot["choice"] = None
+                        slot["free_text"] = None
+                        slot["cancelled"] = True
+                        wait_evt.set()
         finally:
             with self._ask_user_lock:
                 payload = (
@@ -971,8 +1044,10 @@ class QgisToolkit:
 
         if tool_name == "run_pyqgis":
             code = args.get("code") or ""
-            if "ALLOW_EXTERNAL_ACCESS = True" in code or "ALLOW_EXTERNAL_ACCESS=True" in code:
-                return None
+            # External access for run_pyqgis is granted ONLY by the user (via
+            # the confirm_external_access popup or the
+            # external_access_always_allowed config). Agent-authored code can
+            # no longer self-grant access by writing ALLOW_EXTERNAL_ACCESS=True.
             for match in self._STRING_LITERAL_RE.finditer(code):
                 value = match.group("value")
                 if self._looks_external_reference(value):
@@ -1520,12 +1595,28 @@ class QgisToolkit:
         task = executor.run_sync(start_task)
         start = time.perf_counter()
         cancel_sent = False
+        cancel_time = None  # monotonic timestamp when cancel was sent
         try:
             while not slot["done"].wait(0.05):
-                if cancel_sent or not self.is_cancelled():
+                if cancel_sent:
+                    # Already cancelled — give the task a hard 30s window to
+                    # wind down, then abandon it so the worker thread isn't
+                    # wedged forever by a task that ignores cancel().
+                    if cancel_time is not None and time.monotonic() - cancel_time > 30.0:
+                        log_event(
+                            "qgs_task.cancel.timeout",
+                            description=description,
+                            elapsed_ms=int((time.perf_counter() - start) * 1000),
+                            grace_s=30.0,
+                        )
+                        break
+                    continue
+
+                if not self.is_cancelled():
                     continue
 
                 cancel_sent = True
+                cancel_time = time.monotonic()
 
                 def cancel_task():
                     try:
@@ -1547,6 +1638,15 @@ class QgisToolkit:
                         error_type=type(exc).__name__,
                         error=str(exc),
                     )
+            if not slot["done"].is_set():
+                # Broke out of the wait loop after the post-cancel grace
+                # period — the task ignored cancel() and is orphaned.
+                # Treat it as a cancellation so the worker is released.
+                return {
+                    "ok": False,
+                    "error": "cancelled by user (task did not stop within 30s)",
+                    "cancelled": True,
+                }
             if slot["error"] is not None:
                 log_event(
                     "qgs_task.error",
@@ -1691,6 +1791,33 @@ class QgisToolkit:
         if isinstance(result, dict):
             result.setdefault("background", True)
         return result
+
+    def _snapshot_project(self):
+        """Write the current project to a temp .qgz for recovery.
+
+        Returns the temp path on success, or None when no snapshot could be
+        taken (unsaved project, write failure). A snapshot failure never blocks
+        execution — callers wrap this in a try/except.
+        """
+        try:
+            project = QgsProject.instance()
+            path = project.fileName()
+            if not path:
+                # Unsaved project — nothing to snapshot.
+                return None
+            fd, tmp_path = tempfile.mkstemp(suffix=".qgz", prefix="agenticgis_snapshot_")
+            os.close(fd)
+            if project.write(tmp_path):
+                log_event("toolkit.project_snapshot", path=tmp_path)
+                return tmp_path
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+            return None
+        except Exception:  # nosec B110 — never block execution
+            log_event("toolkit.project_snapshot.error", error=traceback.format_exc())
+            return None
 
     def _run_pyqgis_inner(self, code, event, owner, pump_events=True):
         import qgis.core as qgis_core
@@ -1875,6 +2002,12 @@ class QgisToolkit:
                               "Settings or define ALLOW_DANGEROUS = True at "
                               "the top of the code to override."),
                     "stdout": "", "stderr": ""}
+        # Project snapshot before a destructive foreground run: write the
+        # current project to a temp .qgz so a destructive run can be undone.
+        # Only meaningful on the main-thread path (background code must not
+        # mutate the project). Skipped when the project has no path yet.
+        if pump_events:
+            self._last_project_snapshot = self._snapshot_project()
         try:
             with redirect_stdout(out), redirect_stderr(err):
                 # Intentional user-code execution (PyQGIS escape hatch).
@@ -2262,7 +2395,18 @@ class QgisToolkit:
         # cancellation token. Falls back to a direct call if the framework
         # doesn't accept ``feedback`` (older QGIS).
         with self._cancel.scope() as (event, owner):
-            feedback = _make_qgs_feedback(event) if owner else None
+            # Always build a feedback object so processing.run() has a
+            # cancellable handle even when we're not the cancel-token owner.
+            # When ``owner`` is False the event belongs to another job; we
+            # still mirror it (a cancel from that owner will propagate) and
+            # fall back to a standalone QgsFeedback if the event is missing.
+            feedback = _make_qgs_feedback(event)
+            if feedback is None:
+                try:
+                    from qgis.core import QgsFeedback
+                    feedback = QgsFeedback()
+                except Exception:  # pragma: no cover
+                    feedback = None
 
             try:
                 if feedback is not None:
@@ -3194,7 +3338,29 @@ class QgisToolkit:
                     download_params["region"] = download_region
 
                 try:
-                    download_id = ee.data.getDownloadId(download_params)
+                    ok, result = _run_blocking_with_cancel(
+                        lambda: ee.data.getDownloadId(download_params),
+                        self.isCanceled,
+                        timeout=120.0,
+                        timeout_msg="getDownloadId timed out after 120s",
+                    )
+                    if not ok:
+                        _exc_msg = result
+                        if (
+                            "request size" in _exc_msg
+                            or "must be less than or equal" in _exc_msg
+                        ):
+                            if attempt < 2:
+                                _scale = int(_scale * 2)
+                                continue
+                        # Cancellation / timeout surface as a plain message;
+                        # distinguish them so the agent can react.
+                        if _exc_msg == "Cancelled by user":
+                            self.error_msg = "Cancelled by user"
+                        else:
+                            self.error_msg = f"getDownloadId failed: {_exc_msg}"
+                        return False
+                    download_id = result
                     break
                 except Exception as _exc:
                     msg = str(_exc)
@@ -3561,7 +3727,19 @@ class QgisToolkit:
                         params[key] = self.vis_params[key]
 
             try:
-                url = obj.getVideoThumbURL(params)
+                ok, result = _run_blocking_with_cancel(
+                    lambda: obj.getVideoThumbURL(params),
+                    self.isCanceled,
+                    timeout=120.0,
+                    timeout_msg="getVideoThumbURL timed out after 120s",
+                )
+                if not ok:
+                    if result == "Cancelled by user":
+                        self.error_msg = "Cancelled by user"
+                    else:
+                        self.error_msg = f"getVideoThumbURL failed: {result}"
+                    return False
+                url = result
             except Exception as exc:  # noqa: BLE001
                 self.error_msg = f"getVideoThumbURL failed: {type(exc).__name__}: {exc}"
                 return False
@@ -4119,9 +4297,662 @@ class QgisToolkit:
             "remaining_count": len(project.mapLayers()),
         }
 
-    def save_project(self):
+    def save_project(self, confirm=False):
+        """Save the project to its current file path on disk.
+
+        Writing overwrites the existing project file, so the caller must be
+        explicit: pass ``confirm=True`` to proceed. Use ``save_project_as`` to
+        write to a new path without overwriting the current file.
+        """
+        if not confirm:
+            return {
+                "ok": False,
+                "error": (
+                    "Saving overwrites the project file on disk. Call "
+                    "save_project with confirm=true to proceed, or use "
+                    "save_project_as to save to a new path."
+                ),
+            }
         ok = QgsProject.instance().write()
         return {"ok": bool(ok), "path": QgsProject.instance().fileName() or None}
+
+    def save_project_as(self, path):
+        """Save the project to a new ``path`` (.qgs or .qgz) without overwriting
+        the current project file.
+        """
+        if not isinstance(path, str) or not path.strip():
+            return {"ok": False, "error": "path must be a non-empty string"}
+        path = path.strip()
+        lowered = path.lower()
+        if not (lowered.endswith(".qgs") or lowered.endswith(".qgz")):
+            return {"ok": False, "error": "path must end with .qgs or .qgz"}
+        try:
+            ok = QgsProject.instance().write(path)
+            if not ok:
+                return {"ok": False, "error": "QgsProject.write() returned False"}
+            log_event("toolkit.save_project_as", path=path)
+            return {"ok": True, "path": path}
+        except Exception as exc:  # noqa: BLE001
+            return {"ok": False, "error": str(exc)}
+
+    # ------------------------------------------------------------------ #
+    # Print layout creation and export                                   #
+    # ------------------------------------------------------------------ #
+    def create_layout(self, title, layers=None, page_size="A4", orientation="portrait"):
+        """Create a print layout in the current QGIS project.
+
+        Sets up a default page (configurable size/orientation) and a map item
+        showing ``layers`` (or all visible layers when ``layers`` is None) at
+        the current canvas extent. Runs on the main thread; the dispatcher in
+        ``core.tools.dispatch`` wraps this call in ``executor.run_sync``.
+        """
+        if not isinstance(title, str) or not title.strip():
+            return {"ok": False, "error": "title must be a non-empty string"}
+        title = title.strip()
+        orientation = (orientation or "portrait").strip().lower()
+        if orientation not in ("portrait", "landscape"):
+            return {"ok": False, "error": "orientation must be 'portrait' or 'landscape'"}
+        page_size = (page_size or "A4").strip()
+        allowed_sizes = ("A4", "A3", "A2", "A1", "Letter", "Legal")
+        if page_size not in allowed_sizes:
+            return {"ok": False, "error": f"page_size must be one of {allowed_sizes}"}
+        try:
+            from qgis.core import (
+                QgsLayoutItemMap,
+                QgsLayoutItemPage,
+                QgsPrintLayout,
+                QgsProject,
+            )
+        except Exception as exc:  # noqa: BLE001
+            return {"ok": False, "error": f"QGIS layout imports failed: {exc}"}
+        try:
+            project = QgsProject.instance()
+            manager = project.layoutManager()
+            for existing in manager.layouts():
+                if existing.name() == title:
+                    return {
+                        "ok": False,
+                        "error": (
+                            f"Layout {title!r} already exists. Use a different name."
+                        ),
+                    }
+
+            layout = QgsPrintLayout(project)
+            layout.initializeDefaults()
+
+            # Configure the page size and orientation on the first page.
+            collection = layout.pageCollection()
+            page_count = collection.pageCount()
+            orient_enum = (
+                QgsLayoutItemPage.Landscape
+                if orientation == "landscape"
+                else QgsLayoutItemPage.Portrait
+            )
+            for i in range(page_count):
+                collection.page(i).setPageSize(page_size, orient_enum)
+
+            layout.setName(title)
+
+            # Locate the map item created by initializeDefaults and configure it.
+            map_item = None
+            for item in layout.items():
+                if isinstance(item, QgsLayoutItemMap):
+                    map_item = item
+                    break
+            if map_item is not None:
+                resolved = []
+                if layers:
+                    for ref in layers:
+                        layer, lerr = self._resolve_layer_ref(ref)
+                        if lerr is not None:
+                            return lerr
+                        resolved.append(layer)
+                else:
+                    # Fall back to all currently visible layers.
+                    canvas = self.iface.mapCanvas() if self.iface is not None else None
+                    if canvas is not None:
+                        resolved = [l for l in canvas.layers() if l is not None]
+                if resolved:
+                    map_item.setLayers(resolved)
+                canvas = self.iface.mapCanvas() if self.iface is not None else None
+                if canvas is not None:
+                    map_item.setExtent(canvas.extent())
+
+            manager.addLayout(layout)
+            self._canvas_dirty = True
+            log_event(
+                "toolkit.create_layout",
+                title=title,
+                page_size=page_size,
+                orientation=orientation,
+            )
+            return {"ok": True, "layout_id": title, "name": title}
+        except Exception as exc:  # noqa: BLE001
+            return {"ok": False, "error": str(exc)}
+
+    def export_layout(self, layout_id, output_path, format="pdf"):
+        """Export a print layout to PDF or PNG.
+
+        ``layout_id`` is the layout name; ``output_path`` must end with ``.pdf``
+        or ``.png`` matching ``format``. Runs on the main thread; the dispatcher
+        in ``core.tools.dispatch`` wraps this call in ``executor.run_sync``.
+        """
+        if not isinstance(layout_id, str) or not layout_id.strip():
+            return {"ok": False, "error": "layout_id must be a non-empty string"}
+        layout_id = layout_id.strip()
+        if not isinstance(output_path, str) or not output_path.strip():
+            return {"ok": False, "error": "output_path must be a non-empty string"}
+        output_path = output_path.strip()
+        fmt = (format or "pdf").strip().lower()
+        if fmt not in ("pdf", "png"):
+            return {"ok": False, "error": "format must be 'pdf' or 'png'"}
+        expected_ext = ".pdf" if fmt == "pdf" else ".png"
+        if not output_path.lower().endswith(expected_ext):
+            return {
+                "ok": False,
+                "error": f"output_path must end with {expected_ext} for format {fmt!r}",
+            }
+        try:
+            from qgis.core import QgsLayoutExporter, QgsProject
+        except Exception as exc:  # noqa: BLE001
+            return {"ok": False, "error": f"QGIS layout exports failed: {exc}"}
+        try:
+            project = QgsProject.instance()
+            manager = project.layoutManager()
+            target = None
+            for layout in manager.layouts():
+                if layout.name() == layout_id:
+                    target = layout
+                    break
+            if target is None:
+                return {"ok": False, "error": f"Layout {layout_id!r} not found."}
+
+            exporter = QgsLayoutExporter(target)
+            if fmt == "pdf":
+                settings = QgsLayoutExporter.PdfExportSettings()
+                result = exporter.exportToPdf(output_path, settings)
+            else:
+                settings = QgsLayoutExporter.ImageExportSettings()
+                result = exporter.exportToImage(output_path, settings)
+
+            # QgsLayoutExporter.Success == 0
+            success = getattr(QgsLayoutExporter, "Success", 0)
+            if result != success:
+                return {
+                    "ok": False,
+                    "error": f"Export failed with code {result}",
+                }
+            log_event(
+                "toolkit.export_layout",
+                layout_id=layout_id,
+                output_path=output_path,
+                format=fmt,
+            )
+            return {"ok": True, "output_path": output_path, "format": fmt}
+        except Exception as exc:  # noqa: BLE001
+            return {"ok": False, "error": str(exc)}
+
+    # ------------------------------------------------------------------ #
+    # Symbology, selection, reprojection, raster, and field tools       #
+    # ------------------------------------------------------------------ #
+    def _resolve_layer_ref(self, layer_id):
+        """Resolve a layer by project id, kept tool-layer id, or name.
+
+        Returns ``(layer, error_dict)``; exactly one is non-None. Accepts a
+        ``QgsMapLayer`` passthrough so callers can hand in a live layer too.
+        """
+        if isinstance(layer_id, QgsMapLayer):
+            return layer_id, None
+        if not isinstance(layer_id, str) or not layer_id.strip():
+            return None, {"ok": False, "error": "layer_id must be a non-empty string"}
+        ref = layer_id.strip()
+        project = QgsProject.instance()
+        layer = project.mapLayer(ref)
+        if layer is not None:
+            return layer, None
+        registry = self._ensure_tool_layer_registry()
+        if ref in registry:
+            return registry[ref], None
+        matches = project.mapLayersByName(ref)
+        if matches:
+            return matches[0], None
+        return None, {"ok": False, "error": f"Layer not found: {layer_id!r}"}
+
+    def set_layer_style(
+        self,
+        layer_id,
+        style_type,
+        field=None,
+        color_ramp=None,
+        color_ramp_name=None,
+        classes=None,
+        opacity=None,
+        rules=None,
+    ):
+        """Apply symbology to a vector layer. Runs on the main thread."""
+        try:
+            from qgis.core import (
+                QgsCategorizedSymbolRenderer,
+                QgsFillSymbol,
+                QgsGraduatedSymbolRenderer,
+                QgsHeatmapRenderer,
+                QgsLineSymbol,
+                QgsMarkerSymbol,
+                QgsRendererCategory,
+                QgsRuleBasedRenderer,
+                QgsSingleSymbolRenderer,
+                QgsStyle,
+            )
+        except Exception as exc:  # noqa: BLE001
+            return {"ok": False, "error": f"QGIS symbol imports failed: {exc}"}
+
+        layer, err = self._resolve_layer_ref(layer_id)
+        if err is not None:
+            return err
+        if not isinstance(layer, QgsVectorLayer):
+            return {"ok": False, "error": f"Layer {layer.name()!r} is not a vector layer"}
+
+        try:
+            def _build_ramp():
+                # Named QGIS ramp takes precedence over a hex list.
+                if color_ramp_name:
+                    try:
+                        ramp = QgsStyle.instance().colorRamp(color_ramp_name)
+                        if ramp is not None:
+                            return ramp
+                    except Exception:  # nosec B110
+                        pass
+                if color_ramp and isinstance(color_ramp, (list, tuple)) and len(color_ramp) >= 2:
+                    try:
+                        from qgis.core import QgsGradientColorRamp
+                        from qgis.PyQt.QtGui import QColor
+                        stops = [
+                            (float(i) / (len(color_ramp) - 1), QColor(c))
+                            for i, c in enumerate(color_ramp)
+                        ]
+                        return QgsGradientColorRamp(QColor(color_ramp[0]), QColor(color_ramp[-1]), stops[1:-1])
+                    except Exception:  # nosec B110
+                        pass
+                # Fallback: random color ramp.
+                try:
+                    from qgis.core import QgsRandomColorRamp
+                    return QgsRandomColorRamp()
+                except Exception:  # nosec B110
+                    return None
+
+            def _default_symbol(geometry_type):
+                if geometry_type == 0:  # Point
+                    return QgsMarkerSymbol()
+                if geometry_type == 1:  # Line
+                    return QgsLineSymbol()
+                return QgsFillSymbol()
+
+            geom_type = layer.geometryType()
+            renderer = None
+
+            if style_type == "single":
+                sym = _default_symbol(geom_type)
+                renderer = QgsSingleSymbolRenderer(sym)
+
+            elif style_type == "categorized":
+                if not field:
+                    return {"ok": False, "error": "categorized style requires a 'field'"}
+                ramp = _build_ramp()
+                categories = []
+                idx = layer.fields().lookupField(field)
+                if idx < 0:
+                    return {"ok": False, "error": f"Field not found: {field!r}"}
+                for feat in layer.getFeatures():
+                    val = feat[field]
+                    if val not in [c.value() for c in categories]:
+                        sym = _default_symbol(geom_type)
+                        if ramp is not None:
+                            try:
+                                sym.setColor(ramp.color(len(categories)))
+                            except Exception:  # nosec B110
+                                pass
+                        categories.append(QgsRendererCategory(val, sym, str(val)))
+                renderer = QgsCategorizedSymbolRenderer(field, categories)
+
+            elif style_type == "graduated":
+                if not field:
+                    return {"ok": False, "error": "graduated style requires a 'field'"}
+                ramp = _build_ramp()
+                n_classes = int(classes) if classes else 5
+                renderer = QgsGraduatedSymbolRenderer(field, [])
+                try:
+                    renderer.updateClasses(layer, n_classes)
+                except Exception:  # nosec B110
+                    pass
+                try:
+                    renderer.setClassAttribute(field)
+                except Exception:  # nosec B110
+                    pass
+                if ramp is not None:
+                    try:
+                        renderer.updateColorRamp(ramp)
+                    except Exception:  # nosec B110
+                        pass
+
+            elif style_type == "rule_based":
+                if not rules or not isinstance(rules, (list, tuple)):
+                    return {"ok": False, "error": "rule_based style requires a 'rules' list"}
+                root_sym = _default_symbol(geom_type)
+                root_rule = QgsRuleBasedRenderer.Rule(root_sym)
+                for rule in rules:
+                    label = rule.get("label", "")
+                    expr = rule.get("expression", "")
+                    color = rule.get("color")
+                    sym = _default_symbol(geom_type)
+                    if color:
+                        try:
+                            from qgis.PyQt.QtGui import QColor
+                            sym.setColor(QColor(color))
+                        except Exception:  # nosec B110
+                            pass
+                    child = QgsRuleBasedRenderer.Rule(sym, label=label, filterExpression=expr)
+                    root_rule.appendChild(child)
+                renderer = QgsRuleBasedRenderer(root_rule)
+
+            elif style_type == "heatmap":
+                if not field:
+                    return {"ok": False, "error": "heatmap style requires a 'field'"}
+                renderer = QgsHeatmapRenderer()
+                try:
+                    renderer.setWeightExpression(field)
+                except Exception:  # nosec B110
+                    pass
+
+            else:
+                return {"ok": False, "error": f"Unknown style_type: {style_type!r}"}
+
+            if renderer is None:
+                return {"ok": False, "error": "Failed to build a renderer"}
+            layer.setRenderer(renderer)
+            if opacity is not None:
+                try:
+                    layer.setOpacity(float(opacity) / 100.0)
+                except Exception:  # nosec B110
+                    pass
+            layer.triggerRepaint()
+            self._canvas_dirty = True
+            log_event("toolkit.set_layer_style", layer=layer.name(), style_type=style_type)
+            return {"ok": True, "layer_id": layer.id(), "style_type": style_type}
+        except Exception as exc:  # noqa: BLE001
+            return {"ok": False, "error": str(exc)}
+
+    def select_by_attribute(self, layer_id, field, op, value=None):
+        """Select features in a layer by attribute value comparison."""
+        layer, err = self._resolve_layer_ref(layer_id)
+        if err is not None:
+            return err
+        if not isinstance(layer, QgsVectorLayer):
+            return {"ok": False, "error": f"Layer {layer.name()!r} is not a vector layer"}
+        try:
+            ops = {
+                "eq": "=",
+                "ne": "<>",
+                "lt": "<",
+                "le": "<=",
+                "gt": ">",
+                "ge": ">=",
+                "like": "LIKE",
+                "isnull": "IS NULL",
+            }
+            if op not in ops:
+                return {"ok": False, "error": f"Unsupported operator: {op!r}"}
+            if op == "isnull":
+                expr = f'"{field}" IS NULL'
+            elif value is None:
+                return {"ok": False, "error": f"value required for op {op!r}"}
+            elif isinstance(value, str):
+                escaped = value.replace("'", "''")
+                expr = f'"{field}" {ops[op]} \'{escaped}\''
+            elif isinstance(value, bool):
+                expr = f'"{field}" {ops[op]} {str(value).lower()}'
+            else:
+                expr = f'"{field}" {ops[op]} {value}'
+            layer.selectByExpression(expr)
+            log_event("toolkit.select_by_attribute", layer=layer.name(), op=op, field=field)
+            return {"ok": True, "selected_count": layer.selectedFeatureCount()}
+        except Exception as exc:  # noqa: BLE001
+            return {"ok": False, "error": str(exc)}
+
+    def select_by_expression(self, layer_id, expression):
+        """Select features in a layer using a QGIS expression string."""
+        layer, err = self._resolve_layer_ref(layer_id)
+        if err is not None:
+            return err
+        if not isinstance(layer, QgsVectorLayer):
+            return {"ok": False, "error": f"Layer {layer.name()!r} is not a vector layer"}
+        try:
+            layer.selectByExpression(expression)
+            log_event("toolkit.select_by_expression", layer=layer.name())
+            return {"ok": True, "selected_count": layer.selectedFeatureCount()}
+        except Exception as exc:  # noqa: BLE001
+            return {"ok": False, "error": str(exc)}
+
+    def select_within(self, layer_id, overlay_layer_id):
+        """Select features in layer_id that are within features of overlay_layer_id."""
+        layer, err = self._resolve_layer_ref(layer_id)
+        if err is not None:
+            return err
+        overlay, oerr = self._resolve_layer_ref(overlay_layer_id)
+        if oerr is not None:
+            return oerr
+        if not isinstance(layer, QgsVectorLayer):
+            return {"ok": False, "error": f"Layer {layer.name()!r} is not a vector layer"}
+        if not isinstance(overlay, QgsVectorLayer):
+            return {"ok": False, "error": f"Overlay layer {overlay.name()!r} is not a vector layer"}
+        try:
+            import processing
+            processing.run(
+                "native:selectbylocation",
+                {
+                    "INPUT": layer,
+                    "INTERSECT": overlay,
+                    "PREDICATE": [0],  # 0 = intersect (within covers this)
+                    "METHOD": 1,  # 1 = create new selection
+                },
+            )
+            log_event("toolkit.select_within", layer=layer.name(), overlay=overlay.name())
+            return {"ok": True, "selected_count": layer.selectedFeatureCount()}
+        except Exception as exc:  # noqa: BLE001
+            return {"ok": False, "error": str(exc)}
+
+    def clear_selection(self, layer_id):
+        """Clear the current selection in a layer."""
+        layer, err = self._resolve_layer_ref(layer_id)
+        if err is not None:
+            return err
+        if not isinstance(layer, QgsVectorLayer):
+            return {"ok": False, "error": f"Layer {layer.name()!r} is not a vector layer"}
+        try:
+            layer.removeSelection()
+            log_event("toolkit.clear_selection", layer=layer.name())
+            return {"ok": True, "selected_count": 0}
+        except Exception as exc:  # noqa: BLE001
+            return {"ok": False, "error": str(exc)}
+
+    def invert_selection(self, layer_id):
+        """Invert the current selection in a layer."""
+        layer, err = self._resolve_layer_ref(layer_id)
+        if err is not None:
+            return err
+        if not isinstance(layer, QgsVectorLayer):
+            return {"ok": False, "error": f"Layer {layer.name()!r} is not a vector layer"}
+        try:
+            selected = set(layer.selectedFeatureIds())
+            inverted = [f.id() for f in layer.getFeatures() if f.id() not in selected]
+            layer.selectByIds(inverted)
+            log_event("toolkit.invert_selection", layer=layer.name())
+            return {"ok": True, "selected_count": layer.selectedFeatureCount()}
+        except Exception as exc:  # noqa: BLE001
+            return {"ok": False, "error": str(exc)}
+
+    def reproject_layer(self, layer_id, target_crs):
+        """Reproject a layer to a target CRS and add the result as a new layer."""
+        layer, err = self._resolve_layer_ref(layer_id)
+        if err is not None:
+            return err
+        try:
+            import processing
+            from qgis.core import QgsCoordinateReferenceSystem
+            crs = QgsCoordinateReferenceSystem(target_crs)
+            if not crs.isValid():
+                return {"ok": False, "error": f"Invalid target CRS: {target_crs!r}"}
+            output = processing.run(
+                "native:reprojectlayer",
+                {
+                    "INPUT": layer,
+                    "TARGET_CRS": crs,
+                    "OPERATION": "",
+                    "OUTPUT": "TEMPORARY_OUTPUT",
+                },
+            )
+            result_layer = output.get("OUTPUT") if isinstance(output, dict) else None
+            if result_layer is None:
+                return {"ok": False, "error": "reprojectlayer produced no output"}
+            new_id = self._register_tool_layer(result_layer)
+            self._canvas_dirty = True
+            log_event("toolkit.reproject_layer", layer=layer.name(), target_crs=target_crs)
+            return {"ok": True, "layer_id": new_id, "name": result_layer.name()}
+        except Exception as exc:  # noqa: BLE001
+            return {"ok": False, "error": str(exc)}
+
+    def set_project_crs(self, crs):
+        """Set the CRS of the current QGIS project."""
+        try:
+            from qgis.core import QgsCoordinateReferenceSystem
+            ref = QgsCoordinateReferenceSystem(crs)
+            if not ref.isValid():
+                return {"ok": False, "error": f"Invalid CRS: {crs!r}"}
+            QgsProject.instance().setCrs(ref)
+            self._canvas_dirty = True
+            log_event("toolkit.set_project_crs", crs=crs)
+            return {"ok": True, "crs": crs}
+        except Exception as exc:  # noqa: BLE001
+            return {"ok": False, "error": str(exc)}
+
+    def analyze_raster(self, layer_id, band=1):
+        """Get band statistics for a raster layer (min, max, mean, ...)."""
+        layer, err = self._resolve_layer_ref(layer_id)
+        if err is not None:
+            return err
+        if not isinstance(layer, QgsRasterLayer):
+            return {"ok": False, "error": f"Layer {layer.name()!r} is not a raster layer"}
+        try:
+            band = int(band)
+            if band < 1:
+                return {"ok": False, "error": "band must be >= 1"}
+            stats = layer.dataProvider().bandStatistics(band)
+            log_event("toolkit.analyze_raster", layer=layer.name(), band=band)
+            return {
+                "ok": True,
+                "band": band,
+                "min": stats.minimumValue,
+                "max": stats.maximumValue,
+                "mean": stats.mean,
+                "std_dev": stats.stdDev,
+                "sum": stats.sum,
+                "range": stats.range,
+                "count": stats.elementCount,
+            }
+        except Exception as exc:  # noqa: BLE001
+            return {"ok": False, "error": str(exc)}
+
+    def get_algorithm_parameters(self, algorithm_id):
+        """Return parameter definitions for a QGIS processing algorithm."""
+        try:
+            from qgis.core import QgsProcessingParameterDefinition
+            alg = QgsApplication.processingRegistry().algorithmById(algorithm_id)
+            if alg is None:
+                return {"ok": False, "error": f"Algorithm not found: {algorithm_id!r}"}
+            params = []
+            for param in alg.parameterDefinitions():
+                params.append({
+                    "name": param.name(),
+                    "type": param.type(),
+                    "description": param.description(),
+                    "required": not (param.flags() & QgsProcessingParameterDefinition.FlagOptional),
+                    "default": param.defaultValue(),
+                    "is_destination": param.isDestination(),
+                })
+            log_event("toolkit.get_algorithm_parameters", algorithm_id=algorithm_id, count=len(params))
+            return {"ok": True, "parameters": params}
+        except Exception as exc:  # noqa: BLE001
+            return {"ok": False, "error": str(exc)}
+
+    def field_calculator(
+        self,
+        layer_id,
+        field_name,
+        expression,
+        field_type="double",
+        field_length=80,
+        field_precision=0,
+        virtual=False,
+    ):
+        """Add a calculated field to a vector layer.
+
+        For ``virtual=True`` a virtual field is added in-place on the main
+        thread; otherwise the native fieldcalculator processing algorithm
+        produces a new layer that is registered for chaining.
+        """
+        layer, err = self._resolve_layer_ref(layer_id)
+        if err is not None:
+            return err
+        if not isinstance(layer, QgsVectorLayer):
+            return {"ok": False, "error": f"Layer {layer.name()!r} is not a vector layer"}
+        try:
+            # Map field_type string to the native:fieldcalculator FIELD_TYPE enum.
+            type_map = {"double": 6, "integer": 0, "string": 2, "date": 7}
+            type_int = type_map.get(field_type, 6)
+            if virtual:
+                from qgis.core import QgsExpression, QgsField
+                from qgis.PyQt.QtCore import QVariant
+                variant_type_map = {
+                    "double": QVariant.Double,
+                    "integer": QVariant.Int,
+                    "string": QVariant.String,
+                    "date": QVariant.Date,
+                }
+                fld = QgsField(
+                    field_name,
+                    variant_type_map.get(field_type, QVariant.Double),
+                    "",
+                    int(field_length),
+                    int(field_precision),
+                )
+                idx = layer.addExpressionField(QgsExpression(expression), fld)
+                if idx < 0:
+                    return {"ok": False, "error": "addExpressionField failed"}
+                layer.triggerRepaint()
+                self._canvas_dirty = True
+                log_event("toolkit.field_calculator", layer=layer.name(), field=field_name, virtual=True)
+                return {"ok": True, "layer_id": layer.id(), "field_name": field_name}
+            import processing
+            output = processing.run(
+                "native:fieldcalculator",
+                {
+                    "INPUT": layer,
+                    "FIELD_NAME": field_name,
+                    "FIELD_TYPE": type_int,
+                    "FIELD_LENGTH": int(field_length),
+                    "FIELD_PRECISION": int(field_precision),
+                    "FORMULA": expression,
+                    "OUTPUT": "TEMPORARY_OUTPUT",
+                },
+            )
+            result_layer = output.get("OUTPUT") if isinstance(output, dict) else None
+            if result_layer is None:
+                return {"ok": False, "error": "fieldcalculator produced no output"}
+            new_id = self._register_tool_layer(result_layer)
+            self._canvas_dirty = True
+            log_event("toolkit.field_calculator", layer=layer.name(), field=field_name, virtual=False)
+            return {"ok": True, "layer_id": new_id, "field_name": field_name}
+        except Exception as exc:  # noqa: BLE001
+            return {"ok": False, "error": str(exc)}
 
     def _save_fetch_to_file(self, resp, url, head, content_type, status, start, task=None):
         """Stream a binary web_fetch response to a temp file.
@@ -4400,9 +5231,11 @@ class QgisToolkit:
                     if not _is_blank_chart_label(display):
                         display_labels[val] = display
                 scanned = i + 1
-                # Yield to the event loop every 100 features to prevent UI freeze
+                # Yield to the event loop every 100 features to prevent UI freeze.
+                # processEvents() is only safe on the main thread; when this
+                # scan runs inside a QgsTask worker the guard skips it.
                 if i % EVENT_PUMP_INTERVAL == 0:
-                    QCoreApplication.processEvents()
+                    _pump_events()
 
         result = {
             "ok": True,
@@ -4481,9 +5314,11 @@ class QgisToolkit:
                             numeric_sum_sq += num * num
                             numeric_min = num if numeric_min is None else min(numeric_min, num)
                             numeric_max = num if numeric_max is None else max(numeric_max, num)
-                    # Yield to the event loop every 100 features to prevent UI freeze
+                    # Yield to the event loop every 100 features to prevent UI freeze.
+                    # processEvents() is only safe on the main thread; when this
+                    # scan runs inside a QgsTask worker the guard skips it.
                     if i % EVENT_PUMP_INTERVAL == 0:
-                        QCoreApplication.processEvents()
+                        _pump_events()
             finally:
                 if owner:
                     self._cancel.release(event)

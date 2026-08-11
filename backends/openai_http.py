@@ -50,6 +50,27 @@ def _safe_urlopen(request, **kwargs):
 DEFAULT_TIMEOUT = 120.0
 
 
+def _is_reasoning_model(model_name):
+    """Return True for OpenAI o1/o3/o4 (and other "reasoning") chat models.
+
+    These models reject ``max_tokens``, ``temperature`` and ``top_p`` and
+    require ``max_completion_tokens`` instead. The substring checks mirror
+    the model-family detection in ``base.py`` (specific prefixes such as
+    ``o4`` checked before the broader ``o1``/``o3``), and also catch any
+    model whose name advertises "reasoning".
+    """
+    if not model_name:
+        return False
+    name = model_name.lower()
+    if "reasoning" in name:
+        return True
+    # Match prefixes; ``o1``, ``o3``, ``o4`` (e.g. "o4-mini", "o3", "o1-preview").
+    for prefix in ("o4", "o1", "o3"):
+        if name.startswith(prefix):
+            return True
+    return False
+
+
 def _looks_like_ollama(base_url):
     """Return True when *base_url* points at a local Ollama instance.
 
@@ -257,9 +278,9 @@ class OpenAIHttpClient:
         """
         effective_timeout = self.timeout if timeout is None else timeout
         cache_system = _looks_like_openrouter_claude(self.base_url, model)
+        reasoning = _is_reasoning_model(model)
         payload = {
             "model": model,
-            "max_tokens": max_tokens,
             "messages": self._build_messages(system, messages,
                                              cache_system=cache_system),
             "tools": tools,
@@ -267,10 +288,17 @@ class OpenAIHttpClient:
             "stream": True,
             "stream_options": {"include_usage": True},
         }
-        if temperature is not None:
-            payload["temperature"] = temperature
-        if top_p is not None:
-            payload["top_p"] = top_p
+        if reasoning:
+            # o1/o3/o4 reasoning models reject ``max_tokens`` (and
+            # ``temperature``/``top_p``) with a hard HTTP 400; they require
+            # ``max_completion_tokens`` instead.
+            payload["max_completion_tokens"] = max_tokens
+        else:
+            payload["max_tokens"] = max_tokens
+            if temperature is not None:
+                payload["temperature"] = temperature
+            if top_p is not None:
+                payload["top_p"] = top_p
         # B1 — Ollama keep_alive: prevent the model from being unloaded between
         # turns.  Only sent to Ollama endpoints; strict providers reject unknown
         # fields.
@@ -447,6 +475,12 @@ class OpenAIHttpClient:
                 "id": tc.get("id", ""),
                 "name": tc["function"].get("name", ""),
                 "input": parsed,
+                # Always carry the raw arguments string alongside the parsed
+                # input so the backend can detect/handle malformed args itself
+                # (it re-parses the arguments separately) instead of crashing
+                # on a truncated JSON payload. A missing/empty raw_args is
+                # normalised to a valid JSON object string.
+                "raw_arguments": raw_args if raw_args else "{}",
             })
 
         if stopped or cancelled:
@@ -458,8 +492,13 @@ class OpenAIHttpClient:
         return blocks, finish_reason
 
     def _open_stream(self, data, headers, timeout, on_connecting=None):
+        # Transient HTTP status codes that are worth retrying with backoff.
+        # 429 (rate limited), 500/502/503/504 (server/gateway errors).
+        # 400/401/403/404/422 are permanent client errors — never retry.
+        _RETRY_STATUSES = (429, 500, 502, 503, 504)
+        _MAX_ATTEMPTS = 3
         last_error = None
-        for attempt in range(2):
+        for attempt in range(_MAX_ATTEMPTS):
             connection, is_new = self._ensure_conn(timeout)
             if is_new and on_connecting:
                 try:
@@ -488,7 +527,16 @@ class OpenAIHttpClient:
                 self._close_conn()
                 if cancelled:
                     return _CancelledResponse()
-                if attempt == 0:
+                # Connection-level failure: retry once with backoff, then
+                # surface the error. The original stale-connection retry
+                # (now folded into this loop) handles TCP resets on connect.
+                if attempt < _MAX_ATTEMPTS - 1:
+                    log_event(
+                        "transport.http_retry",
+                        attempt=attempt + 1,
+                        status="conn_error",
+                    )
+                    time.sleep(1.0 * (2 ** attempt))
                     continue
                 raise OpenAIHttpError(f"Connection error: {exc}") from exc
 
@@ -522,8 +570,33 @@ class OpenAIHttpClient:
                     if self._active_connection is connection:
                         self._active_connection = None
                 self._close_conn()
+                status = response.status
+                if status in _RETRY_STATUSES and attempt < _MAX_ATTEMPTS - 1:
+                    # Honor Retry-After for 429 if the server provided it
+                    # (parsed as integer seconds); otherwise exponential
+                    # backoff (1s, 2s, 4s).
+                    retry_after = None
+                    for key, val in response.getheaders():
+                        if key.lower() == "retry-after":
+                            try:
+                                retry_after = int(val)
+                            except (ValueError, TypeError):
+                                retry_after = None
+                            break
+                    if retry_after is not None and retry_after >= 0:
+                        delay = retry_after
+                    else:
+                        delay = 1.0 * (2 ** attempt)
+                    log_event(
+                        "transport.http_retry",
+                        attempt=attempt + 1,
+                        status=status,
+                        delay_s=delay,
+                    )
+                    time.sleep(delay)
+                    continue
                 raise OpenAIHttpError(
-                    f"HTTP {response.status}: {detail[:600]}"
+                    f"HTTP {status}: {detail[:600]}"
                 )
             # Bound the streaming read so a silent socket cannot block the
             # worker forever; the read loop re-checks should_stop / stall.

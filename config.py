@@ -33,12 +33,12 @@ DEFAULTS = {
     # Behaviour
     "system_prompt": "",           # empty => built-in default
     "auto_run": True,              # execute generated PyQGIS without confirmation
-    "max_iterations": 0,           # 0 or less => unlimited agent tool-use loop
+    "max_iterations": 25,          # hard cap on agent tool-use iterations (0 or less => unlimited)
     # When True, run_pyqgis refuses (returns an error) if agent code calls a
     # "dangerous" builtin — os.system, subprocess, shutil.rmtree, ctypes, etc.
     # Users can opt out per-call by setting ``ALLOW_DANGEROUS = True`` at the
     # top of their code.
-    "confirm_dangerous_calls": False,
+    "confirm_dangerous_calls": True,
     # User can choose "Always allow" in the external access permission popup.
     # This permits future file/path/URL/database access without prompting.
     "external_access_always_allowed": False,
