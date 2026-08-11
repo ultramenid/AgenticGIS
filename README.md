@@ -14,11 +14,23 @@ it, and connect.
 ## What it can do
 
 - **Analyse** — field statistics, category breakdowns, missing-value scans, and
-  bounded layer summaries that stay fast on large datasets.
+  bounded layer summaries that stay fast on large datasets. Raster band
+  statistics (min/max/mean/std/sum/range) via `analyze_raster`.
 - **Visualise** — inline tables, charts (bar / pie / line), and stat cards
-  rendered straight in the chat dock.
+  rendered straight in the chat dock. Style layers by attribute with
+  `set_layer_style` (categorized, graduated, rule-based, single-symbol, heatmap).
 - **Process** — run native / GDAL / GRASS / SAGA algorithms (buffer, clip,
-  dissolve, heatmap, …) and add the derived layer to the project.
+  dissolve, heatmap, …) and add the derived layer to the project. Discover
+  algorithm parameters with `get_algorithm_parameters` before calling
+  `run_processing` — no more guessing parameter names.
+- **Select** — `select_by_attribute`, `select_by_expression`, `select_within`,
+  `invert_selection`, and `clear_selection` for full feature-selection workflows.
+- **Reproject & CRS** — `reproject_layer` and `set_project_crs` without writing
+  PyQGIS.
+- **Edit fields** — `field_calculator` adds calculated fields from QGIS
+  expressions (permanent or virtual).
+- **Layouts & export** — `create_layout` builds a print layout with map items;
+  `export_layout` exports to PDF or PNG.
 - **Remote sensing** — drive Google Earth Engine for satellite imagery, spectral
   indices, cloud-masked mosaics, and land-cover work. It looks up each dataset's
   *current* bands and best practice (e.g. Sentinel-2 Cloud Score+, not the
@@ -40,11 +52,21 @@ QGIS session
  │    • Custom URL → any OpenAI- or Anthropic-compatible endpoint
  │    • CLI Agent  → installed local agent CLIs such as Codex, Gemini, OpenCode
  └─ Tools (heavy work runs on a worker thread; project/canvas/UI calls stay on the main thread)
-      run_pyqgis         arbitrary PyQGIS — layers, canvas, plugins, console
-      run_processing     GDAL / GRASS / SAGA / native algorithms
-      gee_*              Google Earth Engine imagery & indices
-      get_project_state  layer list, CRS, extent, field schemas
-      web_fetch          pull a public URL or API response
+      run_pyqgis              arbitrary PyQGIS — layers, canvas, plugins, console
+      run_processing          GDAL / GRASS / SAGA / native algorithms
+      gee_*                   Google Earth Engine imagery & indices
+      get_project_state       layer list, CRS, extent, field schemas
+      set_layer_style         categorized / graduated / rule-based / heatmap symbology
+      select_*                select by attribute, expression, within; invert; clear
+      reproject_layer         reproject to a target CRS
+      set_project_crs         set the project CRS
+      analyze_raster          raster band statistics
+      get_algorithm_parameters  discover processing algorithm parameter schemas
+      field_calculator        add calculated fields from QGIS expressions
+      create_layout           print layout with map items
+      export_layout          export layout to PDF / PNG
+      web_fetch               pull a public URL or API response
+      ask_user                ask the user a clarifying question
 ```
 
 `run_pyqgis` is the catch-all — it executes arbitrary Python inside the live
@@ -100,8 +122,10 @@ Notes:
 
 ## Requirements
 
-- **QGIS 3.22+** — that's the whole hard requirement. The plugin itself needs
-  no Python packages (stdlib only).
+- **QGIS 3.22+** (including QGIS 4 / Qt6) — that's the whole hard requirement.
+  The plugin itself needs no Python packages (stdlib only). All QGIS enums use
+  the scoped `Qgis.*` form with `getattr` fallbacks, so it works on both Qt5
+  (QGIS 3) and Qt6 (QGIS 4) builds.
 - **An LLM connection** — one of the connection modes above (API key, custom
   endpoint, or local CLI agent).
 - **Remote sensing (optional)** — to use the Google Earth Engine features you
@@ -182,6 +206,10 @@ Productive question patterns:
 | Field summary | *"What is the distribution of land-cover classes in the forest layer?"* |
 | Spatial operation | *"Buffer the river layer by 500 m and clip it to the study area."* |
 | Cross-layer analysis | *"How many buildings fall within the flood-risk zone?"* |
+| Styling | *"Style the population layer with a graduated green-to-red ramp by density."* |
+| Selection | *"Select all parcels larger than 1 ha."* |
+| Raster analysis | *"What are the band statistics of this DEM?"* |
+| Layout & export | *"Create a map layout with these three layers and export it to PDF."* |
 | Remote sensing index | *"Show me an NDVI cloud-masked mosaic for this area for the last dry season."* |
 | Trend over time | *"Plot the monthly average NDVI for the watershed from 2020 to 2024."* |
 | Data quality | *"Are there any null values or geometry errors in the parcels layer?"* |
@@ -216,12 +244,16 @@ decisions so the agent stays coherent across dozens of turns.
 4.  "For those districts, buffer rivers by 200 m and compute what
      percentage of forest falls within the buffer"
     → processing chain runs; result layer + percentage table
-5.  "Show me a cloud-free Sentinel-2 NDVI composite for those districts
+5.  "Style the buffer layer with a graduated blue ramp by forest percentage"
+    → set_layer_style applies a QgsGraduatedSymbolRenderer
+6.  "Show me a cloud-free Sentinel-2 NDVI composite for those districts
      from the last six months"
     → agent calls gee_status → confirms GEE ready → fetches live STAC
       metadata → writes cloud-masked mosaic code → adds EE layer
-6.  "Compare NDVI values inside vs outside the river buffer"
+7.  "Compare NDVI values inside vs outside the river buffer"
     → zonal statistics → inline stat cards for both zones
+8.  "Create a map layout with the NDVI layer and the buffer, export to PDF"
+    → create_layout + export_layout → PDF saved
 ```
 
 Steps 2–6 are each a single sentence. The agent handles the tool chain,
@@ -229,13 +261,22 @@ algorithm selection, and parameter wiring — you steer the analysis.
 
 Generated PyQGIS **auto-runs** (no per-step confirmation), scoped to the
 current QGIS project/layers. Avoid pointing it at irreplaceable data without a
-backup. Two guardrails apply:
+backup. Several guardrails apply:
 
+- **Iteration cap** — the agent loop is capped at 25 tool-use iterations by
+  default (configurable via `max_iterations` in Settings). The agent can no
+  longer run forever consuming tokens if it gets stuck in a loop.
+- **Dangerous call guard** — destructive built-ins in `run_pyqgis`
+  (e.g. `os.system`, `shutil.rmtree`, `subprocess`) are blocked by default.
+  Disable via the *confirm dangerous calls* setting if you need them.
 - **External access** (loading files/URLs, `web_fetch`, Earth Engine, databases)
   is gated behind a one-time permission popup; you can allow it once or remember
-  the choice.
-- Destructive built-ins in `run_pyqgis` (e.g. `os.system`, `shutil.rmtree`) can
-  be blocked via the *confirm dangerous calls* setting.
+  the choice. Agent-authored code can no longer self-grant this permission.
+- **Project save guard** — `save_project` requires `confirm=true` to prevent
+  accidentally overwriting the project file. Use `save_project_as` to save to a
+  new path.
+- **Project snapshots** — a temp project snapshot is taken before destructive
+  `run_pyqgis` runs for recovery.
 
 Layer-removal tools only unload layers from the project — they never delete
 source files.
@@ -305,10 +346,17 @@ authenticate the **Google Earth Engine** QGIS plugin separately (see
 ## Limitations — General
 
 - **CLI Agent mode** cannot stream partial results — the agent waits for the CLI
-  to produce its full response before processing tool results.
+  to produce its full response before processing tool results. CLI-mode sessions
+  do not support history compaction.
 - **Reusing layers** depends on the LLM recognising that existing layers contain
   the data you need. The system prompt instructs it to prefer local clip/extract
   over re-running GEE, but this is a model-level behaviour, not guaranteed.
+- **Rate limits** — both OpenAI and Anthropic backends retry transient HTTP
+  errors (429, 500, 502, 503, 504) with exponential backoff and `Retry-After`
+  support (up to 3 attempts). Permanent errors (400, 401, 403, 404) fail
+  immediately with a clear message.
+- **Reasoning models** — OpenAI o1/o3/o4 reasoning models are supported and use
+  `max_completion_tokens` instead of `max_tokens` (which they reject).
 
 ## Roadmap
 
