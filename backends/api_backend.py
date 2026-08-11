@@ -22,7 +22,6 @@ from .base import (
     append_transient_state_anthropic,
     elide_stale_tool_results,
     max_tokens_for,
-    should_compact,
     unlimited_iterations,
 )
 from .openai_backend import DEFAULT_SYSTEM_PROMPT  # noqa: F401 — re-export for tests
@@ -88,7 +87,7 @@ class ApiBackend(AgentBackend):
             base_url = self.config.get("custom_base_url") or None
         return {
             "api_key": api_key or None,
-            "auth_token": None,
+            "auth_token": None,  # nosec B105 — not a password, just a default null
             "base_url": base_url,
             "config": self.config,
         }
@@ -258,7 +257,8 @@ class ApiBackend(AgentBackend):
             # Mirror the OpenAI backend's finish_reason=="length" guard.
             if stop_reason == "max_tokens" and tool_uses:
                 emit(AgentEvent(EventType.THINKING, {
-                    "text": "Response truncated mid-tool-call (max_tokens reached). Asking model to retry with complete arguments."
+                    "text": "Response truncated mid-tool-call (max_tokens reached). "
+                            "Asking model to retry with complete arguments."
                 }))
                 messages.append({
                     "role": "user",

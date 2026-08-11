@@ -4411,7 +4411,7 @@ class QgisToolkit:
                     # Fall back to all currently visible layers.
                     canvas = self.iface.mapCanvas() if self.iface is not None else None
                     if canvas is not None:
-                        resolved = [l for l in canvas.layers() if l is not None]
+                        resolved = [lyr for lyr in canvas.layers() if lyr is not None]
                 if resolved:
                     map_item.setLayers(resolved)
                 canvas = self.iface.mapCanvas() if self.iface is not None else None

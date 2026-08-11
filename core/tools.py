@@ -208,8 +208,19 @@ TOOL_SPECS = [
                 "name": {"type": "string"},
                 "provider": {
                     "type": "string",
-                    "enum": ["ogr", "gdal", "postgres", "spatialite", "wms", "wfs", "wcs", "wmts", "xyz", "vector-tile", "mdal", "ept", "copc", "las", "laz", "delimitedtext", "gpx"],
-                    "description": "Data provider (one of the enum values). ogr = vector (default), gdal = raster, postgres/spatialite = databases, wms/wfs/wcs/wmts/xyz/vector-tile = web services, mdal/ept/copc/las/laz = mesh/point cloud, delimitedtext/gpx = other.",
+                    "enum": [
+                        "ogr", "gdal", "postgres", "spatialite", "wms", "wfs",
+                        "wcs", "wmts", "xyz", "vector-tile", "mdal", "ept",
+                        "copc", "las", "laz", "delimitedtext", "gpx",
+                    ],
+                    "description": (
+                        "Data provider (one of the enum values). "
+                        "ogr = vector (default), gdal = raster, "
+                        "postgres/spatialite = databases, "
+                        "wms/wfs/wcs/wmts/xyz/vector-tile = web services, "
+                        "mdal/ept/copc/las/laz = mesh/point cloud, "
+                        "delimitedtext/gpx = other."
+                    ),
                 },
                 "zoom": {
                     "type": "boolean",
