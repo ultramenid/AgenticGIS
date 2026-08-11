@@ -10,6 +10,7 @@ import threading
 import time
 
 from qgis.core import (
+    Qgis,
     QgsApplication,
     QgsProcessingAlgRunnerTask,
     QgsProcessingContext,
@@ -214,12 +215,13 @@ def run_processing_algorithm_task(
         if hasattr(context, "setProject"):
             context.setProject(QgsProject.instance())
         feedback = QgsProcessingFeedback()
-        # Lazy default: avoid eager evaluation of QgsTask.CanCancel in case
-        # it is removed in QGIS 4 (would crash before the getattr fallback).
-        try:
-            _default_flag = QgsTask.CanCancel
-        except AttributeError:
-            _default_flag = 0  # fallback when QGIS 4 removes the constant
+        # Qt6/QGIS4 uses scoped Qgis.TaskFlag.CanCancel;
+        # QGIS 3 uses the unscoped QgsTask.CanCancel constant.
+        task_flag = getattr(Qgis, "TaskFlag", None)
+        if task_flag is not None:
+            _default_flag = getattr(task_flag, "CanCancel", 0)
+        else:
+            _default_flag = getattr(QgsTask, "CanCancel", 0)
         flags = getattr(QgsProcessingAlgRunnerTask, "CanCancel", _default_flag)
         task = QgsProcessingAlgRunnerTask(algorithm, params, context, feedback, flags)
 

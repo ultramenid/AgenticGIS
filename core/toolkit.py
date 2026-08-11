@@ -43,6 +43,11 @@ try:
 except ImportError:
     QgsVectorLayerCache = None
 
+try:
+    from qgis.core import QgsProcessingParameterDefinition
+except ImportError:
+    QgsProcessingParameterDefinition = None
+
 from .cancellation import CancellationRegistry as _CancellationRegistry
 from .cancellation import cancel_requested as _cancel_requested
 from .analysis_cache import AnalysisCache, layer_cache_token
@@ -266,10 +271,28 @@ def _require_vector_layer(layer_id):
 
 def _no_geometry_flag():
     """Return the QGIS no-geometry feature request flag across QGIS versions."""
-    try:
-        return Qgis.FeatureRequestFlag.NoGeometry
-    except AttributeError:
-        return QgsFeatureRequest.NoGeometry
+    # Qt6/QGIS4 uses scoped Qgis.FeatureRequestFlag.NoGeometry;
+    # QGIS 3 uses the unscoped QgsFeatureRequest.NoGeometry.
+    flag_enum = getattr(Qgis, "FeatureRequestFlag", None)
+    if flag_enum is not None:
+        val = getattr(flag_enum, "NoGeometry", None)
+        if val is not None:
+            return val
+    return getattr(QgsFeatureRequest, "NoGeometry", None)
+
+
+def _param_flag_optional():
+    """Return the QGIS processing parameter FlagOptional across QGIS versions."""
+    # Qt6/QGIS4 uses scoped Qgis.ProcessingParameterFlag.FlagOptional;
+    # QGIS 3 uses the unscoped QgsProcessingParameterDefinition.FlagOptional.
+    flag_enum = getattr(Qgis, "ProcessingParameterFlag", None)
+    if flag_enum is not None:
+        val = getattr(flag_enum, "FlagOptional", None)
+        if val is not None:
+            return val
+    if QgsProcessingParameterDefinition is not None:
+        return getattr(QgsProcessingParameterDefinition, "FlagOptional", 0)
+    return 0
 
 
 # Sentinel result for cancelled tool calls (a string so JSON-serialisable).
@@ -4381,13 +4404,17 @@ class QgisToolkit:
             layout.initializeDefaults()
 
             # Configure the page size and orientation on the first page.
+            # Qt6/QGIS4 uses scoped Qgis.LayoutItemPageOrientation.Landscape/
+            # Portrait; QGIS 3 uses the unscoped QgsLayoutItemPage constants.
             collection = layout.pageCollection()
             page_count = collection.pageCount()
-            orient_enum = (
-                QgsLayoutItemPage.Landscape
-                if orientation == "landscape"
-                else QgsLayoutItemPage.Portrait
-            )
+            orient_attr = "Landscape" if orientation == "landscape" else "Portrait"
+            orient_enum = None
+            orient_cls = getattr(Qgis, "LayoutItemPageOrientation", None)
+            if orient_cls is not None:
+                orient_enum = getattr(orient_cls, orient_attr, None)
+            if orient_enum is None:
+                orient_enum = getattr(QgsLayoutItemPage, orient_attr, None)
             for i in range(page_count):
                 collection.page(i).setPageSize(page_size, orient_enum)
 
@@ -4864,7 +4891,6 @@ class QgisToolkit:
     def get_algorithm_parameters(self, algorithm_id):
         """Return parameter definitions for a QGIS processing algorithm."""
         try:
-            from qgis.core import QgsProcessingParameterDefinition
             alg = QgsApplication.processingRegistry().algorithmById(algorithm_id)
             if alg is None:
                 return {"ok": False, "error": f"Algorithm not found: {algorithm_id!r}"}
@@ -4874,7 +4900,7 @@ class QgisToolkit:
                     "name": param.name(),
                     "type": param.type(),
                     "description": param.description(),
-                    "required": not (param.flags() & QgsProcessingParameterDefinition.FlagOptional),
+                    "required": not (param.flags() & _param_flag_optional()),
                     "default": param.defaultValue(),
                     "is_destination": param.isDestination(),
                 })

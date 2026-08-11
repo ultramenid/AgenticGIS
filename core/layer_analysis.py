@@ -185,10 +185,13 @@ def _selected_field_names(layer, fields):
 def _attribute_request(layer, field_names):
     request = QgsFeatureRequest()
     no_geometry = None
-    if Qgis is not None and hasattr(Qgis, "FeatureRequestFlag"):
-        no_geometry = Qgis.FeatureRequestFlag.NoGeometry
-    elif hasattr(QgsFeatureRequest, "NoGeometry"):
-        no_geometry = QgsFeatureRequest.NoGeometry
+    # Qt6/QGIS4 uses scoped Qgis.FeatureRequestFlag.NoGeometry;
+    # QGIS 3 uses the unscoped QgsFeatureRequest.NoGeometry.
+    flag_enum = getattr(Qgis, "FeatureRequestFlag", None)
+    if flag_enum is not None:
+        no_geometry = getattr(flag_enum, "NoGeometry", None)
+    if no_geometry is None:
+        no_geometry = getattr(QgsFeatureRequest, "NoGeometry", None)
     if no_geometry is not None:
         request.setFlags(no_geometry)
     request.setSubsetOfAttributes(field_names, layer.fields())
