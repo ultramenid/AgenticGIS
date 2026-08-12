@@ -600,6 +600,8 @@ class ChatDock(QgsDockWidget):
         if obj is self.input and event.type() == QEvent.Type.KeyPress:
             self._maybe_prewarm()
             if event.key() == Qt.Key.Key_Escape:
+                if event.isAutoRepeat():
+                    return True
                 return self._handle_input_escape()
             if event.key() in (Qt.Key.Key_Up, Qt.Key.Key_Down) and event.modifiers() == Qt.KeyboardModifier.NoModifier:
                 if self._handle_prompt_history_key(event.key()):
@@ -1647,6 +1649,23 @@ class ChatDock(QgsDockWidget):
             return False
         self._stop_requested = True
         worker = self._worker
+        # Finalize the partial turn and stop the render timer before
+        # detaching, mirroring _on_stop.  Without this, a pending
+        # _stream_render_timer can fire after cleanup and create a
+        # spurious turn, and the old turn bubble keeps a streaming cursor.
+        self._finish_streaming()
+        if self._current_agent_turn is not None:
+            try:
+                self._current_agent_turn.mark_stopped()
+            except Exception:  # nosec B110
+                pass
+            self._finalize_current_turn_event()
+            self._current_agent_turn = None
+        self._stream_render_timer.stop()
+        self._pending_stream_render = False
+        self._current_text = ""
+        self._tool_progress_text = ""
+        self._showing_tool_progress = False
         # Detach the worker first so any late ``finished_history`` signal is
         # ignored by ``_on_finished`` (it guards on ``worker is self._worker``)
         # and ``_on_worker_thread_finished`` clears ``self._worker`` only when
@@ -1867,7 +1886,9 @@ class ChatDock(QgsDockWidget):
             trace_started_at=trace_started_at,
         )
         self._worker._launched_for_session = self._active_session_id
-        self._worker.event.connect(self._on_event)
+        self._worker.event.connect(
+            lambda ev, w=self._worker: self._on_event(ev, w)
+        )
         self._worker.finished_history.connect(
             lambda history, worker=self._worker: self._on_finished(history, worker)
         )
@@ -1878,6 +1899,13 @@ class ChatDock(QgsDockWidget):
 
     def _on_stop(self):
         if self._worker is not None:
+            if self._stop_requested:
+                # Already stopping — ignore repeat calls (ESC auto-repeat,
+                # multiple Stop clicks).  Without this guard, the second
+                # call hits _finish_streaming() with _current_text already
+                # cleared, which creates a NEW empty agent turn and marks
+                # it "— Stopped —", spamming the transcript.
+                return
             self._stop_requested = True
             self._worker.stop()
             # Finalize the partial turn in place instead of deleting it, so
@@ -1916,8 +1944,13 @@ class ChatDock(QgsDockWidget):
             self._set_status("Stopping", _DANGER, spinning=True)
 
     # ------------------------------------------------------------------ #
-    def _on_event(self, ev):
+    def _on_event(self, ev, worker=None):
         if self._stop_requested:
+            return
+        # Drop events from a stale worker (session switch, new send, or
+        # _stop_active_worker detach).  Without this, late DONE events from an
+        # old worker create spurious empty turns in the new session's UI.
+        if worker is not None and worker is not self._worker:
             return
         if ev.type == EventType.TEXT:
             self._hide_typing()
@@ -2291,7 +2324,7 @@ class ChatDock(QgsDockWidget):
         self._stop_requested = False
 
     def _on_finished(self, history, worker=None):
-        if worker is not None and self._worker is not None and worker is not self._worker:
+        if worker is not None and worker is not self._worker:
             return
         # Discard result if the session was switched while this worker was running.
         # Without this guard the queued finished_history signal fires AFTER
@@ -2307,9 +2340,16 @@ class ChatDock(QgsDockWidget):
         # finalize_text(self._current_text) on it, producing a second bubble
         # with the same text (the "double response" bug).
         self._hide_typing()
+        self._stream_render_timer.stop()
+        self._pending_stream_render = False
         self._reset_run_ui()
         self._scroll_locked = False
         self._thinking_started = False
+        # Clear the worker reference here (not only in
+        # _on_worker_thread_finished) so the UI recovers even if the
+        # QThread.finished signal is delayed or lost in PyQt6.
+        if worker is not None and worker is self._worker:
+            self._worker = None
 
     def _maybe_precompact(self):
         """Start a background pre-compaction pass after a turn fully finishes.
@@ -2387,6 +2427,12 @@ class ChatDock(QgsDockWidget):
                 pass
         if worker is self._worker:
             self._worker = None
+        # Safety-net UI recovery.  _on_finished (via finished_history) usually
+        # handles this, but if send() raised BaseException — or the
+        # finished_history signal was lost in PyQt6 — _on_finished never runs.
+        # The QThread.finished signal always fires, so this is the guaranteed
+        # recovery path.  Calling _reset_run_ui() twice is harmless.
+        self._reset_run_ui()
         # Fire background pre-compaction now that the turn is fully done and
         # the worker reference has been cleared.  This runs after
         # _on_finished() has already persisted the new history, so the session

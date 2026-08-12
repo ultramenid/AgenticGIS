@@ -9,6 +9,7 @@ Stdlib + PyQGIS only.
 """
 
 import csv
+import json as _json
 import os
 import shutil
 
@@ -85,10 +86,32 @@ def _ask_path(parent, default_name, file_filter):
 
 
 def _safe_name(text, fallback, suffix):
-    """Build a filesystem-friendly default filename from arbitrary text."""
-    base = "".join(c if (c.isalnum() or c in " -_") else "_" for c in (text or "")).strip()
+    """Build a filesystem-friendly default filename from arbitrary text.
+
+    When the first line is machine-readable JSON (e.g. a leaked tool_calls
+    protocol), sanitizing it yields an unreadable wall of underscores
+    (``__type___tool_calls___...``). Detect that case and use the clean
+    fallback instead. Prose and markdown never parse as JSON, so this only
+    fires on actual JSON.
+    """
+    first_line = (text or "").strip().split("\n", 1)[0]
+    if _looks_like_json(first_line):
+        return f"{fallback}{suffix}"
+    base = "".join(c if (c.isalnum() or c in " -_") else "_" for c in first_line).strip()
     base = base.replace(" ", "_") or fallback
     return f"{base[:60]}{suffix}"
+
+
+def _looks_like_json(text):
+    """True if *text* is (or begins with) a JSON object or array."""
+    s = text.lstrip()
+    if not s or s[0] not in "{[":
+        return False
+    try:
+        _json.JSONDecoder().raw_decode(s)
+        return True
+    except (ValueError, _json.JSONDecodeError):
+        return False
 
 
 def save_text(parent, text, default_name="response.md"):

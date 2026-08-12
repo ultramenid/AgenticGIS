@@ -166,11 +166,17 @@ class _OptionRow(QFrame):
             return
         if event.key() == Qt.Key.Key_Escape:
             # Forward Esc to the AskUserCard so it emits the cancelled payload.
-            card = self.window()
-            if isinstance(card, AskUserCard):
-                card._on_cancel()
-                event.accept()
-                return
+            # Walk up the parent chain — self.window() returns the top-level
+            # window (QGIS main window), not the AskUserCard, which is a
+            # child widget.  This was broken in Qt6 where the card is
+            # nested inside a scroll area inside an overlay.
+            parent = self.parent()
+            while parent is not None:
+                if isinstance(parent, AskUserCard):
+                    parent._on_cancel()
+                    event.accept()
+                    return
+                parent = parent.parent()
         super().keyPressEvent(event)
 
 

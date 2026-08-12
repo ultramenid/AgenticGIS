@@ -886,6 +886,14 @@ class NormalizingStream:
         # Deduplicate tool calls that arrive twice (e.g. Claude CLI may emit
         # both a content_block_delta and raw JSON for the same call).
         self._emitted_tool_call_keys = set()
+        # Accumulator for an AgenticGIS tool_calls protocol JSON that the CLI
+        # streams across many text fragments (e.g. a run_pyqgis call whose
+        # ``code`` argument is a whole Python program). Each fragment alone
+        # fails parse_protocol_text, so without buffering the raw partial
+        # JSON would leak into the chat bubble as TEXT. Fragments are held
+        # here until the object is complete; if it never resolves the buffer
+        # is flushed as text on the final/error event.
+        self._pending_protocol = ""
 
     def _log_first_event(self, event_type):
         if self._first_event_logged:
@@ -969,6 +977,126 @@ class NormalizingStream:
                 return True
         return False
 
+    # AgenticGIS tool_calls protocol objects can be large — a run_pyqgis call
+    # carries an entire Python program in ``arguments.code``. CLIs stream the
+    # assistant text containing this JSON across many small
+    # content_block_delta events; each fragment alone fails
+    # parse_protocol_text, so without buffering the raw partial JSON would be
+    # emitted as TEXT and leak into the chat bubble (the file the user saved
+    # as ``__type___tool_calls___...md``). The helpers below reassemble such
+    # fragments and only emit text if they never resolve into a complete
+    # tool_calls object.
+    _MAX_PROTOCOL_BUFFER = 1_000_000
+
+    def _emit_tool_calls(self, calls):
+        """Emit one TOOL_USE per call (and a TOOL_RESULT when a call carries
+        an ``output``), deduplicating against calls already emitted this
+        stream. Shared by every path that resolves tool calls so the
+        dedup/counter/pending-bookkeeping stays in one place."""
+        for call in calls or []:
+            key = (call.get("name"),
+                   json.dumps(call.get("arguments", {}), sort_keys=True))
+            if key in self._emitted_tool_call_keys:
+                continue
+            self._emitted_tool_call_keys.add(key)
+            call["_tool_use_id"] = f"cli_call_{self._tool_call_counter}"
+            self._tool_call_counter += 1
+            self.pending_tool_calls.append(call)
+            self.emit(AgentEvent(
+                EventType.TOOL_USE,
+                {"name": call["name"], "input": call.get("arguments", {})},
+            ))
+            if "output" in call:
+                self.emit(AgentEvent(
+                    EventType.TOOL_RESULT,
+                    {
+                        "name": call["name"],
+                        "result": str(call["output"])[:4000],
+                        "is_error": bool(call.get("is_error", False)),
+                    },
+                ))
+
+    def _looks_like_protocol_start(self, text):
+        """True if *text* could be the opening of a
+        ``{"type":"tool_calls",...}`` protocol object rather than prose.
+
+        Prose almost never starts with ``{`` *and* contains a quoted
+        ``"type"``/``"calls"`` key, so this cleanly distinguishes a protocol
+        fragment from ordinary assistant text.
+        """
+        if not text:
+            return False
+        t = text.lstrip()
+        return t.startswith("{") and (
+            '"type"' in t or '"tool_calls"' in t or '"calls"' in t
+        )
+
+    def _protocol_still_plausible(self):
+        """True while the accumulated buffer still looks like a (possibly
+        incomplete) JSON object worth continuing to buffer."""
+        buf = self._pending_protocol
+        if not buf or not buf.lstrip().startswith("{"):
+            return False
+        return len(buf) <= self._MAX_PROTOCOL_BUFFER
+
+    def _flush_pending_protocol_as_text(self):
+        """Give up on the in-progress protocol buffer and emit it as chat
+        text (e.g. it never closed, or the turn ended before it resolved)."""
+        buf = self._pending_protocol
+        self._pending_protocol = ""
+        if not buf or buf == self._last_text_value:
+            return
+        self._log_first_event("text")
+        self._log_first_text()
+        self.emit(AgentEvent(EventType.TEXT, {"text": buf}))
+        self._text_emitted = True
+        self._last_text_value = buf
+        self.final_text = buf
+
+    def _try_consume_protocol(self, text):
+        """Try to absorb *text* as part of an AgenticGIS tool_calls
+        protocol JSON.
+
+        Return True if consumed (in which case the caller must NOT emit it
+        as chat text); return False for ordinary prose.
+
+        Handles the streaming case where a large protocol object arrives as
+        many small text fragments: each fragment alone fails
+        ``parse_protocol_text``, so without buffering the raw JSON would
+        dribble into the chat bubble. Fragments that look like a protocol
+        start are accumulated; once the object is whole a TOOL_USE is emitted.
+        If the buffer stops looking like recoverable JSON it is flushed as
+        text here; if the turn ends first, the caller flushes it on the
+        final/error event.
+        """
+        if not text:
+            return False
+        if self._pending_protocol:
+            self._pending_protocol += text
+            protocol = self.adapter.parse_protocol_text(self._pending_protocol)
+            if protocol is not None:
+                self._pending_protocol = ""
+                self._emit_tool_calls(protocol.tool_calls)
+                if protocol.is_final:
+                    self.final_text = protocol.text or self.final_text
+                return True
+            if self._protocol_still_plausible():
+                return True
+            # Buffer no longer looks like a recoverable protocol object.
+            self._flush_pending_protocol_as_text()
+            return True
+        if self._looks_like_protocol_start(text):
+            protocol = self.adapter.parse_protocol_text(text)
+            if protocol is not None:
+                self._pending_protocol = ""
+                self._emit_tool_calls(protocol.tool_calls)
+                if protocol.is_final:
+                    self.final_text = protocol.text or self.final_text
+                return True
+            self._pending_protocol = text
+            return True
+        return False
+
     def feed_line(self, raw_bytes: bytes) -> None:
         decoded = raw_bytes.decode("utf-8", "replace")
         stripped = decoded.strip()
@@ -981,23 +1109,7 @@ class NormalizingStream:
             protocol = self.adapter.parse_protocol_text(stripped)
             if protocol is not None:
                 self._log_first_event("tool_calls")
-                for call in protocol.tool_calls:
-                    key = (call.get("name"), json.dumps(call.get("arguments", {}), sort_keys=True))
-                    if key in self._emitted_tool_call_keys:
-                        continue
-                    self._emitted_tool_call_keys.add(key)
-                    call["_tool_use_id"] = f"cli_call_{self._tool_call_counter}"
-                    self._tool_call_counter += 1
-                    self.pending_tool_calls.append(call)
-                    self.emit(
-                        AgentEvent(
-                            EventType.TOOL_USE,
-                            {
-                                "name": call["name"],
-                                "input": call.get("arguments", {}),
-                            },
-                        )
-                    )
+                self._emit_tool_calls(protocol.tool_calls)
                 if protocol.is_final:
                     self.final_text = protocol.text or self.final_text
                 return
@@ -1042,23 +1154,7 @@ class NormalizingStream:
             # Fallback 1: check if raw JSON is the tool_calls protocol
             protocol = self.adapter.parse_protocol_text(decoded)
             if protocol is not None:
-                for call in protocol.tool_calls:
-                    key = (call.get("name"), json.dumps(call.get("arguments", {}), sort_keys=True))
-                    if key in self._emitted_tool_call_keys:
-                        continue
-                    self._emitted_tool_call_keys.add(key)
-                    call["_tool_use_id"] = f"cli_call_{self._tool_call_counter}"
-                    self._tool_call_counter += 1
-                    self.pending_tool_calls.append(call)
-                    self.emit(
-                        AgentEvent(
-                            EventType.TOOL_USE,
-                            {
-                                "name": call["name"],
-                                "input": call.get("arguments", {}),
-                            },
-                        )
-                    )
+                self._emit_tool_calls(protocol.tool_calls)
                 if protocol.is_final:
                     self.final_text = protocol.text or self.final_text
                 return
@@ -1080,6 +1176,8 @@ class NormalizingStream:
             self.session_id = norm.session_id
         if norm.is_error:
             self.had_error = True
+            # Don't strand an in-progress protocol buffer behind an error.
+            self._flush_pending_protocol_as_text()
             err_text = norm.text[:2000] if norm.text else ""
             self.emit(AgentEvent(EventType.ERROR, {"error": err_text}))
             return
@@ -1089,7 +1187,21 @@ class NormalizingStream:
             # rather than emitting the raw JSON as a chat message.
             protocol_event = self.adapter.parse_protocol_text(norm.text)
             if protocol_event is not None:
+                # A complete protocol object (e.g. the full assistant message
+                # that arrives after streaming deltas). Discard any partial
+                # buffer that was accumulating the same object's earlier
+                # fragments, then emit the tool calls below.
+                self._pending_protocol = ""
                 norm = protocol_event
+            elif self._try_consume_protocol(norm.text):
+                # norm.text is a fragment of a large protocol object the CLI
+                # is streaming across many events. Buffer it (or complete it)
+                # instead of leaking the raw partial JSON as chat text. If
+                # this final event left an unresolved buffer, the protocol
+                # never closed — surface it as text now.
+                if self._pending_protocol and norm.is_final:
+                    self._flush_pending_protocol_as_text()
+                return
             else:
                 # Suppress duplicate final text when it was already
                 # streamed via deltas (e.g. Codex task_complete).
@@ -1104,37 +1216,11 @@ class NormalizingStream:
                     self.emit(AgentEvent(EventType.TEXT, {"text": norm.text}))
                     self._text_emitted = True
                     self._last_text_value = norm.text
-        for call in norm.tool_calls:
-            # Deduplicate identical tool calls (Claude CLI may emit the
-            # same call via both content_block_delta and raw JSON).
-            key = (call.get("name"), json.dumps(call.get("arguments", {}), sort_keys=True))
-            if key in self._emitted_tool_call_keys:
-                continue
-            self._emitted_tool_call_keys.add(key)
-            call["_tool_use_id"] = f"cli_call_{self._tool_call_counter}"
-            self._tool_call_counter += 1
-            self.pending_tool_calls.append(call)
-            self.emit(
-                AgentEvent(
-                    EventType.TOOL_USE,
-                    {
-                        "name": call["name"],
-                        "input": call.get("arguments", {}),
-                    },
-                )
-            )
-            if "output" in call:
-                self.emit(
-                    AgentEvent(
-                        EventType.TOOL_RESULT,
-                        {
-                            "name": call["name"],
-                            "result": str(call["output"])[:4000],
-                            "is_error": bool(call.get("is_error", False)),
-                        },
-                    )
-                )
+        self._emit_tool_calls(norm.tool_calls)
         if norm.is_final:
+            # Surface any protocol fragments that buffered but never resolved
+            # into a complete object before the turn ended.
+            self._flush_pending_protocol_as_text()
             print(f"[AGENTICGIS-DEBUG] Setting final_text={norm.text[:50]!r}")
             self.final_text = norm.text or self.final_text
 
