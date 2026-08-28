@@ -13,9 +13,11 @@ Reliability hardening
 ---------------------
 * Robust JSONL parsing — read raw bytes and split on ``\\n`` ourselves, so
   multi-line JSON records (or two records in one ``write()``) survive.
-* Single select()-driven reader so a verbose CLI cannot deadlock us by
-  filling the 64 kB pipe buffer. We never spawn two blocking reader
-  threads.
+* Background pipe readers so a verbose CLI cannot deadlock us by
+  filling the 64 kB pipe buffer. One daemon thread per pipe does the
+  blocking reads; parsing and event emission stay on the caller's
+  thread. (``select`` is not usable here: on Windows it accepts only
+  sockets, never pipes.)
 * ``start_new_session=True`` so Ctrl-C in the spawned CLI doesn't kill
   QGIS, and so child file descriptors don't leak.
 * A bounded ``kill_timeout`` (5 s) before we escalate to ``SIGKILL`` if
@@ -25,7 +27,7 @@ Reliability hardening
 import json
 import os
 import platform
-import select
+import queue
 import shlex
 import shutil
 import signal
@@ -281,6 +283,45 @@ def _creation_flags():
     if platform.system() == "Windows":
         return getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
     return 0
+
+
+def _start_pipe_readers(streams):
+    """Pump each pipe on its own daemon thread; return ``(queue, threads)``.
+
+    ``select`` accepts only sockets on Windows, so a select-driven pipe loop
+    raises OSError there and abandons the child's output -- the CLI agent runs
+    and exits but nothing is ever read, surfacing as "completed without
+    returning a response". A blocking ``read`` per pipe in its own thread is
+    portable.
+
+    Items are ``(stream, chunk)``; ``(stream, None)`` marks EOF. Callers drain
+    the queue on their own thread, so parsing and event emission stay off
+    these threads.
+    """
+    chunks = queue.Queue()
+
+    def pump(stream):
+        try:
+            while True:
+                # bufsize=0 makes this one read syscall, returning whatever is
+                # available, so streaming output still arrives incrementally.
+                chunk = stream.read(4096)
+                if not chunk:
+                    break
+                chunks.put((stream, chunk))
+        except (OSError, ValueError):  # nosec B110 - pipe closed on shutdown
+            pass
+        finally:
+            chunks.put((stream, None))
+
+    threads = []
+    for stream in streams:
+        if stream is None:
+            continue
+        thread = threading.Thread(target=pump, args=(stream,), daemon=True)
+        thread.start()
+        threads.append(thread)
+    return chunks, threads
 
 
 def _decode_process_output(data):
@@ -1599,40 +1640,32 @@ class CliToolBackend(AgentBackend):
         out_chunks = []
         err_chunks = []
         stopped = False
+        pending, _threads = _start_pipe_readers((stdout, stderr))
+        open_pipes = sum(1 for pipe in (stdout, stderr) if pipe is not None)
+        exited_at = None
         try:
-            while True:
+            while open_pipes:
                 if should_stop():
                     stopped = True
                     self._terminate_process_group(proc, kill=True)
                     break
-                if proc.poll() is not None:
-                    for stream, chunks in ((stdout, out_chunks), (stderr, err_chunks)):
-                        if not stream:
-                            continue
-                        while True:
-                            try:
-                                rest = os.read(stream.fileno(), 4096)
-                            except Exception:
-                                rest = b""
-                            if not rest:
-                                break
-                            chunks.append(rest)
-                    break
                 try:
-                    readable, _, _ = select.select([stdout, stderr], [], [], 0.2)
-                except (OSError, ValueError):
-                    continue
-                for stream in readable:
-                    try:
-                        chunk = os.read(stream.fileno(), 4096)
-                    except Exception:
-                        chunk = b""
-                    if not chunk:
+                    source, chunk = pending.get(timeout=0.2)
+                except queue.Empty:
+                    if proc.poll() is None:
+                        exited_at = None
                         continue
-                    if stream is stdout:
-                        out_chunks.append(chunk)
-                    else:
-                        err_chunks.append(chunk)
+                    if exited_at is None:
+                        exited_at = time.monotonic()
+                    elif time.monotonic() - exited_at > 1.0:
+                        break
+                    continue
+                if chunk is None:
+                    open_pipes -= 1
+                elif source is stdout:
+                    out_chunks.append(chunk)
+                else:
+                    err_chunks.append(chunk)
         finally:
             self._finalize_process(proc, stopped=stopped)
 
@@ -1743,45 +1776,56 @@ class CliToolBackend(AgentBackend):
         return messages
 
     # ------------------------------------------------------------------ #
-    # Streaming I/O — single-threaded select() loop, robust JSONL parser #
+    # Streaming I/O — background pipe readers, robust JSONL parser       #
     # ------------------------------------------------------------------ #
 
     def _collect_into_stream(self, proc, stream, should_stop, generation=None):
-        """Read both pipes via ``select`` and feed lines into ``stream``."""
+        """Read both pipes via background readers, feeding ``stream``."""
         stdout = proc.stdout
         stderr = proc.stderr
         out_buf = b""
         err_acc = []
         poller_stopped = False
 
-        while True:
+        chunks, _threads = _start_pipe_readers((stdout, stderr))
+        open_pipes = sum(1 for pipe in (stdout, stderr) if pipe is not None)
+        exited_at = None
+
+        while open_pipes:
             if should_stop():
                 poller_stopped = True
                 break
-            _poll = proc.poll()
-            if _poll is not None:
-                print(f"[AGENTICGIS-DEBUG] proc.poll() returned {_poll!r}")
-                if stdout:
-                    # Drain stdout in a loop after process exit
-                    while True:
-                        out_buf, did_read = self._read_into_stream(out_buf, stdout, stream, "post-exit")
-                        if not did_read:
-                            break
-                if stderr:
-                    err_acc.append(self._read_all(stderr, None))
-                break
             try:
-                rlist, _, _ = select.select([stdout, stderr], [], [], 0.2)
-            except (OSError, ValueError):
-                break
-            for stream_obj in rlist:
-                if stream_obj is stdout:
-                    out_buf, _ = self._read_into_stream(out_buf, stdout, stream, "select")
-                elif stream_obj is stderr:
-                    err_acc.append(self._read_all(stderr, None))
+                source, chunk = chunks.get(timeout=0.2)
+            except queue.Empty:
+                if proc.poll() is None:
+                    exited_at = None
+                    continue
+                # The child is gone; both pipes normally hit EOF immediately.
+                # If a grandchild still holds them open, don't wait forever.
+                if exited_at is None:
+                    exited_at = time.monotonic()
+                elif time.monotonic() - exited_at > 1.0:
+                    break
+                continue
+            if chunk is None:
+                open_pipes -= 1
+                continue
+            if source is stderr:
+                err_acc.append(chunk.decode("utf-8", "replace"))
+            else:
+                out_buf = self._feed_chunk(out_buf, chunk, stream)
 
         if poller_stopped:
             self._terminate_process_group(proc, kill=True)
+        else:
+            # Both pipes hit EOF, so the child is finishing. Reap it so
+            # ``returncode`` is populated for the stderr check below --
+            # exiting on EOF never calls poll() on the way out.
+            try:
+                proc.wait(timeout=5)
+            except Exception:  # nosec B110 - fall back to whatever poll knows
+                proc.poll()
 
         self._remember_session_id(stream.adapter, stream.session_id, generation)
 
@@ -1803,7 +1847,7 @@ class CliToolBackend(AgentBackend):
 
     def _run_stream(self, adapter, prompt, emit, should_stop, generation=None):  # noqa: PLR0913
         """Build the CLI command, spawn the subprocess, run the
-        select()-driven reader, and return the populated NormalizingStream."""
+        pipe readers, and return the populated NormalizingStream."""
         session_id = self._continuation_session_id(adapter)
         command_args = {
             "binary": self.binary,
@@ -1885,25 +1929,26 @@ class CliToolBackend(AgentBackend):
         return stream
 
     @staticmethod
-    def _read_into_stream(buf, stream_obj, normalizer, label=""):
-        try:
-            chunk = stream_obj.read(4096)
-        except (OSError, ValueError):
-            print(f"[AGENTICGIS-DEBUG] _read_into_stream({label}): read failed")
-            return buf, False
-        if not chunk:
-            print(f"[AGENTICGIS-DEBUG] _read_into_stream({label}): EOF")
-            return buf, False
+    def _feed_chunk(buf, chunk, normalizer):
+        """Append ``chunk`` to ``buf``, feeding each complete line onward."""
         if isinstance(chunk, str):
             chunk = chunk.encode("utf-8")
-        print(f"[AGENTICGIS-DEBUG] _read_into_stream({label}): read {len(chunk)} bytes")
         buf += chunk
         while b"\n" in buf:
             line, buf = buf.split(b"\n", 1)
             if line:
-                print(f"[AGENTICGIS-DEBUG] _read_into_stream({label}): feeding line: {line[:200]!r}")
                 normalizer.feed_line(line)
-        return buf, True
+        return buf
+
+    @staticmethod
+    def _read_into_stream(buf, stream_obj, normalizer, label=""):
+        try:
+            chunk = stream_obj.read(4096)
+        except (OSError, ValueError):
+            return buf, False
+        if not chunk:
+            return buf, False
+        return CliToolBackend._feed_chunk(buf, chunk, normalizer), True
 
     @staticmethod
     def _read_all(stream, _unused):
