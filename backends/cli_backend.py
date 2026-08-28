@@ -248,6 +248,22 @@ def _subprocess_cmd(cmd):
     return list(cmd)
 
 
+_WINDOWS_CMDLINE_LIMIT = 30000
+
+
+def _cmdline_too_long(cmd):
+    """True when ``cmd`` would exceed Windows' CreateProcess command line.
+
+    CreateProcess caps the whole command line at 32767 chars and fails with
+    WinError 206 ("The filename or extension is too long") past that. The
+    AgenticGIS system prompt plus tool specs is already ~30K, so any adapter
+    that passes the prompt on argv overflows. Margin left for quoting.
+    """
+    if platform.system() != "Windows":
+        return False
+    return sum(len(str(part)) + 3 for part in cmd) > _WINDOWS_CMDLINE_LIMIT
+
+
 def _creation_flags():
     """Return ``creationflags`` that suppress the console window on Windows.
 
@@ -470,6 +486,37 @@ def _windows_program_dirs():
         yield "~/AppData/Local/Programs"
 
 
+def _windows_registry_path_dirs():
+    """Yield PATH entries from the Windows registry.
+
+    QGIS on Windows launches through OSGeo4W batch files that rebuild PATH
+    from scratch, so the user's own PATH entries -- where npm, Scoop, Volta
+    and winget shims live -- are frequently absent from ``os.environ`` even
+    though a terminal would find the binary instantly. The registry holds the
+    durable value, so read it directly.
+    """
+    try:
+        import winreg
+    except Exception:
+        return
+    for root, subkey in (
+        (winreg.HKEY_CURRENT_USER, "Environment"),
+        (
+            winreg.HKEY_LOCAL_MACHINE,
+            "SYSTEM\\CurrentControlSet\\Control\\Session Manager\\Environment",
+        ),
+    ):
+        try:
+            with winreg.OpenKey(root, subkey) as key:
+                value, _kind = winreg.QueryValueEx(key, "Path")
+        except Exception:  # nosec B112 - missing/denied key is normal
+            continue
+        for entry in str(value).split(os.pathsep):
+            entry = entry.strip().strip('"')
+            if entry:
+                yield os.path.expandvars(entry)
+
+
 def _windows_package_manager_bin_dirs():
     """Yield known package-manager binary/shim directories on Windows.
 
@@ -617,6 +664,11 @@ def _windows_package_manager_bin_dirs():
     # Best-effort glob; if Windows denies listing this folder it is ignored.
     if programfiles:
         yield os.path.join(programfiles, "WindowsApps", "OpenAI.Codex_*", "app")
+
+    # Durable user/system PATH from the registry -- last so explicit
+    # well-known dirs above still win, but nothing on the real PATH is lost.
+    for path in _windows_registry_path_dirs():
+        yield path
 
 
 def _unix_package_manager_bin_dirs():
@@ -1767,6 +1819,24 @@ class CliToolBackend(AgentBackend):
         else:
             cmd = adapter.build_command(**command_args)
         stdin_data = adapter.stdin_prompt(prompt)
+        if stdin_data is None and _cmdline_too_long(cmd):
+            emit(
+                AgentEvent(
+                    EventType.ERROR,
+                    {
+                        "error": (
+                            f"{self.tool} cannot receive this request on Windows: "
+                            "the prompt is passed on the command line and exceeds "
+                            "the 32K CreateProcess limit (WinError 206). Use "
+                            "Claude Code, Codex, Gemini, Qwen or OpenCode in CLI "
+                            "mode, or switch to API mode in Settings."
+                        )
+                    },
+                )
+            )
+            stream = NormalizingStream(adapter, emit)
+            stream.had_error = True
+            return stream
         env = self._runtime_env()
         cwd = self._runtime_cwd()
         try:

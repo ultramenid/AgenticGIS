@@ -395,6 +395,12 @@ class CodexAdapter(CliAdapter):
     auth_status_args = ("login", "status")
     login_args = ("login",)
 
+    def stdin_prompt(self, prompt):
+        # `codex exec … -` forces the prompt to be read from stdin. Required:
+        # the system prompt + tool specs alone are ~30K chars, past Windows'
+        # 32767-char CreateProcess limit (WinError 206).
+        return prompt
+
     def build_command(self, *, binary, prompt, extra_args, runtime_dir):
         return [
             binary, "exec", *extra_args,
@@ -402,7 +408,7 @@ class CodexAdapter(CliAdapter):
             "--skip-git-repo-check",
             "--disable", "apps", "--disable", "plugins",
             "--cd", _empty_runtime_dir("codex-empty-workspace"),
-            "--json", prompt,
+            "--json", "-",
         ]
 
     def build_continuation_command(
@@ -413,7 +419,7 @@ class CodexAdapter(CliAdapter):
             "--ignore-user-config", "--ignore-rules",
             "--skip-git-repo-check",
             "--disable", "apps", "--disable", "plugins",
-            "--json", session_id, prompt,
+            "--json", session_id, "-",
         ]
 
     def parse_event(self, raw):
@@ -606,9 +612,14 @@ class GeminiAdapter(CliAdapter):
     auth_status_args = ("status",)
     login_args = ("login",)
 
+    def stdin_prompt(self, prompt):
+        # Piped stdin is treated as the prompt and keeps the CLI headless.
+        # Passing it via -p overflows Windows' 32767-char command line.
+        return prompt
+
     def build_command(self, *, binary, prompt, extra_args, runtime_dir):
         return [
-            binary, "-p", prompt, *extra_args,
+            binary, *extra_args,
             "--output-format", "json",
             "--approval-mode", "default",
             "--extensions", "none",
@@ -623,9 +634,14 @@ class QwenAdapter(CliAdapter):
     commands = ("qwen",)
     credential_style = "DashScope or Qwen API key"
 
+    def stdin_prompt(self, prompt):
+        # gemini-cli fork: piped stdin is the prompt, and avoids Windows'
+        # 32767-char command-line limit.
+        return prompt
+
     def build_command(self, *, binary, prompt, extra_args, runtime_dir):
         return [
-            binary, "--prompt", prompt, *extra_args,
+            binary, *extra_args,
             "--output-format", "stream-json",
         ]
 
