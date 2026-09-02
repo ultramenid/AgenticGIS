@@ -15,8 +15,9 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import tempfile
-from typing import Callable, ClassVar, Optional, Sequence
+from typing import Callable, ClassVar, List, Optional, Sequence
 
 
 class NormalizedEvent:
@@ -55,7 +56,11 @@ class CliAdapter:
     auth_status_args: ClassVar[Sequence[str]] = ()
     login_args: ClassVar[Sequence[str]] = ()
     auth_detail_parser: ClassVar[Optional[Callable[[str, str], str]]] = None
+    models_args: ClassVar[Sequence[str]] = ()
+    default_models: ClassVar[Sequence[str]] = ()
+    models_parser: ClassVar[Optional[Callable[[str], List[str]]]] = None
     supports_continuation: ClassVar[bool] = False
+    supports_mcp: ClassVar[bool] = False
 
     def stdin_prompt(self, prompt: str) -> Optional[str]:
         """Return the prompt to write to stdin, or None to pass on command line.
@@ -68,8 +73,14 @@ class CliAdapter:
 
     def build_command(
         self, *, binary: str, prompt: str, extra_args: list, runtime_dir: str,
+        mcp_url: Optional[str] = None,
+        model: Optional[str] = None,
+        **kwargs,
     ) -> list:
-        return [binary, "-p", prompt, *extra_args]
+        cmd = [binary, "-p", prompt, *extra_args]
+        if model:
+            cmd.extend(["--model", model])
+        return cmd
 
     def build_continuation_command(
         self,
@@ -79,12 +90,18 @@ class CliAdapter:
         extra_args: list,
         runtime_dir: str,
         session_id: str,
+        mcp_url: Optional[str] = None,
+        model: Optional[str] = None,
+        **kwargs,
     ) -> list:
         return self.build_command(
             binary=binary,
             prompt=prompt,
             extra_args=extra_args,
             runtime_dir=runtime_dir,
+            mcp_url=mcp_url,
+            model=model,
+            **kwargs,
         )
 
     def parse_event(self, raw: dict) -> Optional[NormalizedEvent]:
@@ -183,7 +200,7 @@ class CliAdapter:
             return NormalizedEvent(tool_calls=tool_calls, is_final=True)
         return None
 
-    def env(self) -> dict:
+    def env(self, mcp_url: Optional[str] = None) -> dict:
         return {}
 
     def test_commands(self, *, binary: str) -> list:
@@ -241,6 +258,54 @@ def _devin_config_json() -> str:
     })
 
 
+# ----------------------------------------------------------------------- #
+# Native MCP tool registration                                            #
+# ----------------------------------------------------------------------- #
+# When the in-QGIS bridge is running, CLI agents get the AgenticGIS tools
+# registered as native MCP tools so they can call them directly (instead of
+# emitting the JSON text protocol). Clients name MCP tools with the server
+# prefix, so parsed names are normalized back to the plain tool name.
+
+MCP_SERVER_NAME = "agenticgis"
+
+
+def normalize_tool_name(name):
+    """Map an MCP-registered tool name back to the plain AgenticGIS name.
+
+    Claude Code uses ``mcp__agenticgis__list_layers``; Codex/OpenCode use
+    ``agenticgis__list_layers``, ``agenticgis.list_layers`` or
+    ``agenticgis_list_layers``. Anything else (plain names, the text
+    protocol, shell commands) passes through.
+    """
+    if not isinstance(name, str):
+        return name
+    lowered = name.lower()
+    for prefix in (
+        "mcp__agenticgis__", "agenticgis__", "agenticgis.", "agenticgis_",
+    ):
+        if lowered.startswith(prefix):
+            return name[len(prefix):]
+    return name
+
+
+def _mcp_proxy_command(mcp_url):
+    """Return ``[interpreter, script, --url, URL]`` for the stdio→HTTP proxy.
+
+    Codex only accepts stdio MCP servers, so it launches the bundled
+    ``server/mcp_stdio.py`` with a system python (never ``sys.executable`` —
+    inside QGIS that is the QGIS binary, not a python).
+    """
+    script = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        "server", "mcp_stdio.py",
+    )
+    for interpreter in ("python3", "python"):
+        resolved = shutil.which(interpreter)
+        if resolved:
+            return [resolved, script, "--url", mcp_url]
+    return ["python3", script, "--url", mcp_url]
+
+
 class ClaudeAdapter(CliAdapter):
     """Claude Code — ``stream-json`` over ``-p``."""
 
@@ -250,9 +315,16 @@ class ClaudeAdapter(CliAdapter):
     credential_style = "Claude subscription or Anthropic credentials"
     warning = "Provider policy may treat third-party automation differently."
     supports_continuation = True
+    supports_mcp = True
 
     auth_status_args = ("auth", "status")
     login_args = ("auth", "login")
+    default_models = (
+        "claude-3-7-sonnet",
+        "claude-3-5-sonnet",
+        "claude-3-5-haiku",
+        "claude-opus-4-8",
+    )
 
     @staticmethod
     def _auth_detail(output: str, default: str) -> str:
@@ -279,26 +351,56 @@ class ClaudeAdapter(CliAdapter):
         # positional prompt is given. See issue #2.
         return prompt
 
-    def build_command(self, *, binary, prompt, extra_args, runtime_dir):
+    @staticmethod
+    def _mcp_flags(runtime_dir, mcp_url):
+        """Register the AgenticGIS bridge as a native MCP server.
+
+        Claude Code speaks streamable HTTP directly (no stdio proxy needed)
+        and headless ``-p`` mode needs the server's tools pre-allowed.
+        """
+        if not mcp_url:
+            return []
+        directory = runtime_dir or tempfile.gettempdir()
+        os.makedirs(directory, exist_ok=True)
+        config_path = os.path.join(directory, "agenticgis-mcp.json")
+        with open(config_path, "w", encoding="utf-8") as fh:
+            json.dump(
+                {"mcpServers": {MCP_SERVER_NAME: {"type": "http", "url": mcp_url}}},
+                fh,
+            )
         return [
+            "--mcp-config", config_path,
+            "--allowedTools", f"mcp__{MCP_SERVER_NAME}",
+        ]
+
+    def build_command(self, *, binary, prompt, extra_args, runtime_dir, mcp_url=None, model=None, **kwargs):
+        cmd = [
             binary, "-p", *extra_args,
             "--output-format", "stream-json", "--verbose",
             "--setting-sources", "local", "--settings", "{}",
             "--disable-slash-commands",
             "--plugin-dir", _empty_runtime_dir("claude-empty-plugins"),
+            *self._mcp_flags(runtime_dir, mcp_url),
         ]
+        if model:
+            cmd.extend(["--model", model])
+        return cmd
 
     def build_continuation_command(
-        self, *, binary, prompt, extra_args, runtime_dir, session_id,
+        self, *, binary, prompt, extra_args, runtime_dir, session_id, mcp_url=None, model=None, **kwargs,
     ):
-        return [
+        cmd = [
             binary, "-p", *extra_args,
             "--resume", session_id,
             "--output-format", "stream-json", "--verbose",
             "--setting-sources", "local", "--settings", "{}",
             "--disable-slash-commands",
             "--plugin-dir", _empty_runtime_dir("claude-empty-plugins"),
+            *self._mcp_flags(runtime_dir, mcp_url),
         ]
+        if model:
+            cmd.extend(["--model", model])
+        return cmd
 
     def parse_event(self, raw):
         etype = raw.get("type")
@@ -314,7 +416,7 @@ class ClaudeAdapter(CliAdapter):
             for b in content:
                 if isinstance(b, dict) and b.get("type") == "tool_use":
                     tool_calls.append({
-                        "name": b.get("name", ""),
+                        "name": normalize_tool_name(b.get("name", "")),
                         "arguments": b.get("input", {}) or {},
                     })
             return NormalizedEvent(
@@ -332,7 +434,7 @@ class ClaudeAdapter(CliAdapter):
                     tool_calls = []
                     for c in calls:
                         if isinstance(c, dict):
-                            name = c.get("name")
+                            name = normalize_tool_name(c.get("name"))
                             if isinstance(name, str) and name:
                                 tool_calls.append({
                                     "name": name,
@@ -363,7 +465,7 @@ class ClaudeAdapter(CliAdapter):
             tool_calls = []
             for c in calls:
                 if isinstance(c, dict):
-                    name = c.get("name")
+                    name = normalize_tool_name(c.get("name"))
                     if isinstance(name, str) and name:
                         tool_calls.append({
                             "name": name,
@@ -391,9 +493,17 @@ class CodexAdapter(CliAdapter):
     commands = ("codex",)
     credential_style = "OpenAI API key or ChatGPT account in Codex"
     supports_continuation = True
+    supports_mcp = True
 
     auth_status_args = ("login", "status")
     login_args = ("login",)
+    default_models = (
+        "o3-mini",
+        "o1",
+        "gpt-4o",
+        "gpt-4.5-preview",
+        "gpt-4o-mini",
+    )
 
     def stdin_prompt(self, prompt):
         # `codex exec … -` forces the prompt to be read from stdin. Required:
@@ -401,26 +511,49 @@ class CodexAdapter(CliAdapter):
         # 32767-char CreateProcess limit (WinError 206).
         return prompt
 
-    def build_command(self, *, binary, prompt, extra_args, runtime_dir):
+    @staticmethod
+    def _mcp_flags(mcp_url):
+        """Register the AgenticGIS bridge via ``-c`` TOML overrides.
+
+        Codex ignores the user config here, so CLI overrides are the only
+        channel. Codex only speaks stdio MCP, hence the bundled proxy.
+        """
+        if not mcp_url:
+            return []
+        interpreter, script, _flag, url = _mcp_proxy_command(mcp_url)
         return [
+            "-c", f'mcp_servers.{MCP_SERVER_NAME}.command="{interpreter}"',
+            "-c", f'mcp_servers.{MCP_SERVER_NAME}.args=["{script}", "--url", "{url}"]',
+        ]
+
+    def build_command(self, *, binary, prompt, extra_args, runtime_dir, mcp_url=None, model=None, **kwargs):
+        cmd = [
             binary, "exec", *extra_args,
             "--ignore-user-config", "--ignore-rules",
             "--skip-git-repo-check",
             "--disable", "apps", "--disable", "plugins",
             "--cd", _empty_runtime_dir("codex-empty-workspace"),
-            "--json", "-",
+            *self._mcp_flags(mcp_url),
         ]
+        if model:
+            cmd.extend(["--model", model])
+        cmd.extend(["--json", "-"])
+        return cmd
 
     def build_continuation_command(
-        self, *, binary, prompt, extra_args, runtime_dir, session_id,
+        self, *, binary, prompt, extra_args, runtime_dir, session_id, mcp_url=None, model=None, **kwargs,
     ):
-        return [
+        cmd = [
             binary, "exec", "resume", *extra_args,
             "--ignore-user-config", "--ignore-rules",
             "--skip-git-repo-check",
             "--disable", "apps", "--disable", "plugins",
-            "--json", session_id, "-",
+            *self._mcp_flags(mcp_url),
         ]
+        if model:
+            cmd.extend(["--model", model])
+        cmd.extend(["--json", session_id, "-"])
+        return cmd
 
     def parse_event(self, raw):
         etype = raw.get("type")
@@ -436,7 +569,9 @@ class CodexAdapter(CliAdapter):
                 )
             if it in ("command_execution", "mcp_tool_call"):
                 return NormalizedEvent(tool_calls=[{
-                    "name": item.get("cmd") or item.get("tool") or it,
+                    "name": normalize_tool_name(
+                        item.get("cmd") or item.get("tool") or it
+                    ),
                     "arguments": item.get("arguments") or {"cmd": item.get("cmd", "")},
                     "output": item.get("output") or item.get("stdout") or item.get("result") or "",
                     "is_error": bool(item.get("exit_code", 0)),
@@ -469,25 +604,39 @@ class OpenCodeAdapter(CliAdapter):
     commands = ("opencode",)
     credential_style = "Provider keys in OpenCode config"
 
+    supports_continuation = True
+    supports_mcp = True
+
     auth_status_args = ("status",)
     login_args = ("login",)
+    models_args = ("models",)
 
     def stdin_prompt(self, prompt):
         return prompt
 
-    def build_command(self, *, binary, prompt, extra_args, runtime_dir):
-        return [
+    def build_command(self, *, binary, prompt, extra_args, runtime_dir, mcp_url=None, model=None, **kwargs):
+        cmd = [
             binary, "run",
             "--pure",
             "--format", "json",
-            "--dangerously-skip-permissions",
+            "--auto",
             *extra_args,
         ]
+        if model:
+            cmd.extend(["--model", model])
+        return cmd
 
-    def env(self) -> dict:
+    def env(self, mcp_url=None):
+        config = json.loads(_opencode_config_json())
+        if mcp_url:
+            # Register the AgenticGIS bridge as a native remote MCP server
+            # (streamable HTTP — opencode connects directly, no proxy).
+            config["mcp"] = {
+                MCP_SERVER_NAME: {"type": "remote", "url": mcp_url},
+            }
+        content = json.dumps(config)
         config_dir = _empty_runtime_dir("opencode-config")
         config_path = os.path.join(config_dir, "config.json")
-        content = _opencode_config_json()
         with open(config_path, "w", encoding="utf-8") as fh:
             fh.write(content)
         return {
@@ -526,13 +675,13 @@ class OpenCodeAdapter(CliAdapter):
             return None
 
         if etype in ("tool_use", "tool_call"):
-            tool_name = part.get("tool", "")
+            tool_name = normalize_tool_name(part.get("tool", ""))
             state = part.get("state") or {}
             if tool_name == "invalid":
-                tool_name = (state.get("input") or {}).get("name", "")
+                tool_name = normalize_tool_name((state.get("input") or {}).get("name", ""))
             if not tool_name:
                 # Some opencode versions put tool name directly under part.name
-                tool_name = part.get("name", "")
+                tool_name = normalize_tool_name(part.get("name", ""))
             if not tool_name:
                 return None
             args = state.get("input") or part.get("arguments") or part.get("args") or {}
@@ -557,6 +706,8 @@ class OpenCodeAdapter(CliAdapter):
             return None
 
         if etype in ("step_start", "step_finish"):
+            if etype == "step_finish" and (part.get("reason") == "stop" or raw.get("reason") == "stop"):
+                return NormalizedEvent(session_id=sid, is_final=True)
             return None
 
         # Fallback for opencode's many output shapes: any top-level text key
@@ -580,18 +731,25 @@ class CursorAdapter(CliAdapter):
     label = "Cursor Agent"
     commands = ("cursor-agent", "cursor")
     credential_style = "Cursor account or configured provider keys"
+    default_models = (
+        "claude-3-7-sonnet",
+        "claude-3-5-sonnet",
+        "gpt-4o",
+        "o3-mini",
+    )
 
-    def build_command(self, *, binary, prompt, extra_args, runtime_dir):
+    def build_command(self, *, binary, prompt, extra_args, runtime_dir, mcp_url=None, model=None, **kwargs):
         base = os.path.basename(binary or "")
-        if base.startswith("cursor") and not base.startswith("cursor-agent"):
-            return [
-                binary, "agent", "-p", prompt, *extra_args,
-                "--output-format", "json",
-            ]
-        return [
+        cmd = [
+            binary, "agent", "-p", prompt, *extra_args,
+            "--output-format", "json",
+        ] if base.startswith("cursor") and not base.startswith("cursor-agent") else [
             binary, "-p", prompt, *extra_args,
             "--output-format", "json",
         ]
+        if model:
+            cmd.extend(["--model", model])
+        return cmd
 
     def parse_event(self, raw):
         for key in ("text", "response", "content", "output", "result", "message"):
@@ -608,6 +766,13 @@ class GeminiAdapter(CliAdapter):
     label = "Gemini CLI"
     commands = ("gemini",)
     credential_style = "Google account or Gemini API key"
+    default_models = (
+        "gemini-2.5-pro",
+        "gemini-2.5-flash",
+        "gemini-2.0-flash",
+        "gemini-1.5-pro",
+        "gemini-1.5-flash",
+    )
 
     auth_status_args = ("status",)
     login_args = ("login",)
@@ -617,13 +782,173 @@ class GeminiAdapter(CliAdapter):
         # Passing it via -p overflows Windows' 32767-char command line.
         return prompt
 
-    def build_command(self, *, binary, prompt, extra_args, runtime_dir):
-        return [
+    def build_command(self, *, binary, prompt, extra_args, runtime_dir, mcp_url=None, model=None, **kwargs):
+        cmd = [
             binary, *extra_args,
             "--output-format", "json",
             "--approval-mode", "default",
             "--extensions", "none",
         ]
+        if model:
+            cmd.extend(["--model", model])
+        return cmd
+
+
+class AntigravityAdapter(CliAdapter):
+    """Antigravity CLI — ``agy`` agent interface."""
+
+    id = "antigravity"
+    label = "Antigravity CLI"
+    commands = ("agy", "antigravity")
+    credential_style = "Google account or Antigravity credentials"
+    supports_continuation = True
+    supports_mcp = False
+
+    auth_status_args = ("models",)
+    login_args = ()
+    models_args = ("models",)
+
+    @staticmethod
+    def _auth_detail(output: str, default: str) -> str:
+        lower = output.lower()
+        if any(err in lower for err in ("not logged in", "login required", "unauthenticated", "unauthorized")):
+            return "Not logged in"
+        lines = [line.strip() for line in output.splitlines() if line.strip()]
+        models = [
+            line for line in lines
+            if not line.lower().startswith("fetching") and not line.lower().startswith("error")
+        ]
+        if models:
+            return f"Logged in ({len(models)} models available)"
+        if "error" in lower:
+            return default or "Login required"
+        return default or "Logged in"
+
+    auth_detail_parser = _auth_detail
+
+    @staticmethod
+    def _parse_models(output: str) -> List[str]:
+        lines = [line.strip() for line in output.splitlines() if line.strip()]
+        models = []
+        for line in lines:
+            lower = line.lower()
+            if lower.startswith("fetching") or lower.startswith("error"):
+                continue
+            parts = line.split("\t")
+            model_id = parts[0].strip() if parts else ""
+            if not model_id:
+                model_id = line.split()[0].strip()
+            if model_id and model_id not in models:
+                models.append(model_id)
+        return models
+
+    models_parser = _parse_models
+
+    def build_command(self, *, binary, prompt, extra_args, runtime_dir, mcp_url=None, model=None, **kwargs):
+        cmd = [
+            binary, *extra_args,
+            "--output-format", "stream-json",
+            "--dangerously-skip-permissions",
+        ]
+        if model:
+            cmd.extend(["--model", model])
+        cmd.extend(["-p", prompt])
+        return cmd
+
+    def build_continuation_command(
+        self, *, binary, prompt, extra_args, runtime_dir, session_id, mcp_url=None, model=None, **kwargs,
+    ):
+        cmd = [
+            binary, *extra_args,
+            "--output-format", "stream-json",
+            "--dangerously-skip-permissions",
+        ]
+        if model:
+            cmd.extend(["--model", model])
+        if session_id:
+            cmd.extend(["--conversation", session_id])
+        cmd.extend(["-p", prompt])
+        return cmd
+
+    def parse_event(self, raw):
+        event = raw.get("event")
+        sid = (
+            raw.get("conversation_id")
+            or raw.get("session_id")
+            or raw.get("sessionID")
+            or raw.get("thread_id")
+            or ""
+        )
+        if event == "init":
+            return NormalizedEvent(session_id=sid)
+        if event == "step_update":
+            su = raw.get("step_update") or {}
+            step_sid = su.get("conversation_id") or sid
+            step_type = su.get("step_type")
+            if step_type == "tool":
+                tool_info = su.get("tool_info") or {}
+                tool_name = normalize_tool_name(su.get("tool_name") or tool_info.get("name") or "")
+                if tool_name:
+                    params = tool_info.get("parameters") or tool_info.get("input") or {}
+                    call = {"name": tool_name, "arguments": params}
+                    if "output" in tool_info:
+                        call["output"] = tool_info["output"]
+                    return NormalizedEvent(tool_calls=[call], session_id=step_sid)
+            text = su.get("text_delta") or ""
+            if text:
+                return NormalizedEvent(text=text, session_id=step_sid)
+            return None
+        if event == "result":
+            res = raw.get("result") or {}
+            res_sid = res.get("conversation_id") or sid
+            if res.get("status") not in ("SUCCESS", None):
+                err = res.get("error") or res.get("message") or "CLI failed"
+                return NormalizedEvent(is_error=True, text=str(err), session_id=res_sid)
+            resp = res.get("response") or ""
+            return NormalizedEvent(text=str(resp).strip(), session_id=res_sid, is_final=True)
+
+        etype = raw.get("type")
+        if etype in ("assistant", "message", "text"):
+            content = raw.get("content") or raw.get("text") or raw.get("message") or ""
+            if isinstance(content, list):
+                text_parts = []
+                tool_calls = []
+                for b in content:
+                    if isinstance(b, dict):
+                        if b.get("type") == "text":
+                            text_parts.append(b.get("text", ""))
+                        elif b.get("type") in ("tool_use", "tool_call"):
+                            tool_calls.append({
+                                "name": normalize_tool_name(b.get("name", "")),
+                                "arguments": b.get("input") or b.get("arguments") or {},
+                            })
+                return NormalizedEvent(
+                    text="".join(text_parts),
+                    tool_calls=tool_calls,
+                    session_id=sid,
+                    is_final=True,
+                )
+            if isinstance(content, str) and content.strip():
+                return NormalizedEvent(text=content.strip(), session_id=sid, is_final=True)
+        if etype in ("tool_use", "tool_call", "tool_calls"):
+            calls = raw.get("calls") if etype == "tool_calls" else [raw]
+            tool_calls = []
+            for c in (calls or []):
+                if isinstance(c, dict):
+                    name = normalize_tool_name(c.get("name") or c.get("tool") or "")
+                    if name:
+                        args = c.get("arguments") or c.get("input") or c.get("args") or {}
+                        tool_calls.append({"name": name, "arguments": args})
+            if tool_calls:
+                return NormalizedEvent(tool_calls=tool_calls, session_id=sid)
+        if etype in ("error", "turn.failed"):
+            err = raw.get("error") or raw.get("message") or ""
+            return NormalizedEvent(is_error=True, text=str(err), session_id=sid)
+        for key in ("text", "response", "content", "output", "result", "message"):
+            val = raw.get(key)
+            if isinstance(val, str) and val.strip():
+                return NormalizedEvent(text=val.strip(), session_id=sid, is_final=True)
+        return None
 
 
 class QwenAdapter(CliAdapter):
@@ -633,17 +958,26 @@ class QwenAdapter(CliAdapter):
     label = "Qwen Code"
     commands = ("qwen",)
     credential_style = "DashScope or Qwen API key"
+    default_models = (
+        "qwen-max",
+        "qwen-plus",
+        "qwen-turbo",
+        "qwen-2.5-coder-32b",
+    )
 
     def stdin_prompt(self, prompt):
         # gemini-cli fork: piped stdin is the prompt, and avoids Windows'
         # 32767-char command-line limit.
         return prompt
 
-    def build_command(self, *, binary, prompt, extra_args, runtime_dir):
-        return [
+    def build_command(self, *, binary, prompt, extra_args, runtime_dir, mcp_url=None, model=None, **kwargs):
+        cmd = [
             binary, *extra_args,
             "--output-format", "stream-json",
         ]
+        if model:
+            cmd.extend(["--model", model])
+        return cmd
 
 
 class KimiAdapter(CliAdapter):
@@ -653,12 +987,20 @@ class KimiAdapter(CliAdapter):
     label = "Kimi CLI"
     commands = ("kimi",)
     credential_style = "Moonshot/Kimi API key"
+    default_models = (
+        "kimi-k2.5",
+        "kimi-k2",
+        "kimi-latest",
+    )
 
-    def build_command(self, *, binary, prompt, extra_args, runtime_dir):
-        return [
+    def build_command(self, *, binary, prompt, extra_args, runtime_dir, mcp_url=None, model=None, **kwargs):
+        cmd = [
             binary, "-p", prompt, *extra_args,
             "--output-format", "stream-json",
         ]
+        if model:
+            cmd.extend(["--model", model])
+        return cmd
 
 
 class DevinAdapter(CliAdapter):
@@ -669,13 +1011,16 @@ class DevinAdapter(CliAdapter):
     commands = ("devin",)
     credential_style = "Devin account"
 
-    def build_command(self, *, binary, prompt, extra_args, runtime_dir):
-        return [
+    def build_command(self, *, binary, prompt, extra_args, runtime_dir, mcp_url=None, model=None, **kwargs):
+        cmd = [
             binary, "--print",
             "--config", _runtime_json_file("devin-config", _devin_config_json()),
             *extra_args,
-            "--", prompt,
         ]
+        if model:
+            cmd.extend(["--model", model])
+        cmd.extend(["--", prompt])
+        return cmd
 
 
 class KiroAdapter(CliAdapter):
@@ -686,13 +1031,16 @@ class KiroAdapter(CliAdapter):
     commands = ("kiro",)
     credential_style = "AWS credentials"
 
-    def build_command(self, *, binary, prompt, extra_args, runtime_dir):
-        return [
+    def build_command(self, *, binary, prompt, extra_args, runtime_dir, mcp_url=None, model=None, **kwargs):
+        cmd = [
             binary, "chat",
             "--no-interactive",
             *extra_args,
-            prompt,
         ]
+        if model:
+            cmd.extend(["--model", model])
+        cmd.append(prompt)
+        return cmd
 
 
 class PiAdapter(CliAdapter):
@@ -703,11 +1051,14 @@ class PiAdapter(CliAdapter):
     commands = ("pi",)
     credential_style = "Pi account"
 
-    def build_command(self, *, binary, prompt, extra_args, runtime_dir):
-        return [
+    def build_command(self, *, binary, prompt, extra_args, runtime_dir, mcp_url=None, model=None, **kwargs):
+        cmd = [
             binary, "-p", prompt,
             *extra_args,
         ]
+        if model:
+            cmd.extend(["--model", model])
+        return cmd
 
 
 class CopilotAdapter(CliAdapter):
@@ -717,19 +1068,27 @@ class CopilotAdapter(CliAdapter):
     label = "GitHub Copilot CLI"
     commands = ("gh", "copilot")
     credential_style = "GitHub Copilot subscription"
+    default_models = (
+        "claude-3.5-sonnet",
+        "gpt-4o",
+        "o1",
+    )
 
-    def build_command(self, *, binary, prompt, extra_args, runtime_dir):
+    def build_command(self, *, binary, prompt, extra_args, runtime_dir, mcp_url=None, model=None, **kwargs):
         if os.path.basename(binary or "") == "gh":
-            return [
+            cmd = [
                 binary, "copilot", "suggest",
                 *extra_args,
-                prompt,
             ]
-        return [
-            binary, "suggest",
-            *extra_args,
-            prompt,
-        ]
+        else:
+            cmd = [
+                binary, "suggest",
+                *extra_args,
+            ]
+        if model:
+            cmd.extend(["--model", model])
+        cmd.append(prompt)
+        return cmd
 
     def test_commands(self, *, binary):
         if os.path.basename(binary or "") == "gh":
@@ -762,6 +1121,7 @@ ADAPTERS: dict = {
     "opencode": OpenCodeAdapter(),
     "cursor": CursorAdapter(),
     "gemini": GeminiAdapter(),
+    "antigravity": AntigravityAdapter(),
     "qwen": QwenAdapter(),
     "kimi": KimiAdapter(),
     "devin": DevinAdapter(),

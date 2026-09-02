@@ -39,6 +39,7 @@ import time
 from ..core import tools as tools_mod
 from ..core.dev_logging import log_event
 from .adapters import (
+    AntigravityAdapter,
     ClaudeAdapter,
     CodexAdapter,
     CopilotAdapter,
@@ -52,6 +53,7 @@ from .adapters import (
     PiAdapter,
     QwenAdapter,
     get_adapter,
+    normalize_tool_name,
 )
 from .base import (
     AgentBackend,
@@ -91,6 +93,13 @@ CLI_AGENT_CATALOG = (
         "commands": ("gemini",),
         "credential_style": "Google account or Gemini API key",
         "adapter_class": GeminiAdapter,
+    },
+    {
+        "id": "antigravity",
+        "label": "Antigravity CLI",
+        "commands": ("agy", "antigravity"),
+        "credential_style": "Google account or Antigravity credentials",
+        "adapter_class": AntigravityAdapter,
     },
     {
         "id": "copilot",
@@ -448,6 +457,13 @@ _EXTRA_CANDIDATE_ROOTS = {
         "/opt/homebrew/bin",
         "/opt/homebrew/Cellar/node/*/bin",
     ),
+    "antigravity": (
+        "~/.gemini/antigravity/bin",
+        "~/.gemini/bin",
+        "~/Library/Application Support/Antigravity/bin",
+        "/Applications/Antigravity.app/Contents/Resources/bin",
+        "~/.antigravity/bin",
+    ),
 }
 
 
@@ -491,6 +507,8 @@ def _scrub_child_env(env):
         "CODEX_THREAD_ID",
         "CLAUDE_CODE_SSE_PORT",
         "CLAUDE_CODE_ENTRYPOINT",
+        "PYTHONHOME",
+        "PYTHONPATH",
     }
     prefixes = (
         "MCP__PLUGIN_",
@@ -971,6 +989,7 @@ class NormalizingStream:
         self.finish_reason = None
         self._text_emitted = False
         self._last_text_value = None
+        self._emitted_text_chunks = []
         self._first_event_logged = False
         self._first_text_logged = False
         # Generate unique tool_use_id for each tool call so results can be
@@ -1217,6 +1236,7 @@ class NormalizingStream:
                 self.emit(AgentEvent(EventType.TEXT, {"text": text}))
                 self._text_emitted = True
                 self._last_text_value = text
+                self._emitted_text_chunks.append(text)
                 self.final_text = text
                 return
 
@@ -1230,6 +1250,7 @@ class NormalizingStream:
                 self.emit(AgentEvent(EventType.TEXT, {"text": text}))
                 self._text_emitted = True
                 self._last_text_value = text
+                self._emitted_text_chunks.append(text)
                 self.final_text = text
             return
         if not isinstance(raw, dict):
@@ -1238,11 +1259,6 @@ class NormalizingStream:
             return
         self._log_first_event(raw.get("type") or "unknown")
         norm = self.adapter.parse_event(raw)
-        # DEBUG: trace what the adapter returns for each event type
-        _nt = norm.text[:40] if norm and norm.text else None
-        _nf = norm.is_final if norm else None
-        print(f"[AGENTICGIS-DEBUG] feed_line: type={raw.get('type')!r}, adapter={self.adapter.id}, "
-              f"norm={norm is not None}, norm.text={_nt!r}, norm.is_final={_nf}, _text_emitted={self._text_emitted}")
         if norm is None:
             # Fallback 1: check if raw JSON is the tool_calls protocol
             protocol = self.adapter.parse_protocol_text(decoded)
@@ -1259,6 +1275,7 @@ class NormalizingStream:
                 self.emit(AgentEvent(EventType.TEXT, {"text": _text}))
                 self._text_emitted = True
                 self._last_text_value = _text
+                self._emitted_text_chunks.append(_text)
                 self.final_text = _text
                 return
             sid = raw.get("session_id") or raw.get("sessionID") or ""
@@ -1301,20 +1318,17 @@ class NormalizingStream:
                 # Also suppress exact duplicate text from fallbacks
                 # (e.g. Claude result events that echo the assistant text).
                 will_emit = not (norm.is_final and self._text_emitted) and norm.text != self._last_text_value
-                print(f"[AGENTICGIS-DEBUG] TEXT decision: norm.is_final={norm.is_final}, "
-                      f"_text_emitted={self._text_emitted}, will_emit={will_emit}, "
-                      f"text={norm.text[:50]!r}")
                 if will_emit:
                     self._log_first_text()
                     self.emit(AgentEvent(EventType.TEXT, {"text": norm.text}))
                     self._text_emitted = True
                     self._last_text_value = norm.text
+                    self._emitted_text_chunks.append(norm.text)
         self._emit_tool_calls(norm.tool_calls)
         if norm.is_final:
             # Surface any protocol fragments that buffered but never resolved
             # into a complete object before the turn ended.
             self._flush_pending_protocol_as_text()
-            print(f"[AGENTICGIS-DEBUG] Setting final_text={norm.text[:50]!r}")
             self.final_text = norm.text or self.final_text
 
 
@@ -1327,6 +1341,12 @@ class CliToolBackend(AgentBackend):
             self.extra_args = shlex.split(config.get("cli_args") or "")
         except ValueError:
             self.extra_args = []
+        self.model = (
+            config.get("cli_model")
+            if config.get("cli_model") is not None
+            else (config.get("model") or "")
+        ) or ""
+        self._last_auth_output = None
         self.toolkit = toolkit
         self.executor = executor
         # Kept only for backwards-compatible construction; no longer used for
@@ -1435,6 +1455,7 @@ class CliToolBackend(AgentBackend):
             return "unsupported", str(exc)
 
         output = _process_output(result)
+        self._last_auth_output = output if result.returncode == 0 else None
         detail = output.splitlines()[0] if output else ""
         parser = get_adapter(self.tool).auth_detail_parser
         if callable(parser):
@@ -1445,13 +1466,58 @@ class CliToolBackend(AgentBackend):
             return "login_required", detail
         return "unsupported", detail or "No auth status command available"
 
+    def list_models(self):
+        """Return a list of available models for the selected CLI agent."""
+        adapter = get_adapter(self.tool)
+        models = []
+        if adapter.models_args and self.binary:
+            output = None
+            if (
+                adapter.models_args == adapter.auth_status_args
+                and getattr(self, "_last_auth_output", None)
+            ):
+                output = self._last_auth_output
+            else:
+                try:
+                    result = subprocess.run(  # nosec B603
+                        _subprocess_cmd([self.binary, *adapter.models_args]),
+                        capture_output=True,
+                        timeout=8,
+                        creationflags=_creation_flags(),
+                    )
+                    if result.returncode == 0:
+                        output = _process_output(result)
+                except (subprocess.SubprocessError, OSError):
+                    pass
+
+            if output:
+                parser = adapter.models_parser
+                if callable(parser):
+                    models = parser(output)
+                else:
+                    lines = [line.strip() for line in output.splitlines() if line.strip()]
+                    for line in lines:
+                        if not line.lower().startswith("fetching") and not line.lower().startswith("error"):
+                            parts = line.split("\t")
+                            mid = parts[0].strip() if parts else ""
+                            if not mid:
+                                mid = line.split()[0].strip()
+                            if mid and mid not in models:
+                                models.append(mid)
+
+        if not models and adapter.default_models:
+            models = list(adapter.default_models)
+        return models
+
     def check_login(self):
         """Return True if the CLI reports an active session."""
         return self.auth_status()[0] == "ready"
 
     def _login_cmd(self):
         """Return the command to open a browser login flow."""
-        args = get_adapter(self.tool).login_args or ("login",)
+        args = get_adapter(self.tool).login_args
+        if args is None:
+            args = ("login",)
         return [self.binary, *args]
 
     def login_browser(self):
@@ -1511,7 +1577,27 @@ class CliToolBackend(AgentBackend):
         except Exception:  # nosec B110
             return True
 
-    def _system_prompt(self):
+    def _mcp_url(self):
+        """Return the in-process MCP bridge URL (starting it if needed).
+
+        When available, the launched CLI gets the AgenticGIS tools
+        registered as native MCP tools, so the agent calls them directly
+        instead of via the JSON text protocol. Best-effort: any failure
+        just falls back to the protocol and must never break the launch.
+        """
+        adapter = get_adapter(self.tool)
+        if not getattr(adapter, "supports_mcp", False):
+            return None
+        if not self._server_provider:
+            return None
+        try:
+            if not self.config.get("mcp_enabled", True):
+                return None
+            return self._server_provider()
+        except Exception:  # nosec B110
+            return None
+
+    def _system_prompt(self, mcp_registered=False):
         base = _build_system_prompt(include_gee=self._gee_available())
         state = ""
         if self.toolkit is not None:
@@ -1520,14 +1606,34 @@ class CliToolBackend(AgentBackend):
             except Exception:  # nosec B110
                 pass
         state_section = f"\n\n{state}" if state else ""
+        if mcp_registered:
+            transport_rules = (
+                "## CLI proxy rules\n\n"
+                "You are running inside a CLI transport, and the AgenticGIS "
+                "QGIS tools are REGISTERED in your session as native MCP "
+                "tools on the MCP server 'agenticgis' (mcp__agenticgis__"
+                "list_layers, mcp__agenticgis__run_pyqgis, "
+                "mcp__agenticgis__run_processing, …). Call them directly as "
+                "tools whenever you need QGIS project data — that is the "
+                "preferred path. Do NOT use this CLI's own filesystem, "
+                "shell, browser, plugin, or skill tools for the user's GIS "
+                "request.\n\n"
+                "Only if the AgenticGIS MCP tools turn out to be missing "
+                "from your session, fall back to the JSON protocol below.\n\n"
+            )
+        else:
+            transport_rules = (
+                "## CLI proxy rules\n\n"
+                "You are running inside a CLI transport, but AgenticGIS "
+                "executes all QGIS tools in-process. Do not use this CLI's "
+                "own filesystem, shell, browser, plugin, skill, or MCP "
+                "tools to answer the user's GIS request. When you need "
+                "project data, request an AgenticGIS tool call in the JSON "
+                "protocol below.\n\n"
+            )
         return (
             f"{base}{state_section}\n\n"
-            "## CLI proxy rules\n\n"
-            "You are running inside a CLI transport, but AgenticGIS executes "
-            "all QGIS tools in-process. Do not use this CLI's own filesystem, "
-            "shell, browser, plugin, skill, or MCP tools to answer the user's "
-            "GIS request. When you need project data, request an AgenticGIS "
-            "tool call in the JSON protocol below.\n\n"
+            f"{transport_rules}"
             "For final answers, write normal plain text/markdown directly, "
             "with the same rich, useful, detailed answer you would give in "
             "API/custom mode. Do not wrap final answers in JSON. Preserve the "
@@ -1555,7 +1661,7 @@ class CliToolBackend(AgentBackend):
 
     def _conversation_prompt(self, messages):
         return (
-            f"{self._system_prompt()}\n\n"
+            f"{self._system_prompt(mcp_registered=bool(self._mcp_url()))}\n\n"
             f"Available AgenticGIS tools:\n{self._tool_prompt()}\n\n"
             "Conversation, newest last:\n"
             f"{json.dumps(messages, default=str)}"
@@ -1580,9 +1686,10 @@ class CliToolBackend(AgentBackend):
             prompt=prompt,
             extra_args=self.extra_args,
             runtime_dir=self._runtime_cwd(),
+            model=self.model or None,
         )
 
-    def _runtime_env(self):
+    def _runtime_env(self, mcp_url=None):
         env = os.environ.copy()
         _scrub_child_env(env)
         if platform.system() == "Windows":
@@ -1594,7 +1701,7 @@ class CliToolBackend(AgentBackend):
         )
         _prepend_path(env, node_and_wrapper_dirs)
         env.update(_COMMON_RUNTIME_ENV)
-        adapter_env = get_adapter(self.tool).env()
+        adapter_env = get_adapter(self.tool).env(mcp_url=mcp_url)
         if adapter_env:
             env.update(adapter_env)
         return env
@@ -1616,64 +1723,6 @@ class CliToolBackend(AgentBackend):
             except Exception:  # nosec B110
                 pass
         return path
-
-    def _collect_process_output(self, cmd, env, cwd, should_stop):
-        try:
-            with self._lock:
-                self._proc = subprocess.Popen(  # nosec B603
-                    _subprocess_cmd(cmd),
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    bufsize=0,
-                    env=env,
-                    cwd=cwd,
-                    start_new_session=True,
-                    close_fds=True,
-                    creationflags=_creation_flags(),
-                )
-        except Exception as exc:
-            return "", f"Failed to launch {self.tool}: {exc}", False
-
-        proc = self._proc
-        stdout = proc.stdout
-        stderr = proc.stderr
-        out_chunks = []
-        err_chunks = []
-        stopped = False
-        pending, _threads = _start_pipe_readers((stdout, stderr))
-        open_pipes = sum(1 for pipe in (stdout, stderr) if pipe is not None)
-        exited_at = None
-        try:
-            while open_pipes:
-                if should_stop():
-                    stopped = True
-                    self._terminate_process_group(proc, kill=True)
-                    break
-                try:
-                    source, chunk = pending.get(timeout=0.2)
-                except queue.Empty:
-                    if proc.poll() is None:
-                        exited_at = None
-                        continue
-                    if exited_at is None:
-                        exited_at = time.monotonic()
-                    elif time.monotonic() - exited_at > 1.0:
-                        break
-                    continue
-                if chunk is None:
-                    open_pipes -= 1
-                elif source is stdout:
-                    out_chunks.append(chunk)
-                else:
-                    err_chunks.append(chunk)
-        finally:
-            self._finalize_process(proc, stopped=stopped)
-
-        out_text = b"".join(out_chunks).decode("utf-8", "replace")
-        err_text = b"".join(err_chunks).decode("utf-8", "replace")
-        if stopped:
-            return out_text, "Stopped.", False
-        return out_text, err_text, proc.returncode == 0
 
     def send(self, message, history, emit, should_stop):
         err = self.validate()
@@ -1714,12 +1763,17 @@ class CliToolBackend(AgentBackend):
             if pending:
                 tool_messages = []
                 for call in pending:
-                    name = call.get("name")
+                    name = normalize_tool_name(call.get("name"))
                     args = call.get("arguments", {}) or {}
                     tool_use_id = call.get("_tool_use_id", "")
                     if name not in tools_mod.TOOL_BY_NAME:
                         # Non-AgenticGIS tool (e.g. Codex command_execution).
                         # Surface for UI display but don't execute it here.
+                        continue
+                    if "output" in call:
+                        # Already executed internally by the CLI during this run
+                        # (e.g. via native MCP). The tool result was already
+                        # emitted to the UI via TOOL_RESULT — do not re-execute.
                         continue
                     payload, is_error, is_cancelled, _result = _dispatch_one_tool(
                         self.toolkit,
@@ -1751,14 +1805,14 @@ class CliToolBackend(AgentBackend):
                     messages.extend(tool_messages)
                     new_messages = tool_messages
                     continue
-                # All calls were non-AgenticGIS tools — fall through to text handling.
-            # DEBUG: trace send() final decision
-            _lval = getattr(stream, '_last_text_value', None)
-            _txt_em = getattr(stream, '_text_emitted', False)
+                # All calls were non-AgenticGIS tools or already executed — fall through to text handling.
+
             if stream.final_text is not None:
                 messages.append({"role": "assistant", "content": stream.final_text})
-            elif _txt_em and _lval:
-                messages.append({"role": "assistant", "content": _lval})
+            elif getattr(stream, "_emitted_text_chunks", None):
+                full_text = "".join(stream._emitted_text_chunks).strip()
+                if full_text:
+                    messages.append({"role": "assistant", "content": full_text})
             elif not stream.had_error:
                 fallback = "The CLI agent completed without returning a response."
                 emit(AgentEvent(EventType.TEXT, {"text": fallback}))
@@ -1831,29 +1885,37 @@ class CliToolBackend(AgentBackend):
 
         # Pick up any leftover partial line.
         if out_buf.strip():
-            print(f"[AGENTICGIS-DEBUG] Leftover buffer: {out_buf[:200]!r}")
             stream.feed_line(out_buf)
             self._remember_session_id(stream.adapter, stream.session_id, generation)
 
-        if err_acc and not poller_stopped:
+        if stream.final_text is None and stream._emitted_text_chunks:
+            full = "".join(stream._emitted_text_chunks).strip()
+            if full:
+                stream.final_text = full
+
+        if not poller_stopped:
             try:
                 rc = proc.returncode
             except Exception:
                 rc = None
             if rc not in (0, None):
                 joined = "\n".join(s for s in err_acc if s).strip()
-                if joined:
-                    stream.emit(AgentEvent(EventType.ERROR, {"error": joined[:2000]}))
+                message = joined[:2000] if joined else f"{self.tool} exited with code {rc} and no error output."
+                stream.had_error = True
+                stream.emit(AgentEvent(EventType.ERROR, {"error": message}))
 
     def _run_stream(self, adapter, prompt, emit, should_stop, generation=None):  # noqa: PLR0913
         """Build the CLI command, spawn the subprocess, run the
         pipe readers, and return the populated NormalizingStream."""
         session_id = self._continuation_session_id(adapter)
+        mcp_url = self._mcp_url()
         command_args = {
             "binary": self.binary,
             "prompt": prompt,
             "extra_args": self.extra_args,
             "runtime_dir": self._runtime_cwd(),
+            "mcp_url": mcp_url,
+            "model": self.model or None,
         }
         if session_id:
             cmd = adapter.build_continuation_command(
@@ -1881,7 +1943,7 @@ class CliToolBackend(AgentBackend):
             stream = NormalizingStream(adapter, emit)
             stream.had_error = True
             return stream
-        env = self._runtime_env()
+        env = self._runtime_env(mcp_url)
         cwd = self._runtime_cwd()
         try:
             with self._lock:
@@ -2004,6 +2066,26 @@ class CliToolBackend(AgentBackend):
             try:
                 pgid = os.getpgid(proc.pid)
                 os.killpg(pgid, sig)
+                return
+            except Exception:  # nosec B110
+                pass
+        if kill and platform.system() == "Windows":
+            # .cmd/.bat CLIs are launched via ``cmd.exe /c`` (_subprocess_cmd),
+            # so ``proc`` is the cmd.exe wrapper, not the real node.exe/etc.
+            # child. proc.kill() only kills the wrapper and leaves the real
+            # process running. taskkill /T kills the whole process tree.
+            # Absolute path so a tampered PATH entry can't shadow taskkill.
+            taskkill = os.path.join(
+                os.environ.get("SystemRoot", r"C:\Windows"), "System32", "taskkill.exe"
+            )
+            try:
+                subprocess.run(  # nosec B603
+                    [taskkill, "/F", "/T", "/PID", str(proc.pid)],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    timeout=3,
+                    creationflags=_creation_flags(),
+                )
                 return
             except Exception:  # nosec B110
                 pass

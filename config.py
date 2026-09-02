@@ -20,6 +20,7 @@ DEFAULTS = {
     "cli_tool": "claude",
     "cli_path": "",                # explicit binary path; empty => auto-detect on PATH
     "cli_args": "",                # optional extra CLI flags for advanced users
+    "cli_model": "",               # model to pass to the CLI agent (--model)
     # API-key mode
     "provider": "anthropic",
     "model": "claude-opus-4-8",
@@ -42,9 +43,12 @@ DEFAULTS = {
     # User can choose "Always allow" in the external access permission popup.
     # This permits future file/path/URL/database access without prompting.
     "external_access_always_allowed": False,
-    # Local MCP bridge (used by CLI-tool mode)
+    # Local MCP bridge: exposes the QGIS tools to external agent CLIs
+    # (Claude Code, Codex, OpenCode, …) over localhost. See README
+    # "External agent access (MCP)".
+    "mcp_enabled": True,
     "mcp_host": "127.0.0.1",
-    "mcp_port": 0,                 # 0 => pick a free port at runtime
+    "mcp_port": 7317,              # fixed default so client configs stay valid; 0 => random port
     # Performance
     "main_thread_timeout": 60.0,      # seconds for main-thread operations
     "processing_timeout": 0.0,        # 0 or less => unlimited processing task setup wait

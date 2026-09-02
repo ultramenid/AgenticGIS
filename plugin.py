@@ -49,6 +49,9 @@ class AgenticGisPlugin:
             maybe_enable_default_cache()
         except Exception:  # nosec B110
             pass
+        # Localhost MCP bridge for external agent CLIs — best-effort, never
+        # blocks QGIS startup (Settings → External agent CLIs to disable).
+        self._apply_mcp_state()
 
     def unload(self):
         try:
@@ -195,6 +198,21 @@ class AgenticGisPlugin:
                 pass
             self._server = None
 
+    def _apply_mcp_state(self):
+        """Start or stop the MCP bridge to match the ``mcp_enabled`` setting.
+
+        The bridge lets external agent CLIs drive the QGIS tools over
+        localhost (see server/mcp_stdio.py); starting it is best-effort so a
+        busy port or a missing Qt binding can never break QGIS startup.
+        """
+        try:
+            if self.config.get("mcp_enabled"):
+                self._server_provider()
+            else:
+                self._stop_server()
+        except Exception:  # nosec B110
+            pass
+
     # ------------------------------------------------------------------ #
     # Settings                                                            #
     # ------------------------------------------------------------------ #
@@ -211,3 +229,5 @@ class AgenticGisPlugin:
                 self._dock._maybe_prewarm()
             except Exception:  # nosec B110
                 pass
+        # The MCP toggle takes effect immediately, not on next QGIS start.
+        self._apply_mcp_state()

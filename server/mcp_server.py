@@ -25,13 +25,16 @@ Reliability hardening
 """
 
 import json
+import os
 import socket
+import time
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from qgis.PyQt.QtCore import QThread
 
 from ..core import tools as tools_mod
+from .discovery import register_server, unregister_server
 
 PROTOCOL_VERSION = "2025-06-18"
 SERVER_INFO = {"name": "AgenticGIS", "version": "0.1.0"}
@@ -39,6 +42,7 @@ SERVER_INFO = {"name": "AgenticGIS", "version": "0.1.0"}
 # Bounded socket I/O so a stalled client cannot hold a thread forever.
 DEFAULT_SOCKET_TIMEOUT = 30.0  # seconds; per-handler, configurable
 DEFAULT_SERVER_TIMEOUT = 1.0   # seconds; serve_forever poll interval upper bound
+DEFAULT_SSE_KEEPALIVE = 15.0   # seconds between comments on the GET SSE stream
 
 
 def _allocate_listening_socket(host, port):
@@ -85,10 +89,15 @@ class _Handler(BaseHTTPRequestHandler):
         accept = self.headers.get("Accept", "")
         if "text/event-stream" in accept:
             body = json.dumps(rpc_response).encode("utf-8")
-            self._send_headers(200, "text/event-stream", content_length=len(body),
+            # LF-only SSE framing (some clients' parsers don't strip the CR
+            # from CRLF-delimited fields), and Content-Length covers the
+            # WHOLE frame — a length equal to the bare JSON truncates the
+            # event mid-line and clients hang waiting for its completion.
+            frame = b"event: message\ndata: " + body + b"\n\n"
+            self._send_headers(200, "text/event-stream", content_length=len(frame),
                                extra_headers={"Cache-Control": "no-cache"})
             try:
-                self.wfile.write(b"event: message\r\ndata: " + body + b"\r\n\r\n")
+                self.wfile.write(frame)
             except (OSError, socket.timeout):
                 pass
             return
@@ -152,9 +161,31 @@ class _Handler(BaseHTTPRequestHandler):
             self._respond(rpc_response)
 
     def do_GET(self):
-        # We don't push server-initiated messages; no SSE stream to open.
+        """Hold the SSE server-stream open for clients that request it.
+
+        The bridge never pushes server-initiated messages, but several MCP
+        clients (e.g. OpenCode 1.18.x) open the GET stream right after
+        ``initialize`` and treat a 405 as a failed server. Keep the stream
+        open with SSE comments until the client goes away.
+        """
+        accept = self.headers.get("Accept", "")
+        if "text/event-stream" not in accept:
+            try:
+                self._send_headers(405, "application/octet-stream", content_length=0)
+            except (OSError, socket.timeout):
+                pass
+            return
         try:
-            self._send_headers(405, "application/octet-stream", content_length=0)
+            self.connection.settimeout(self.server.socket_timeout)
+            self._send_headers(
+                200, "text/event-stream",
+                extra_headers={"Cache-Control": "no-cache"},
+                close=False,
+            )
+            while True:
+                self.wfile.write(b": keepalive\n\n")
+                self.wfile.flush()
+                time.sleep(self.server.sse_keepalive)
         except (OSError, socket.timeout):
             pass
 
@@ -168,7 +199,8 @@ class _RpcServer(ThreadingHTTPServer):
 
     def __init__(self, server_address, RequestHandlerClass,
                  toolkit, executor, socket_timeout=DEFAULT_SOCKET_TIMEOUT,
-                 server_timeout=DEFAULT_SERVER_TIMEOUT, bind_socket=None):
+                 server_timeout=DEFAULT_SERVER_TIMEOUT, bind_socket=None,
+                 sse_keepalive=DEFAULT_SSE_KEEPALIVE):
         # If we have a pre-bound socket (TOCTOU-free path), let the
         # ThreadingHTTPServer dup it via ``server_bind`` / ``activate_socket``.
         if bind_socket is not None:
@@ -191,6 +223,8 @@ class _RpcServer(ThreadingHTTPServer):
         # Per-handler socket timeout (so a stalled read in one connection
         # doesn't block others).
         self.socket_timeout = socket_timeout
+        # Seconds between SSE comments on the GET server-stream.
+        self.sse_keepalive = sse_keepalive
 
     def handle_rpc(self, message):
         method = message.get("method")
@@ -267,7 +301,15 @@ class McpBridgeServer(QThread):
         self.host = host
         # keep a reference to the pre-bound listening socket across
         # thread startup so we don't rebind.
-        self._bound_sock, self.port = _allocate_listening_socket(host, port)
+        try:
+            self._bound_sock, self.port = _allocate_listening_socket(host, port)
+        except OSError:
+            if not port:
+                raise
+            # Configured port busy — another QGIS instance owns it. Fall
+            # back to an ephemeral port; the discovery file still points
+            # clients at this instance.
+            self._bound_sock, self.port = _allocate_listening_socket(host, 0)
         self.poll_interval = poll_interval
         self.socket_timeout = socket_timeout
         self.server_timeout = server_timeout
@@ -289,6 +331,17 @@ class McpBridgeServer(QThread):
             server_timeout=self.server_timeout,
             bind_socket=self._bound_sock,
         )
+        # Publish this instance so external agent CLIs can find it
+        # (stdlib discovery registry, shared with server/mcp_stdio.py).
+        try:
+            register_server({
+                "url": self.base_url,
+                "pid": os.getpid(),
+                "host": self.host,
+                "port": self.port,
+            })
+        except Exception:  # nosec B110 — discovery is best-effort; never kill the bridge
+            pass
         try:
             self._server.serve_forever(poll_interval=self.poll_interval)
         finally:
@@ -296,6 +349,10 @@ class McpBridgeServer(QThread):
             try:
                 self._bound_sock.close()
             except Exception:  # nosec B110
+                pass
+            try:
+                unregister_server(os.getpid())
+            except Exception:  # nosec B110 — best-effort cleanup on shutdown
                 pass
 
     def stop(self):

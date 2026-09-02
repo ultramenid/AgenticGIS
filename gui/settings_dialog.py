@@ -12,6 +12,7 @@ from qgis.PyQt.QtCore import Qt, QThread, pyqtSignal
 from qgis.PyQt.QtGui import QColor, QFont, QPalette
 from qgis.PyQt.QtWidgets import (
     QApplication,
+    QCheckBox,
     QComboBox,
     QDialog,
     QFileDialog,
@@ -703,6 +704,9 @@ class SettingsDialog(QDialog):
         cb.addWidget(self.stack)
         body.addWidget(conn)
 
+        # ─ External agents (MCP) card ─
+        body.addWidget(self._mcp_section())
+
         body.addStretch(1)
 
         # ─ footer ─
@@ -734,6 +738,31 @@ class SettingsDialog(QDialog):
         btn_row.addWidget(self._save_btn)
 
         root.addLayout(btn_row)
+
+    # ── external agents (MCP) ────────────────────────────────────────────────
+    def _mcp_section(self):
+        card = _SectionCard("External agent CLIs (MCP)")
+        cb = card.body()
+
+        self.mcp_enabled_check = QCheckBox(
+            "Expose QGIS tools to external agent CLIs (local MCP server on 127.0.0.1)"
+        )
+        self.mcp_enabled_check.setFont(_mono(10))
+        self.mcp_enabled_check.setStyleSheet(f"color: {_TEXT_2}; background: transparent;")
+        self.mcp_enabled_check.setChecked(bool(self.config.get("mcp_enabled")))
+        cb.addWidget(self.mcp_enabled_check)
+
+        hint = _lbl(
+            "External CLIs (Claude Code, Codex, OpenCode, …) can then drive the "
+            "live QGIS session through AgenticGIS's stdio MCP proxy — one-line "
+            "setup per CLI in the README (\"External agent access (MCP)\"). "
+            "Localhost only; takes effect immediately.",
+            color=_TEXT_3, size=9,
+        )
+        hint.setWordWrap(True)
+        cb.addWidget(hint)
+
+        return card
 
     # ── stack panels ──────────────────────────────────────────────────────────
     def stack_set(self, index):
@@ -811,12 +840,16 @@ class SettingsDialog(QDialog):
         )
 
         agent_label = self.cli_agent_name.text() if hasattr(self, "cli_agent_name") else ""
+        cli_model = (
+            self.cli_model_picker.currentText().strip()
+            if hasattr(self, "cli_model_picker") else ""
+        )
         cli_path = self.cli_path_edit.text().strip() if hasattr(self, "cli_path_edit") else ""
         cli_text = "CLI Agent"
         self.connection_tabs.setTabText(2, active_label(2, cli_text))
         self.connection_tabs.setTabToolTip(
             2,
-            "\n".join(part for part in (active_label(2, cli_text), agent_label, cli_path) if part),
+            "\n".join(part for part in (active_label(2, cli_text), agent_label, cli_model, cli_path) if part),
         )
 
     @staticmethod
@@ -1042,6 +1075,8 @@ class SettingsDialog(QDialog):
         )
         form.addRow(self.sub_status)
         col.addWidget(details)
+        self.cli_model_group = self._model_group("cli_model_picker")
+        col.addWidget(self.cli_model_group)
         return w
 
     # ── slots ─────────────────────────────────────────────────────────────────
@@ -1072,6 +1107,9 @@ class SettingsDialog(QDialog):
         if mode == config_mod.MODE_CUSTOM:
             return (self.custom_status, self.custom_test_btn,
                     self.custom_model_picker, self.custom_model_group)
+        if mode == config_mod.MODE_CLI_TOOL:
+            return (self.cli_auth_status, self.cli_auth_btn,
+                    self.cli_model_picker, self.cli_model_group)
         return (self.api_status, self.api_test_btn,
                 self.model_picker, self.api_model_group)
 
@@ -1297,6 +1335,8 @@ class SettingsDialog(QDialog):
         self.cli_test_status.setText("")
         self.cli_auth_status.setText("Auth not checked")
         self.cli_auth_status.setStyleSheet(f"color: {_TEXT_3}; background: transparent;")
+        if hasattr(self, "cli_model_group"):
+            self.cli_model_group.setVisible(False)
         if not getattr(self, "_syncing_cli_selection", False):
             self._cli_path_is_override = False
         self._update_cli_agent_detail()
@@ -1371,6 +1411,8 @@ class SettingsDialog(QDialog):
         if backend is None:
             self.cli_auth_status.setText("Binary not found")
             self.cli_auth_status.setStyleSheet(f"color: {_DANGER}; background: transparent;")
+            if hasattr(self, "cli_model_group"):
+                self.cli_model_group.setVisible(False)
             return
 
         self.cli_auth_status.setText("Checking…")
@@ -1379,17 +1421,38 @@ class SettingsDialog(QDialog):
         if state == "ready":
             color = _SUCCESS
             text = f"Ready · {detail}"
-        elif state == "login_required":
-            color = _WARN
-            text = f"Login required · {detail}"
-        elif state == "missing":
-            color = _DANGER
-            text = detail
+            self.cli_auth_status.setText(text)
+            self.cli_auth_status.setStyleSheet(f"color: {color}; background: transparent;")
+            if hasattr(self, "cli_model_group"):
+                models = []
+                try:
+                    models = backend.list_models()
+                except Exception:
+                    models = []
+                saved = self.config.get("cli_model") or ""
+                self.cli_model_picker.setActive(saved)
+                self._fill_models(self.cli_model_picker, models)
+                if not self.cli_model_picker.currentText():
+                    if saved:
+                        self.cli_model_picker.setCurrentText(saved)
+                    elif models:
+                        self.cli_model_picker.setCurrentText(models[0])
+                self.cli_model_group.setVisible(True)
         else:
-            color = _TEXT_3
-            text = f"Auth check unavailable · {detail}"
-        self.cli_auth_status.setText(text)
-        self.cli_auth_status.setStyleSheet(f"color: {color}; background: transparent;")
+            if state == "login_required":
+                color = _WARN
+                text = f"Login required · {detail}"
+            elif state == "missing":
+                color = _DANGER
+                text = detail
+            else:
+                color = _TEXT_3
+                text = f"Auth check unavailable · {detail}"
+            self.cli_auth_status.setText(text)
+            self.cli_auth_status.setStyleSheet(f"color: {color}; background: transparent;")
+            if hasattr(self, "cli_model_group"):
+                self.cli_model_group.setVisible(False)
+        self._update_connection_tab_labels()
 
     def _use_cli_agent(self):
         self.connection_tabs.setCurrentIndex(2)
@@ -1457,6 +1520,12 @@ class SettingsDialog(QDialog):
                 self.custom_status, "Test connection to refresh the model list.", _TEXT_3
             )
 
+        cli_model = self.config.get("cli_model") or ""
+        self.cli_model_picker.setCurrentText(cli_model)
+        self.cli_model_picker.setActive(cli_model)
+        if cli_model:
+            self.cli_model_group.setVisible(True)
+
         self._update_connection_tab_labels()
 
     def _save_and_accept(self):
@@ -1501,5 +1570,14 @@ class SettingsDialog(QDialog):
                 "cli_path",
                 self.cli_path_edit.text().strip() if self._cli_path_is_override else "",
             )
+            cli_model = self.cli_model_picker.currentText().strip()
+            self.config.set("cli_model", cli_model)
+            if cli_model:
+                self.config.set("model", cli_model)
+
+        self.config.set(
+            "mcp_enabled",
+            self.mcp_enabled_check.isChecked(),
+        )
 
         self.accept()

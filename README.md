@@ -105,9 +105,10 @@ tool execution inside the plugin process.
 
 Supported CLI catalog:
 
-`Claude Code`, `Codex CLI`, `Cursor Agent`, `Gemini CLI`, `GitHub Copilot CLI`,
-`OpenCode`, `Qwen Code`, `Grok`, `Hermes`, `Kimi CLI`, `Devin for Terminal`,
-`DeepSeek TUI`, `Pi`, `Mistral Vibe CLI`, `Kiro CLI`, `Kilo`, `Qoder CLI`.
+`Claude Code`, `Codex CLI`, `Cursor Agent`, `Gemini CLI`, `Antigravity CLI`,
+`GitHub Copilot CLI`, `OpenCode`, `Qwen Code`, `Grok`, `Hermes`, `Kimi CLI`,
+`Devin for Terminal`, `DeepSeek TUI`, `Pi`, `Mistral Vibe CLI`, `Kiro CLI`,
+`Kilo`, `Qoder CLI`.
 
 Notes:
 
@@ -119,6 +120,65 @@ Notes:
   manually.
 - For Claude Code, auth checks use `claude auth status`; AgenticGIS does not
   run the interactive `claude status` command.
+- **Native tool access** — Claude Code, Codex CLI, and OpenCode get the
+  AgenticGIS tools registered as native MCP tools (via the local bridge,
+  on while "Expose QGIS tools to external agent CLIs" is enabled), so the
+  CLI agent calls `list_layers` / `run_pyqgis` / `run_processing` directly.
+  Other CLIs use the JSON tool-call protocol embedded in the prompt.
+
+## External agent access (MCP)
+
+The QGIS tools don't only serve the in-panel agent: while the plugin is
+loaded, they are also exposed as a **local MCP server**, so any MCP-capable
+agent CLI — Claude Code, Codex CLI, OpenCode, Cursor Agent, Gemini CLI, … —
+can drive the live QGIS session from outside: list layers, run Processing
+algorithms, execute PyQGIS, style, export — everything the panel's agent can
+do, against the same running project.
+
+- The bridge starts with the plugin (disable: **Settings → External agent
+  CLIs**) and listens on `127.0.0.1:7317` (override with the `mcp_port`
+  setting; `0` = random free port).
+- Every running instance publishes its URL to `~/.agenticgis/mcp.json`, so
+  multiple QGIS profiles / QGIS versions can coexist and clients find a
+  live one automatically.
+- Most CLIs only speak the *stdio* MCP transport, so the plugin ships a
+  tiny zero-dependency proxy that bridges stdio ↔ streamable HTTP. It runs
+  on any `python3` (≥ 3.9) — nothing to install.
+
+One-time setup per CLI — replace `<plugins>` with your profile's
+`python/plugins` path (see [Install](#option-b--manual-folder-install)):
+
+```bash
+# Claude Code — tools appear as mcp__agenticgis__*
+claude mcp add agenticgis -s user -- python3 "<plugins>/AgenticGIS/server/mcp_stdio.py"
+
+# Codex CLI — ~/.codex/config.toml
+[mcp_servers.agenticgis]
+command = "python3"
+args = ["<plugins>/AgenticGIS/server/mcp_stdio.py"]
+
+# OpenCode — opencode.json
+{
+  "mcp": {
+    "agenticgis": {
+      "type": "local",
+      "command": ["python3", "<plugins>/AgenticGIS/server/mcp_stdio.py"]
+    }
+  }
+}
+```
+
+Any client that speaks streamable HTTP natively can skip the proxy and use
+`http://127.0.0.1:7317/mcp` directly.
+
+**Notes**
+
+- Localhost only, no authentication: while the toggle is on, any local
+  process can drive the QGIS tools. Turn it off to close the door.
+- QGIS must be running with the plugin enabled — the proxy exits with a
+  clear error when no live bridge answers.
+- Tool calls run to completion before the result streams back — same
+  execution model as CLI Agent mode.
 
 ## Requirements
 
@@ -362,7 +422,9 @@ authenticate the **Google Earth Engine** QGIS plugin separately (see
 
 - **Custom skills** — user-defined tool bundles that extend the agent's
   capabilities beyond the built-in set.
-- **MCP server connectivity** — connect to external Model Context Protocol
-  servers for additional tools and data sources.
+- **MCP client** — connect the in-panel agent to external MCP servers for
+  additional tools and data sources. (The server side — exposing QGIS tools
+  to outside agent CLIs — is done; see
+  [External agent access (MCP)](#external-agent-access-mcp).)
 - **And more** — ongoing improvements to performance, stability, and
   you decide.

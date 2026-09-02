@@ -362,6 +362,16 @@ def _safe_feature_count(layer):
     return count if count >= 0 else None
 
 
+def _cleanup_gee_download(path):
+    """Remove a GEE download temp file left behind by a failed/cancelled/timed-out task."""
+    if not path:
+        return
+    try:
+        os.unlink(path)
+    except OSError:
+        pass
+
+
 def _chart_from_data(data, chart_type, colors, title):
     """Build a chart result from agent-supplied label/value pairs.
 
@@ -726,6 +736,11 @@ class QgisToolkit:
     def __init__(self, iface, config=None):
         self.iface = iface
         self.config = config
+        # Bound GDAL/OGR remote-source access (WFS/remote vector/raster URIs
+        # opened by add_layer, Processing algorithms, etc.) so a slow/dead
+        # endpoint can't block the main thread indefinitely.
+        os.environ.setdefault("GDAL_HTTP_TIMEOUT", "20")
+        os.environ.setdefault("GDAL_HTTP_CONNECTTIMEOUT", "10")
         self._alg_cache = None  # caches full algorithm list
         self._cancel = _CancellationRegistry()
         self._ask_emitter = None
@@ -1385,8 +1400,10 @@ class QgisToolkit:
                 QgsApplication.taskManager().addTask(task)
                 if not task.waitForFinished(180000):  # 3 min
                     task.cancel()
+                    _cleanup_gee_download(task.download_path)
                     return {"ok": False, "error": "GEE task timed out after 3 minutes"}
                 if task.error_msg:
+                    _cleanup_gee_download(task.download_path)
                     return {"ok": False, "error": task.error_msg}
                 return {
                     "ok": True,
@@ -1468,8 +1485,10 @@ class QgisToolkit:
                 QgsApplication.taskManager().addTask(task)
                 if not task.waitForFinished(180000):  # 3 min
                     task.cancel()
+                    _cleanup_gee_download(task.gif_path)
                     return {"ok": False, "error": "GEE animation task timed out after 3 minutes"}
                 if task.error_msg or not task.gif_path:
+                    _cleanup_gee_download(task.gif_path)
                     return {
                         "ok": False,
                         "error": task.error_msg or "GIF generation failed (no output produced)",
@@ -4047,9 +4066,11 @@ class QgisToolkit:
 
         if not task.waitForFinished(180000):  # 3 min timeout
             task.cancel()
+            _cleanup_gee_download(task.gif_path)
             return {"ok": False, "error": "GEE animation task timed out after 3 minutes"}
 
         if task.error_msg:
+            _cleanup_gee_download(task.gif_path)
             return {"ok": False, "error": task.error_msg}
 
         worker_result = {
@@ -5011,6 +5032,10 @@ class QgisToolkit:
                 os.remove(file_path)
             except OSError:
                 pass
+            try:
+                os.rmdir(download_dir)
+            except OSError:
+                pass
             log_event(
                 "toolkit.web_fetch.error",
                 url=url[:200],
@@ -5022,6 +5047,10 @@ class QgisToolkit:
         if cancelled:
             try:
                 os.remove(file_path)
+            except OSError:
+                pass
+            try:
+                os.rmdir(download_dir)
             except OSError:
                 pass
             log_event(

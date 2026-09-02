@@ -762,7 +762,7 @@ class MessageContainer(QWidget):
         parent=None,
     ):
         super().__init__(parent)
-        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Maximum)
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(12, 0, 12, 0)
@@ -789,7 +789,7 @@ class MessageContainer(QWidget):
             row.addStretch(1)
             row.addWidget(self.bubble)
         else:
-            self.bubble.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+            self.bubble.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Maximum)
             row.addWidget(self.bubble)
 
         outer.addLayout(row)

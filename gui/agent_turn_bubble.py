@@ -208,8 +208,8 @@ class ToolSubItem(QWidget):
         except RuntimeError:
             pass
 
-    def mark_done(self, is_error: bool = False) -> None:
-        """Show ✓ or !. Internal — call set_result() from chat_dock."""
+    def mark_done(self, is_error: bool = False, is_cancelled: bool = False) -> None:
+        """Show ✓, !, or —. Internal — call set_result() from chat_dock."""
         if self._done:
             return
         self._done = True
@@ -217,20 +217,23 @@ class ToolSubItem(QWidget):
             if is_error:
                 self._icon_lbl.setText("!")
                 self._icon_lbl.setStyleSheet(f"color:{_DANGER}; background:transparent;")
+            elif is_cancelled:
+                self._icon_lbl.setText("—")
+                self._icon_lbl.setStyleSheet(f"color:{_WARN}; background:transparent;")
             else:
                 self._icon_lbl.setText("✓")
                 self._icon_lbl.setStyleSheet(f"color:{_SUCCESS}; background:transparent;")
         except RuntimeError:
             pass
 
-    def set_result(self, result_str: str, is_error: bool = False) -> None:
+    def set_result(self, result_str: str, is_error: bool = False, is_cancelled: bool = False) -> None:
         """Called by chat_dock.py. Marks done, stores result, shows toggle."""
         if self._done:
             return
         self._result = result_str
-        self.mark_done(is_error=is_error)
+        self.mark_done(is_error=is_error, is_cancelled=is_cancelled)
         if self._group is not None:
-            self._group.on_item_done(self, is_error=is_error)
+            self._group.on_item_done(self, is_error=is_error, is_cancelled=is_cancelled)
         # Reveal the Details toggle now that there is something to show.
         try:
             self._toggle.setVisible(True)
@@ -424,11 +427,13 @@ class ToolGroupRow(QWidget):
         self._count_lbl.setText(f"({len(self._items)})")
         return item
 
-    def on_item_done(self, item: ToolSubItem, is_error: bool = False) -> None:
+    def on_item_done(self, item: ToolSubItem, is_error: bool = False, is_cancelled: bool = False) -> None:
         """Called by ToolSubItem.set_result(). Finalizes header when all done."""
         self._running_count = max(0, self._running_count - 1)
         if is_error:
             self._had_error = True
+        if is_cancelled:
+            self._had_cancelled = True
         if self._running_count == 0:
             self._finalize_header()
 
@@ -456,6 +461,11 @@ class ToolGroupRow(QWidget):
                 self._dot_lbl.setStyleSheet(f"color:{_DANGER}; background:transparent;")
                 self._state_lbl.setText("!")
                 self._state_lbl.setStyleSheet(f"color:{_DANGER}; background:transparent;")
+            elif getattr(self, "_had_cancelled", False):
+                self._dot_lbl.setText("—")
+                self._dot_lbl.setStyleSheet(f"color:{_WARN}; background:transparent;")
+                self._state_lbl.setText("—")
+                self._state_lbl.setStyleSheet(f"color:{_WARN}; background:transparent;")
             else:
                 self._dot_lbl.setText("✓")
                 self._dot_lbl.setStyleSheet(f"color:{_SUCCESS}; background:transparent;")
@@ -518,7 +528,7 @@ class AgentTurnBubble(QFrame):
         self._fmt_pending_text = None
 
         self.setFrameShape(QFrame.Shape.NoFrame)
-        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Maximum)
         self.setStyleSheet(f"""
             AgentTurnBubble {{
                 background: {_SURFACE};
@@ -587,10 +597,6 @@ class AgentTurnBubble(QFrame):
         self._visuals_layout.setSpacing(6)
         self._outer.addWidget(self._visuals_area)
 
-        # Absorb any surplus height at the bottom so content stays top-aligned
-        # instead of floating in the vertical centre with gaps between rows.
-        self._outer.addStretch(1)
-
         self._progress_timer = QTimer(self)
         self._progress_timer.setInterval(180)
         self._progress_timer.timeout.connect(self._render_progress_text)
@@ -606,38 +612,31 @@ class AgentTurnBubble(QFrame):
             return
         save_text(self, text, _safe_name(text.split("\n", 1)[0], "response", ".md"))
 
+    def _effective_width(self) -> int:
+        """Return the actual usable width for layout calculations."""
+        if self.width() > 0:
+            return self.width()
+        p = self.parentWidget()
+        while p is not None:
+            if p.width() > 0:
+                m = p.contentsMargins()
+                return max(100, p.width() - m.left() - m.right() - 32)
+            p = p.parentWidget()
+        return 400
+
     def _refresh_text_geometry(self) -> None:
         """Propagate the text view's size into the transcript layout."""
-        # Compute height against the *intended* width. setFixedWidth only takes
-        # effect on the next event-loop pass, so self.text_lbl.width() may still
-        # be a stale (often too-narrow) value — feeding that to heightForWidth
-        # inflates the wrapped height and leaves the bubble much taller than its
-        # content (the "weird height / empty space" symptom).
-        target_w = self.text_lbl.width()
-        if self._outer is not None and self.width() > 0:
-            margins = self._outer.contentsMargins()
-            label_w = self.width() - margins.left() - margins.right()
-            if label_w > 0:
-                self.text_lbl.setFixedWidth(label_w)
-                target_w = label_w
+        if not self._outer:
+            return
 
-        label_h = self.text_lbl.heightForWidth(target_w) if target_w > 0 else -1
-        if label_h > 0:
-            self.text_lbl.setMinimumHeight(label_h)
-        else:
-            self.text_lbl.setMinimumHeight(0)
+        target_w = self._effective_width()
+        margins = self._outer.contentsMargins()
+        label_w = max(50, target_w - margins.left() - margins.right())
+        if self.text_lbl.maximumWidth() != label_w or self.text_lbl.minimumWidth() != label_w:
+            self.text_lbl.setFixedWidth(label_w)
 
         self.text_lbl.updateGeometry()
-        if self._outer is not None:
-            self._outer.invalidate()
         self.updateGeometry()
-
-        parent = self.parentWidget()
-        if parent is not None:
-            layout = parent.layout()
-            if layout is not None:
-                layout.invalidate()
-            parent.updateGeometry()
 
     def _show_text_context_menu(self, pos) -> None:
         _show_code_context_menu(self, self.text_lbl, pos, self._stream_text)
@@ -922,6 +921,10 @@ class AgentTurnBubble(QFrame):
     def _stop_progress(self) -> None:
         if self._progress_timer.isActive():
             self._progress_timer.stop()
+        if self._progress_text:
+            self._stream_html = ""
+            self.text_lbl.setText("")
+            self._refresh_text_geometry()
         self._progress_text = ""
         self._progress_elapsed.invalidate()
 
@@ -979,7 +982,12 @@ class AgentTurnBubble(QFrame):
                 f" font-size:10.5px; font-family:'JetBrains Mono',monospace;"
             )
             self._outer.addWidget(self._user_decision_lbl)
-        self._user_decision_lbl.setText(f"User chose: {clean}")
+        if clean.startswith("—") and clean.endswith("—"):
+            self._user_decision_lbl.setText(clean)
+        elif clean.lower() == "cancelled":
+            self._user_decision_lbl.setText("— Cancelled —")
+        else:
+            self._user_decision_lbl.setText(f"User chose: {clean}")
         self.updateGeometry()
 
     # ── Layout ────────────────────────────────────────────────────────────
@@ -988,21 +996,20 @@ class AgentTurnBubble(QFrame):
         return True
 
     def _content_height(self, width):
-        """Tight height the turn needs at ``width`` — sum of the visible rows.
-
-        Drives heightForWidth, sizeHint and minimumSizeHint so the transcript
-        layout never falls back to the word-wrapping QLabel's unreliable (often
-        inflated) sizeHint, which is what left big empty gaps in the bubble.
-        Returns -1 when the width is unusable.
-        """
+        """Tight height the turn needs at ``width`` — sum of the visible rows."""
         if not self._outer:
             return -1
         m = self._outer.contentsMargins()
         inner_w = width - m.left() - m.right()
         if inner_w <= 0:
             return -1
-        lh = self.text_lbl.heightForWidth(inner_w)
-        if lh < 0:
+
+        raw_text = self.text_lbl.text() or ""
+        if raw_text.strip():
+            lh = self.text_lbl.heightForWidth(inner_w)
+            if lh <= 0:
+                lh = self.text_lbl.sizeHint().height()
+        else:
             lh = 0
 
         def _area_h(area):
@@ -1017,35 +1024,32 @@ class AgentTurnBubble(QFrame):
             if self._user_decision_lbl is not None and self._user_decision_lbl.isVisible()
             else 0
         )
-        return (
+        total = (
             lh + tools_h + files_h + visuals_h + ticker_h + decision_h
-            + m.top() + m.bottom() + 8
+            + m.top() + m.bottom()
         )
+        return max(1, total)
 
     def heightForWidth(self, width):
         return self._content_height(width)
 
     def sizeHint(self):
         base = super().sizeHint()
-        w = self.width() if self.width() > 0 else base.width()
+        w = self._effective_width()
         h = self._content_height(w)
         if h > 0:
             return QSize(base.width(), h)
         return base
 
     def minimumSizeHint(self):
-        # Match sizeHint so the layout can't reserve a taller-than-content slot
-        # for the bubble (the source of the empty space between rows).
-        return self.sizeHint()
+        return super().minimumSizeHint()
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
         if self._outer:
             m = self._outer.contentsMargins()
             w = event.size().width() - m.left() - m.right()
-            if w > 0:
+            if w > 0 and self.text_lbl.width() != w:
                 self.text_lbl.setFixedWidth(w)
-        # Width changed — recompute the text height and re-publish geometry so a
-        # stale (too-tall) minimum height from an earlier narrow width is reset.
         if not self._geo_timer.isActive():
             self._geo_timer.start()

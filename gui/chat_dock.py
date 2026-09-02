@@ -595,7 +595,9 @@ class ChatDock(QgsDockWidget):
         if obj is self.scroll.viewport() and event.type() == QEvent.Type.Resize:
             # Keep transcript widget exactly as wide as the viewport so no
             # child widget can cause horizontal overflow or sideways scrolling.
-            self.transcript_widget.setFixedWidth(event.size().width())
+            new_w = event.size().width()
+            if self.transcript_widget.maximumWidth() != new_w or self.transcript_widget.minimumWidth() != new_w:
+                self.transcript_widget.setFixedWidth(new_w)
             return False
         if obj is self.input and event.type() == QEvent.Type.KeyPress:
             self._maybe_prewarm()
@@ -833,7 +835,7 @@ class ChatDock(QgsDockWidget):
 
     def _add_agent_turn_widget(self):
         container = QWidget()
-        container.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        container.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Maximum)
         vl = QVBoxLayout(container)
         vl.setContentsMargins(16, 0, 16, 0)
         vl.setSpacing(3)
@@ -1154,15 +1156,23 @@ class ChatDock(QgsDockWidget):
             self._ask_overlay.hide()
         label = payload.get("choice")
         text = payload.get("free_text")
+        cancelled = bool(payload.get("cancelled", False))
         chosen_text = label or text
         if chosen_text:
             try:
                 self._get_or_create_agent_turn().set_user_decision(chosen_text)
             except Exception:  # nosec B110
                 pass
-        self._set_status("Ready", _SUCCESS, icon="✓")
+        elif cancelled:
+            try:
+                self._get_or_create_agent_turn().set_user_decision("— Cancelled —")
+            except Exception:  # nosec B110
+                pass
+        if cancelled:
+            self._set_status("Cancelled", _DANGER, icon="!")
+        else:
+            self._set_status("Ready", _SUCCESS, icon="✓")
         if self._toolkit is not None:
-            cancelled = bool(payload.get("cancelled", False))
             self._toolkit._resolve_ask_user({
                 "choice": payload.get("choice"),
                 "free_text": payload.get("free_text"),
@@ -2063,7 +2073,7 @@ class ChatDock(QgsDockWidget):
                 is_err = str(result).startswith("Error") or str(result).startswith("error")
             is_cancelled = bool(ev.data.get("cancelled"))
             if self._current_tool_row is not None:
-                self._current_tool_row.set_result(str(result), is_err)
+                self._current_tool_row.set_result(str(result), is_err, is_cancelled=is_cancelled)
                 self._current_tool_row = None
             turn_event = self._ensure_current_turn_event()
             if turn_event is not None:
@@ -2079,7 +2089,10 @@ class ChatDock(QgsDockWidget):
             # Surface cancellation as a clear status update so the user
             # knows the tool didn't return a real error.
             if is_cancelled:
-                self._set_tool_progress(f"Cancelled `{tool_name}`.")
+                if self._current_agent_turn is not None:
+                    self._current_agent_turn.clear_streaming_text()
+                self._tool_progress_text = ""
+                self._showing_tool_progress = False
                 self._set_status("Cancelled", _DANGER, icon="!")
             else:
                 elapsed = ""
@@ -2167,7 +2180,8 @@ class ChatDock(QgsDockWidget):
             self._tool_progress_text = ""
             self._showing_tool_progress = False
             self._current_agent_turn = None
-            self._set_status("Ready", _SUCCESS, icon="✓")
+            if self._status_text != "Cancelled":
+                self._set_status("Ready", _SUCCESS, icon="✓")
             self._scroll_to_bottom()
             self._pending_tool = None
 
@@ -2187,6 +2201,9 @@ class ChatDock(QgsDockWidget):
             turn_event = self._ensure_current_turn_event()
             if turn_event is not None:
                 turn_event["text"] = self._current_text
+        elif self._current_agent_turn is not None:
+            self._current_agent_turn.clear_streaming_text()
+            self._current_agent_turn.finalize()
         elif self._current_agent_turn is None:
             # No text and no turn yet — create an empty turn so the tool row
             # has somewhere to live.
