@@ -3,25 +3,31 @@
 Uses only Qt QPainter — no matplotlib, no external dependencies.
 Renders charts embedded directly in the chat transcript.
 
-Interactive: hover a bar / line point / pie slice to highlight it and
+Types: bar, hbar, line, pie, scatter, sankey.
+
+Interactive: hover a bar / line point / pie slice / sankey flow to highlight it and
 read the value in a tooltip that follows the cursor. Click to pin the
 tooltip in place; click again or move off the chart to unpin.
 Right-click to copy the data as TSV.
 """
 
-from qgis.PyQt.QtCore import Qt, QPoint, QSize, QRect
-from qgis.PyQt.QtGui import QColor, QFont, QFontMetrics, QPainter, QPen, QBrush, QPolygon, QGuiApplication
+from qgis.PyQt.QtCore import Qt, QPoint, QPointF, QSize, QRect, QRectF
+from qgis.PyQt.QtGui import (
+    QColor, QFont, QFontMetrics, QPainter, QPainterPath, QPen, QBrush, QPolygon, QGuiApplication,
+)
 from qgis.PyQt.QtWidgets import QFrame, QSizePolicy
 
 from .downloadable import HoverDownloadButton, save_widget_png, _safe_name
+from .theme import (
+    ui_font,
+    DOCK_SURFACE as _INPUT_BG,
+    DOCK_BORDER as _BORDER,
+    DOCK_TEXT as _TEXT,
+    DOCK_TEXT_2 as _TEXT_2,
+    DOCK_TEXT_3 as _TEXT_3,
+)
 
 # Design tokens — darker, softer (match chat_dock.py)
-_SURFACE = "#161616"
-_INPUT_BG = "#1e1e1e"
-_BORDER = "#2e2e2e"
-_TEXT = "#ececec"
-_TEXT_2 = "#a0a0a0"
-_TEXT_3 = "#707070"
 
 # Default A-to-B palette for charts. Custom chart_data["colors"] still wins.
 GRADIENT_START = "#79a883"
@@ -29,14 +35,11 @@ GRADIENT_END = "#d9a35f"
 
 
 def _font(size, weight=QFont.Weight.Normal):
-    font = QFont()
-    font.setPointSize(size)
-    font.setWeight(weight)
-    return font
+    return ui_font(size + 2, weight)
 
 
 class ChartWidget(QFrame):
-    """Renders bar, line, or pie/donut charts from chart data.
+    """Renders bar, hbar, line, pie/donut, scatter, or sankey charts from chart data.
 
     Interactive: hover an element to highlight + show a tooltip with its
     value; click to pin the tooltip; right-click to copy the data.
@@ -58,7 +61,7 @@ class ChartWidget(QFrame):
             ChartWidget {{
                 background-color: {_INPUT_BG};
                 border: 1px solid {_BORDER};
-                border-radius: 8px;
+                border-radius: 12px;
             }}
         """)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
@@ -79,6 +82,10 @@ class ChartWidget(QFrame):
         return QSize(100, 180)
 
     def sizeHint(self):
+        if self.chart_type == "hbar":
+            return QSize(400, 64 + 24 * max(1, min(len(self.data), 20)))
+        if self.chart_type == "sankey":
+            return QSize(400, 320)
         return QSize(400, 260)
 
     def paintEvent(self, event):
@@ -115,6 +122,12 @@ class ChartWidget(QFrame):
                 self._draw_line(painter, chart_rect)
             elif self.chart_type == "pie":
                 self._draw_pie(painter, chart_rect)
+            elif self.chart_type == "hbar":
+                self._draw_hbar(painter, chart_rect)
+            elif self.chart_type == "scatter":
+                self._draw_scatter(painter, chart_rect)
+            elif self.chart_type == "sankey":
+                self._draw_sankey(painter, chart_rect)
 
             # Highlight the hovered or pinned element with a thin outline
             active = self._pinned_index if self._pinned_index >= 0 else self._hover_index
@@ -291,6 +304,220 @@ class ChartWidget(QFrame):
                 anchor=QPoint(x + bar_w // 2, y),
             )
 
+    def _active_index(self):
+        return self._pinned_index if self._pinned_index >= 0 else self._hover_index
+
+    def _draw_hbar(self, painter, rect):
+        bars = [b for b in self.data[:20] if isinstance(b, dict) and isinstance(b.get("value"), (int, float))]
+        if not bars:
+            return
+        max_val = max(b["value"] for b in bars) or 1
+        font = _font(8)
+        fm = QFontMetrics(font)
+        painter.setFont(font)
+        label_w = min(rect.width() // 3, max(fm.horizontalAdvance(str(b.get("label", ""))) for b in bars) + 10)
+        value_w = max(fm.horizontalAdvance(self._format_value(b["value"])) for b in bars) + 8
+        track = max(1, rect.width() - label_w - value_w)
+        row_h = rect.height() / len(bars)
+        bar_h = max(4, int(row_h * 0.62))
+        x0 = rect.left() + label_w
+        active = self._active_index()
+
+        for i, item in enumerate(bars):
+            top = int(rect.top() + i * row_h)
+            y = top + int((row_h - bar_h) / 2)
+            w = max(0, int(item["value"] / max_val * track))
+            color = self._color_at(i, len(bars))
+            if i == active:
+                color = color.lighter(140)
+            painter.fillRect(x0, y, w, bar_h, color)
+
+            lbl = fm.elidedText(str(item.get("label", "")), Qt.TextElideMode.ElideRight, label_w - 10)
+            painter.setPen(QColor(_TEXT_3))
+            painter.drawText(rect.left(), top, label_w - 10, int(row_h),
+                             Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter, lbl)
+            painter.setPen(QColor(_TEXT_2))
+            painter.drawText(x0 + w + 4, top, value_w, int(row_h),
+                             Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+                             self._format_value(item["value"]))
+            self._add_hit_region(
+                kind="bar",
+                rect=QRect(x0, y, max(w, 2), bar_h),
+                label=str(item.get("label", "")),
+                raw_label=str(item.get("raw_label", "")),
+                value=item["value"],
+                anchor=QPoint(x0 + w, y),
+            )
+
+    def _draw_scatter(self, painter, rect):
+        pts = [d for d in self.data[:500] if isinstance(d, dict)
+               and all(isinstance(d.get(k), (int, float)) for k in ("x", "y"))]
+        if not pts:
+            self._draw_empty(painter, rect)
+            return
+        xs = [p["x"] for p in pts]
+        ys = [p["y"] for p in pts]
+        xmin, xmax = min(xs), max(xs)
+        ymin, ymax = min(ys), max(ys)
+        if xmin == xmax:
+            xmin, xmax = xmin - 1, xmax + 1
+        if ymin == ymax:
+            ymin, ymax = ymin - 1, ymax + 1
+
+        font = _font(8)
+        fm = QFontMetrics(font)
+        painter.setFont(font)
+        y_ticks = [ymin, (ymin + ymax) / 2, ymax]
+        gutter = max(fm.horizontalAdvance(self._format_value(float(v))) for v in y_ticks) + 6
+        plot = rect.adjusted(gutter, 6, -8, -20)
+
+        def px(v):
+            return plot.left() + (v - xmin) / (xmax - xmin) * plot.width()
+
+        def py(v):
+            return plot.bottom() - (v - ymin) / (ymax - ymin) * plot.height()
+
+        painter.setPen(QPen(QColor(_BORDER), 1, Qt.PenStyle.DashLine))
+        for v in y_ticks[1:]:
+            painter.drawLine(plot.left(), int(py(v)), plot.right(), int(py(v)))
+        painter.setPen(QPen(QColor(_BORDER), 1))
+        painter.drawLine(plot.left(), plot.bottom(), plot.right(), plot.bottom())
+        painter.drawLine(plot.left(), plot.top(), plot.left(), plot.bottom())
+
+        painter.setPen(QColor(_TEXT_3))
+        for v in y_ticks:
+            painter.drawText(rect.left(), int(py(v)) - 8, gutter - 6, 16,
+                             Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
+                             self._format_value(float(v)))
+        for v, align in ((xmin, Qt.AlignmentFlag.AlignLeft), ((xmin + xmax) / 2, Qt.AlignmentFlag.AlignHCenter),
+                         (xmax, Qt.AlignmentFlag.AlignRight)):
+            x = int(px(v))
+            box_x = {Qt.AlignmentFlag.AlignLeft: x, Qt.AlignmentFlag.AlignRight: x - 80}.get(align, x - 40)
+            painter.drawText(box_x, plot.bottom() + 4, 80, 16, align | Qt.AlignmentFlag.AlignVCenter,
+                             self._format_value(float(v)))
+
+        base = self._color_at(0, 1)
+        active = self._active_index()
+        painter.setPen(Qt.PenStyle.NoPen)
+        for i, p in enumerate(pts):
+            x, y = int(px(p["x"])), int(py(p["y"]))
+            color = QColor(base)
+            color.setAlpha(255 if i == active else 190)
+            painter.setBrush(QBrush(color))
+            r = 5 if i == active else 3
+            painter.drawEllipse(x - r, y - r, r * 2, r * 2)
+            self._add_hit_region(
+                kind="line",
+                rect=QRect(x - 6, y - 6, 12, 12),
+                label=str(p.get("label", f"pt {i + 1}")),
+                value=f"x {self._format_value(p['x'])}, y {self._format_value(p['y'])}",
+                anchor=QPoint(x, y),
+            )
+
+    def _draw_sankey(self, painter, rect):
+        links = [d for d in self.data[:60] if isinstance(d, dict)
+                 and isinstance(d.get("value"), (int, float)) and d["value"] > 0
+                 and "source" in d and "target" in d and str(d["source"]) != str(d["target"])]
+        if not links:
+            self._draw_empty(painter, rect)
+            return
+        links = [{"source": str(d["source"]), "target": str(d["target"]), "value": d["value"]} for d in links]
+        nodes = list(dict.fromkeys(n for d in links for n in (d["source"], d["target"])))
+
+        # Column = longest path from a root; capped passes so cycles can't spin forever.
+        depth = dict.fromkeys(nodes, 0)
+        for _ in range(len(nodes)):
+            changed = False
+            for d in links:
+                if depth[d["target"]] <= depth[d["source"]]:
+                    depth[d["target"]] = depth[d["source"]] + 1
+                    changed = True
+            if not changed:
+                break
+        n_cols = max(depth.values()) + 1
+        inflow = dict.fromkeys(nodes, 0)
+        outflow = dict.fromkeys(nodes, 0)
+        for d in links:
+            outflow[d["source"]] += d["value"]
+            inflow[d["target"]] += d["value"]
+        size = {n: max(inflow[n], outflow[n]) for n in nodes}
+        columns = [[n for n in nodes if depth[n] == c] for c in range(n_cols)]
+
+        gap, node_w = 8, 10
+        k = min((rect.height() - gap * (len(col) - 1)) / sum(size[n] for n in col) for col in columns if col)
+        k = max(k, 0.0)
+        x_step = (rect.width() - node_w) / max(n_cols - 1, 1)
+        node_rect = {}
+        for c, col in enumerate(columns):
+            used = sum(size[n] for n in col) * k + gap * max(len(col) - 1, 0)
+            y = rect.top() + (rect.height() - used) / 2
+            for n in col:
+                h = max(size[n] * k, 1.0)
+                node_rect[n] = QRectF(rect.left() + c * x_step, y, node_w, h)
+                y += h + gap
+
+        # Stack flows at each node, ordered by the far end's height to limit crossings.
+        out_y, in_y = {}, {}
+        cursor = {n: node_rect[n].top() for n in nodes}
+        for i in sorted(range(len(links)), key=lambda i: node_rect[links[i]["target"]].top()):
+            out_y[i] = cursor[links[i]["source"]]
+            cursor[links[i]["source"]] += links[i]["value"] * k
+        cursor = {n: node_rect[n].top() for n in nodes}
+        for i in sorted(range(len(links)), key=lambda i: node_rect[links[i]["source"]].top()):
+            in_y[i] = cursor[links[i]["target"]]
+            cursor[links[i]["target"]] += links[i]["value"] * k
+
+        active = self._active_index()
+        node_color = {n: self._color_at(j, len(nodes)) for j, n in enumerate(nodes)}
+        for i, d in enumerate(links):
+            x0 = node_rect[d["source"]].right()
+            x1 = node_rect[d["target"]].left()
+            y0, y1, th = out_y[i], in_y[i], d["value"] * k
+            mx = (x0 + x1) / 2
+            path = QPainterPath(QPointF(x0, y0))
+            path.cubicTo(mx, y0, mx, y1, x1, y1)
+            path.lineTo(x1, y1 + th)
+            path.cubicTo(mx, y1 + th, mx, y0 + th, x0, y0 + th)
+            path.closeSubpath()
+            color = QColor(node_color[d["source"]])
+            color.setAlpha(200 if i == active else 95)
+            painter.fillPath(path, color)
+            self._add_hit_region(
+                kind="path",
+                path=path,
+                label=f"{d['source']} → {d['target']}",
+                value=d["value"],
+                percent=d["value"] / outflow[d["source"]] * 100,
+                anchor=path.pointAtPercent(0.5).toPoint(),
+            )
+
+        font = _font(8)
+        fm = QFontMetrics(font)
+        painter.setFont(font)
+        label_w = max(20, int(x_step - node_w - 12))
+        for n in nodes:
+            r = node_rect[n]
+            idx = len(self._hit_regions)
+            color = node_color[n].lighter(140) if idx == active else node_color[n]
+            painter.fillRect(r, color)
+            last = depth[n] == n_cols - 1
+            lbl = fm.elidedText(n, Qt.TextElideMode.ElideRight, label_w)
+            painter.setPen(QColor(_TEXT_2))
+            if last:
+                text_rect = QRectF(r.left() - 6 - label_w, r.center().y() - 8, label_w, 16)
+                align = Qt.AlignmentFlag.AlignRight
+            else:
+                text_rect = QRectF(r.right() + 6, r.center().y() - 8, label_w, 16)
+                align = Qt.AlignmentFlag.AlignLeft
+            painter.drawText(text_rect, align | Qt.AlignmentFlag.AlignVCenter, lbl)
+            self._add_hit_region(
+                kind="bar",
+                rect=r.toRect(),
+                label=n,
+                value=size[n],
+                anchor=QPoint(int(r.right()), int(r.top())),
+            )
+
     def _draw_line(self, painter, rect):
         if len(self.data) < 2:
             return
@@ -461,6 +688,10 @@ class ChartWidget(QFrame):
                 if self._pie_region_contains(region, pos):
                     return i
                 continue
+            if region.get("kind") == "path":
+                if region["path"].contains(QPointF(pos)):
+                    return i
+                continue
             if region["rect"].contains(pos):
                 return i
         return -1
@@ -503,13 +734,10 @@ class ChartWidget(QFrame):
         elif event.button() == Qt.MouseButton.RightButton:
             # Copy the underlying data as TSV to the clipboard. Convenient
             # for the user to drop into a spreadsheet or note.
-            rows = ["label\traw_label\tvalue"]
-            for item in self.data:
-                if isinstance(item, dict) and "label" in item and "value" in item:
-                    rows.append(
-                        f"{item['label']}\t{item.get('raw_label', '')}\t{item['value']}"
-                    )
-            if len(rows) > 1:
+            items = [d for d in self.data if isinstance(d, dict)]
+            keys = list(dict.fromkeys(k for d in items for k in d))
+            if items:
+                rows = ["\t".join(keys)] + ["\t".join(str(d.get(k, "")) for k in keys) for d in items]
                 QGuiApplication.clipboard().setText("\n".join(rows))
 
     def leaveEvent(self, event):

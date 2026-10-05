@@ -8,19 +8,19 @@ Three connection modes:
 
 import os
 
-from qgis.PyQt.QtCore import Qt, QThread, pyqtSignal
-from qgis.PyQt.QtGui import QColor, QFont, QPalette
+from qgis.PyQt.QtCore import QRectF, QSize, Qt, QThread, QTimer, pyqtSignal
+from qgis.PyQt.QtGui import QColor, QFont, QIcon, QPainter, QPalette, QPixmap
 from qgis.PyQt.QtWidgets import (
     QApplication,
     QCheckBox,
     QComboBox,
     QDialog,
     QFileDialog,
-    QFormLayout,
     QFrame,
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QListView,
     QListWidget,
     QListWidgetItem,
     QMessageBox,
@@ -35,9 +35,13 @@ from qgis.PyQt.QtWidgets import (
 )
 
 from .. import config as config_mod
+from .agent_logos import AGENT_LOGOS
 from ..backends.cli_backend import CLI_AGENT_CATALOG, _agent_id_for_binary_path
 from ..backends import providers
 from .theme import (
+    clamp_font_scale,
+    set_font_scale,
+    ui_font,
     DIALOG_SURFACE as _SURFACE,
     DIALOG_SURFACE_2 as _SURFACE_2,
     DIALOG_SURFACE_HOV as _SURFACE_HOV,
@@ -49,6 +53,8 @@ from .theme import (
     DIALOG_TEXT_3 as _TEXT_3,
     DIALOG_ACCENT as _ACCENT,
     DIALOG_ACCENT_HOV as _ACCENT_HOV,
+    DIALOG_BLUE as _BLUE,
+    DOCK_TEXT_4 as _TEXT_4,
     DIALOG_WARN as _WARN,
     DIALOG_SUCCESS as _SUCCESS,
     DIALOG_DANGER as _DANGER,
@@ -66,103 +72,167 @@ _FORMAT_LABELS = [
 ]
 
 
-# ── Font helper ───────────────────────────────────────────────────────────────
-def _mono(size=10, weight=QFont.Weight.Normal):
-    f = QFont("JetBrains Mono", size)
-    f.setStyleHint(QFont.StyleHint.Monospace)
-    f.setWeight(weight)
-    return f
+# ── Fonts ─────────────────────────────────────────────────────────────────────
+def _mono(size=12, weight=None):
+    """Interface font (the QGIS UI sans) at ``size`` px.
+
+    Historical name: the dialog used JetBrains Mono everywhere; it now follows
+    monocode and keeps monospace for code only.
+    """
+    return ui_font(size, weight)
 
 
 # ── Stylesheets ───────────────────────────────────────────────────────────────
 _DIALOG_SS = (
     f"QDialog {{ background: {_SURFACE}; }}"
-    f"QWidget {{ background: {_SURFACE}; color: {_TEXT}; }}"
-    f"QScrollArea {{ background: {_SURFACE}; border: none; }}"
-    f"QScrollBar:vertical {{"
-    f"  background: {_SURFACE}; width: 6px; margin: 0;"
-    f"}}"
-    f"QScrollBar::handle:vertical {{"
-    f"  background: {_BORDER_SOFT}; border-radius: 3px; min-height: 20px;"
-    f"}}"
-    f"QScrollBar::add-line:vertical,"
-    f"QScrollBar::sub-line:vertical {{ height: 0; }}"
+    f"QWidget {{ color: {_TEXT}; }}"
+    f"QScrollArea {{ background: transparent; border: none; }}"
+    f"QScrollBar:vertical {{ background: transparent; width: 8px; margin: 2px; }}"
+    f"QScrollBar::handle:vertical {{ background: {_BORDER}; border-radius: 3px; min-height: 24px; }}"
+    f"QScrollBar::handle:vertical:hover {{ background: {_TEXT_4}; }}"
+    f"QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height: 0; }}"
 )
 
 _TOOLTIP_SS = (
     f"QToolTip {{"
-    f"  background-color: {_SURFACE_2}; color: {_TEXT};"
-    f"  border: 1px solid {_BORDER}; border-radius: 4px;"
-    f"  padding: 6px 8px;"
+    f"  background-color: {_SURFACE_HOV}; color: {_TEXT};"
+    f"  border: 1px solid {_BORDER}; border-radius: 6px; padding: 5px 8px;"
     f"}}"
 )
 
 _INPUT_SS = (
     f"QLineEdit {{"
     f"  background: {_INPUT_BG}; color: {_TEXT};"
-    f"  border: 1px solid {_BORDER_SOFT}; border-radius: 6px;"
-    f"  padding: 5px 9px;"
-    f"  selection-background-color: {_BORDER};"
+    f"  border: 1px solid {_BORDER}; border-radius: 6px;"
+    f"  padding: 4px 8px; min-height: 18px;"
+    f"  selection-background-color: {_BLUE};"
     f"}}"
-    f"QLineEdit:focus {{ border-color: {_WARN}; }}"
-    f"QLineEdit:disabled {{"
-    f"  color: {_TEXT_3}; border-color: {_BORDER_SOFT};"
-    f"}}"
+    f"QLineEdit:focus {{ border-color: {_BLUE}; }}"
+    f"QLineEdit:disabled {{ color: {_TEXT_3}; }}"
 )
 
 _COMBO_SS = (
     f"QComboBox {{"
     f"  background: {_INPUT_BG}; color: {_TEXT};"
-    f"  border: 1px solid {_BORDER_SOFT}; border-radius: 6px; padding: 5px 9px;"
+    f"  border: 1px solid {_BORDER}; border-radius: 6px; padding: 4px 8px; min-height: 18px;"
     f"}}"
-    f"QComboBox::drop-down {{ border: none; width: 20px; }}"
+    f"QComboBox:hover {{ border-color: {_TEXT_4}; }}"
+    f"QComboBox:focus {{ border-color: {_BLUE}; }}"
+    f"QComboBox::drop-down {{ border: none; width: 18px; }}"
     f"QComboBox QAbstractItemView {{"
-    f"  background: {_INPUT_BG}; color: {_TEXT};"
-    f"  border: 1px solid {_BORDER};"
-    f"  selection-background-color: {_BORDER}; outline: none;"
+    f"  background: {_SURFACE_2}; color: {_TEXT}; border: 1px solid {_BORDER};"
+    f"  selection-background-color: {_SURFACE_HOV}; outline: none; padding: 4px;"
     f"}}"
 )
 
-_LIST_SS = (
-    f"QListWidget {{"
-    f"  background: {_INPUT_BG}; color: {_TEXT};"
-    f"  border: 1px solid {_BORDER_SOFT}; border-radius: 6px;"
-    f"  outline: none; padding: 4px;"
-    f"}}"
-    f"QListWidget::item {{"
-    f"  padding: 7px 8px; border-radius: 4px;"
-    f"}}"
-    f"QListWidget::item:selected {{"
-    f"  background: {_BORDER}; color: {_TEXT};"
-    f"}}"
-    f"QListWidget::item:hover {{"
-    f"  background: {_SURFACE_HOV};"
-    f"}}"
+# Agent picker: a row of icon tiles instead of a text list.
+_AGENT_TILES_SS = (
+    f"QListWidget {{ background: transparent; border: none; outline: none; }}"
+    f"QListWidget::item {{ color: {_TEXT_2}; border-radius: 8px; }}"
+    f"QListWidget::item:hover {{ background: {_SURFACE_HOV}; }}"
+    f"QListWidget::item:selected {{ background: {_BORDER}; color: {_TEXT}; }}"
 )
 
+
+class _TileList(QListWidget):
+    """Wrapping icon grid whose height always fits its visible tiles (no scrollbars)."""
+
+    def __init__(self, tile=QSize(92, 74), parent=None):
+        super().__init__(parent)
+        self._tile = tile
+        self.setViewMode(QListView.ViewMode.IconMode)
+        self.setFlow(QListView.Flow.LeftToRight)
+        self.setWrapping(True)
+        self.setResizeMode(QListView.ResizeMode.Adjust)
+        self.setMovement(QListView.Movement.Static)
+        self.setWordWrap(True)
+        self.setIconSize(QSize(36, 36))
+        self.setGridSize(tile)
+        self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+
+    def fit(self):
+        shown = sum(1 for i in range(self.count()) if not self.item(i).isHidden())
+        per_row = max(1, self.viewport().width() // self._tile.width())
+        rows = max(1, -(-shown // per_row))
+        self.setFixedHeight(rows * self._tile.height() + 4)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self.fit()
+
+
+def _agent_logo_renderer(agent_id, installed):
+    """QSvgRenderer for the agent's brand mark, or None (no logo / no QtSvg)."""
+    entry = AGENT_LOGOS.get(agent_id)
+    if not entry:
+        return None
+    try:
+        from qgis.PyQt.QtCore import QByteArray
+        from qgis.PyQt.QtSvg import QSvgRenderer
+    except ImportError:
+        return None
+    tint, svg = entry
+    if tint:
+        color = tint if installed else _TEXT_3
+        if QColor(color).lightness() < 60:
+            color = _TEXT  # near-black marks would vanish on the dark tile
+        svg = svg.replace("currentColor", color)
+    renderer = QSvgRenderer(QByteArray(svg.encode("utf-8")))
+    return renderer if renderer.isValid() else None
+
+
+def _agent_icon(agent_id, label, in_use=False, installed=True, size=36):
+    """Agent badge: brand mark (or two-letter monogram) on a disc, green ring when in use."""
+    ratio = 2
+    pix = QPixmap(size * ratio, size * ratio)
+    pix.setDevicePixelRatio(ratio)
+    pix.fill(QColor(0, 0, 0, 0))
+    logo = _agent_logo_renderer(agent_id, installed)
+    hue = sum(ord(c) * (i + 1) for i, c in enumerate(agent_id)) % 360
+    painter = QPainter(pix)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+    painter.setPen(QColor(_SUCCESS) if in_use else QColor(0, 0, 0, 0))
+    painter.setBrush(QColor(_SURFACE_HOV) if logo else QColor.fromHsl(hue, 70 if installed else 0, 70))
+    inset = 2 if in_use else 1
+    painter.drawEllipse(QRectF(inset, inset, size - 2 * inset, size - 2 * inset))
+    if logo:
+        pad = size * 0.25
+        if not installed:
+            painter.setOpacity(0.45)  # full-colour marks can't be tinted grey
+        logo.render(painter, QRectF(pad, pad, size - 2 * pad, size - 2 * pad))
+        painter.setOpacity(1.0)
+    else:
+        painter.setPen(QColor(_TEXT if installed else _TEXT_3))
+        painter.setFont(_mono(12, QFont.Weight.DemiBold))
+        letters = (label.split() or ["?"])[0][:2].title()
+        painter.drawText(QRectF(0, 0, size, size), Qt.AlignmentFlag.AlignCenter, letters)
+    painter.end()
+    return QIcon(pix)
+
+
+# Segmented control: a pill track with the selected segment raised.
 _TAB_SS = (
-    f"QTabBar {{"
-    f"  background: transparent;"
-    f"}}"
+    f"QTabBar {{ background: transparent; }}"
     f"QTabBar::tab {{"
-    f"  background: {_INPUT_BG}; color: {_TEXT_3};"
-    f"  border: 1px solid {_BORDER_SOFT}; border-radius: 6px;"
-    f"  padding: 7px 10px; margin-right: 6px;"
+    f"  background: transparent; color: {_TEXT_3}; border: none;"
+    f"  border-radius: 6px; padding: 5px 12px; margin: 2px;"
     f"}}"
-    f"QTabBar::tab:hover {{"
-    f"  background: {_SURFACE_HOV}; color: {_TEXT};"
-    f"  border-color: {_BORDER};"
-    f"}}"
-    f"QTabBar::tab:selected {{"
-    f"  background: {_ACCENT}; color: {_SURFACE};"
-    f"  border-color: {_ACCENT};"
-    f"}}"
+    f"QTabBar::tab:hover:!selected {{ color: {_TEXT}; }}"
+    f"QTabBar::tab:selected {{ background: {_BORDER}; color: {_TEXT}; }}"
+)
+
+_RAIL_SS = (
+    f"QListWidget {{ background: transparent; border: none; outline: none; }}"
+    f"QListWidget::item {{ color: {_TEXT_3}; padding: 6px 8px; border-radius: 6px; margin: 1px 0; }}"
+    f"QListWidget::item:hover {{ background: {_SURFACE_2}; color: {_TEXT}; }}"
+    f"QListWidget::item:selected {{ background: {_SURFACE_HOV}; color: {_TEXT}; }}"
 )
 
 _BTN_PRIMARY_SS = (
     f"QPushButton {{"
     f"  background: {_ACCENT}; color: {_SURFACE};"
-    f"  border: none; border-radius: 7px; padding: 7px 20px; font-weight: 600;"
+    f"  border: none; border-radius: 6px; padding: 6px 16px; font-weight: 600;"
     f"}}"
     f"QPushButton:hover {{ background: {_ACCENT_HOV}; }}"
     f"QPushButton:pressed {{ background: {_TEXT_2}; }}"
@@ -171,30 +241,30 @@ _BTN_PRIMARY_SS = (
 _BTN_SECONDARY_SS = (
     f"QPushButton {{"
     f"  background: transparent; color: {_TEXT_2};"
-    f"  border: 1px solid {_BORDER}; border-radius: 7px; padding: 7px 20px;"
+    f"  border: 1px solid {_BORDER}; border-radius: 6px; padding: 6px 16px;"
     f"}}"
-    f"QPushButton:hover {{ background: {_SURFACE_HOV}; color: {_TEXT}; }}"
+    f"QPushButton:hover {{ background: {_SURFACE_2}; color: {_TEXT}; }}"
 )
 
 _BTN_GHOST_SS = (
     f"QPushButton {{"
-    f"  background: {_INPUT_BG}; color: {_TEXT_2};"
-    f"  border: 1px solid {_BORDER_SOFT}; border-radius: 6px; padding: 5px 10px;"
+    f"  background: transparent; color: {_TEXT_2};"
+    f"  border: 1px solid {_BORDER}; border-radius: 6px; padding: 4px 10px;"
     f"}}"
     f"QPushButton:hover {{ background: {_SURFACE_HOV}; color: {_TEXT}; }}"
-    f"QPushButton:disabled {{ color: {_TEXT_3}; border-color: {_BORDER_SOFT}; }}"
+    f"QPushButton:disabled {{ color: {_TEXT_4}; border-color: {_BORDER_SOFT}; }}"
 )
 
 
 # ── Widget factories ──────────────────────────────────────────────────────────
 def _inp(widget):
-    widget.setFont(_mono(10))
+    widget.setFont(_mono(12))
     widget.setStyleSheet(_INPUT_SS)
     return widget
 
 
 def _cmb(widget):
-    widget.setFont(_mono(10))
+    widget.setFont(_mono(12))
     widget.setStyleSheet(_COMBO_SS)
     return widget
 
@@ -202,14 +272,26 @@ def _cmb(widget):
 def _install_tooltip_palette():
     palette = QToolTip.palette()
     for group in (QPalette.ColorGroup.Active, QPalette.ColorGroup.Inactive, QPalette.ColorGroup.Disabled):
-        palette.setColor(group, QPalette.ColorRole.ToolTipBase, QColor(_SURFACE_2))
+        palette.setColor(group, QPalette.ColorRole.ToolTipBase, QColor(_SURFACE_HOV))
         palette.setColor(group, QPalette.ColorRole.ToolTipText, QColor(_TEXT))
     QToolTip.setPalette(palette)
-    QToolTip.setFont(_mono(9))
+    QToolTip.setFont(_mono(11))
     app = QApplication.instance()
     if app is not None and "QToolTip" not in app.styleSheet():
         existing = app.styleSheet().rstrip()
         app.setStyleSheet((existing + "\n" if existing else "") + _TOOLTIP_SS)
+
+
+def _plugin_version():
+    try:
+        path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "metadata.txt")
+        with open(path, encoding="utf-8") as fh:
+            for line in fh:
+                if line.startswith("version="):
+                    return line.split("=", 1)[1].strip()
+    except OSError:
+        pass
+    return ""
 
 
 class _ModelPickerWidget(QWidget):
@@ -227,8 +309,8 @@ class _ModelPickerWidget(QWidget):
 
     _POPUP_SS = (
         f"QFrame#ModelPopup {{"
-        f"  background: {_INPUT_BG}; border: 1px solid {_BORDER};"
-        f"  border-radius: 8px;"
+        f"  background: {_SURFACE_2}; border: 1px solid {_BORDER};"
+        f"  border-radius: 10px;"
         f"}}"
         f"QLineEdit {{"
         f"  background: {_SURFACE_2}; color: {_TEXT};"
@@ -269,7 +351,7 @@ class _ModelPickerWidget(QWidget):
         lay.setContentsMargins(0, 0, 0, 0)
         lay.setSpacing(0)
         self._btn = QPushButton()
-        self._btn.setFont(_mono(10))
+        self._btn.setFont(_mono(12))
         self._btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._btn.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self._btn.clicked.connect(self._toggle_popup)
@@ -285,16 +367,16 @@ class _ModelPickerWidget(QWidget):
         self._btn.setStyleSheet(
             f"QPushButton {{"
             f"  background: {_INPUT_BG}; color: {color};"
-            f"  border: 1px solid {_BORDER_SOFT}; border-radius: 6px;"
-            f"  padding: 5px 30px 5px 9px; text-align: left;"
+            f"  border: 1px solid {_BORDER}; border-radius: 6px;"
+            f"  padding: 4px 30px 4px 8px; text-align: left; min-height: 18px;"
             f"}}"
-            f"QPushButton:hover {{ border-color: {_WARN}; }}"
+            f"QPushButton:hover {{ border-color: {_BLUE}; }}"
             f"QPushButton::menu-indicator {{ width: 0; }}"
         )
         # Arrow overlay via a child label positioned at the right
         if not hasattr(self, "_arrow_lbl"):
             self._arrow_lbl = QLabel("▾", self)
-            self._arrow_lbl.setFont(_mono(9))
+            self._arrow_lbl.setFont(_mono(11))
             self._arrow_lbl.setStyleSheet(
                 f"color: {_TEXT_3}; background: transparent;"
             )
@@ -345,12 +427,12 @@ class _ModelPickerWidget(QWidget):
         vlay.setSpacing(0)
 
         search = QLineEdit()
-        search.setFont(_mono(10))
+        search.setFont(_mono(12))
         search.setPlaceholderText("Search models or type a custom name…")
         vlay.addWidget(search)
 
         lst = QListWidget()
-        lst.setFont(_mono(10))
+        lst.setFont(_mono(12))
         lst.setMaximumHeight(240)
         vlay.addWidget(lst)
 
@@ -388,7 +470,7 @@ class _ModelPickerWidget(QWidget):
         # Section header helper
         def _header(text):
             it = QListWidgetItem(text)
-            it.setFont(_mono(8, QFont.Weight.DemiBold))
+            it.setFont(_mono(10, QFont.Weight.DemiBold))
             it.setForeground(QColor(_TEXT_3))
             it.setFlags(Qt.ItemFlag.NoItemFlags)  # not selectable
             return it
@@ -399,8 +481,8 @@ class _ModelPickerWidget(QWidget):
                 lst.addItem(_header("  ACTIVE"))
                 it = QListWidgetItem(f"  {self._active}")
                 it.setData(Qt.ItemDataRole.UserRole, self._active)
-                it.setForeground(QColor(_WARN))
-                it.setFont(_mono(10, QFont.Weight.DemiBold))
+                it.setForeground(QColor(_BLUE))
+                it.setFont(_mono(12, QFont.Weight.DemiBold))
                 lst.addItem(it)
 
         # ── Available models ──────────────────────────────────────────────
@@ -454,29 +536,31 @@ class _ModelPickerWidget(QWidget):
         self._close_popup()
 
 
-# ── Background model-list / connection-test worker ─────────────────────────────
-class _ModelFetchWorker(QThread):
-    """Runs a list_models() call off the UI thread.
+# ── Background tasks ─────────────────────────────────────────────────────────
+class _BgTask(QThread):
+    """Runs ``fn()`` off the UI thread; emits ``done(result, error)``."""
 
-    ``fn`` returns ``(models, error)``; emits ``done(models, error)`` where an
-    empty error string means success.
-    """
+    done = pyqtSignal(object, str)
 
-    done = pyqtSignal(list, str)
-
-    def __init__(self, fn, parent=None):
-        super().__init__(parent)
+    def __init__(self, fn):
+        super().__init__()
         self._fn = fn
 
     def run(self):
         try:
-            models, err = self._fn()
+            result, err = self._fn(), ""
         except Exception as exc:  # noqa: BLE001
-            models, err = [], f"{type(exc).__name__}: {exc}"
-        self.done.emit(list(models or []), err or "")
+            result, err = None, f"{type(exc).__name__}: {exc}"
+        self.done.emit(result, err)
 
 
-def _lbl(text, color=_TEXT_2, size=10, italic=False):
+# Running tasks are held here, not by the dialog, so closing the dialog
+# mid-scan can't destroy a QThread that is still running.
+_LIVE_TASKS = set()
+_SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+
+
+def _lbl(text, color=_TEXT_2, size=12, italic=False):
     w = QLabel(text)
     f = _mono(size)
     if italic:
@@ -488,146 +572,112 @@ def _lbl(text, color=_TEXT_2, size=10, italic=False):
 
 def _ghost_btn(text):
     b = QPushButton(text)
-    b.setFont(_mono(10))
+    b.setFont(_mono(12))
+    b.setCursor(Qt.CursorShape.PointingHandCursor)
     b.setStyleSheet(_BTN_GHOST_SS)
     return b
 
 
-def _separator():
-    line = QFrame()
-    line.setFrameShape(QFrame.Shape.HLine)
-    line.setStyleSheet(f"color: {_BORDER_SOFT}; background: {_BORDER_SOFT};")
-    line.setFixedHeight(1)
-    return line
+class _Toggle(QCheckBox):
+    """Pill switch (monocode style) that keeps the QCheckBox API."""
 
-
-# ── Section card ──────────────────────────────────────────────────────────────
-class _SectionCard(QFrame):
-    """Rounded, bordered card with a labelled title strip."""
-
-    def __init__(self, title, parent=None):
+    def __init__(self, parent=None):
         super().__init__(parent)
-        self.setObjectName("SettingsSectionCard")
-        self.setStyleSheet(f"""
-            QFrame#SettingsSectionCard {{
-                background: {_SURFACE_2};
-                border: 1px solid {_BORDER_SOFT};
-                border-radius: 8px;
-            }}
-        """)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setFixedSize(36, 20)
 
-        root = QVBoxLayout(self)
-        root.setContentsMargins(0, 0, 0, 0)
-        root.setSpacing(0)
+    def sizeHint(self):
+        return QSize(36, 20)
 
-        header = QWidget()
-        header.setObjectName("SectionCardHeader")
-        header.setStyleSheet(f"""
-            QWidget#SectionCardHeader {{
-                background: transparent;
-                border-bottom: 1px solid {_BORDER_SOFT};
-                border-top-left-radius: 8px;
-                border-top-right-radius: 8px;
-            }}
-        """)
-        h = QHBoxLayout(header)
-        h.setContentsMargins(14, 9, 14, 9)
-        h.setSpacing(7)
+    def hitButton(self, pos):
+        return self.rect().contains(pos)
 
-        dot = QLabel("●")
-        dot.setFont(_mono(7))
-        dot.setStyleSheet(f"color: {_WARN}; background: transparent; border: none;")
-        h.addWidget(dot, 0, Qt.AlignmentFlag.AlignVCenter)
-
-        cap = QLabel(title.upper())
-        cap.setFont(_mono(8, QFont.Weight.DemiBold))
-        cap.setStyleSheet(
-            f"color: {_TEXT_3}; background: transparent; border: none; letter-spacing: 1px;"
-        )
-        h.addWidget(cap, 1, Qt.AlignmentFlag.AlignVCenter)
-        root.addWidget(header)
-
-        body = QWidget()
-        body.setStyleSheet("background: transparent;")
-        self._body = QVBoxLayout(body)
-        self._body.setContentsMargins(14, 12, 14, 14)
-        self._body.setSpacing(10)
-        root.addWidget(body)
-
-    def body(self):
-        return self._body
+    def paintEvent(self, _event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QColor(_BLUE if self.isChecked() else _BORDER))
+        p.drawRoundedRect(QRectF(0, 0, 36, 20), 10, 10)
+        p.setBrush(QColor("#ffffff"))
+        p.drawEllipse(QRectF(18 if self.isChecked() else 2, 2, 16, 16))
+        p.end()
 
 
-# ── Collapsible card ──────────────────────────────────────────────────────────
-class _CollapsibleCard(QFrame):
-    def __init__(self, title, parent=None, initially_expanded=False):
+class _Card(QFrame):
+    """Settings card: rounded surface holding rows split by hairlines.
+
+    A row is ``label + description`` on the left and a control on the right;
+    ``add_widget`` adds a full-width block (lists, notes).
+    """
+
+    def __init__(self, parent=None):
         super().__init__(parent)
-        self._expanded = initially_expanded
-        self.setObjectName("SettingsCollapsibleCard")
-        self.setStyleSheet(f"""
-            QFrame#SettingsCollapsibleCard {{
-                background: {_SURFACE_2};
-                border: 1px solid {_BORDER_SOFT};
-                border-radius: 8px;
-            }}
-        """)
-
-        root = QVBoxLayout(self)
-        root.setContentsMargins(0, 0, 0, 0)
-        root.setSpacing(0)
-
-        self._header = QWidget()
-        self._header.setObjectName("CollapsibleHeader")
-        self._header.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._header.setStyleSheet(
-            "QWidget#CollapsibleHeader { background: transparent; }"
+        self.setObjectName("SettingsCard")
+        self.setStyleSheet(
+            f"QFrame#SettingsCard {{ background: {_SURFACE_2}; border: 1px solid {_BORDER_SOFT};"
+            f" border-radius: 12px; }}"
         )
-        h = QHBoxLayout(self._header)
-        h.setContentsMargins(14, 9, 14, 9)
-        h.setSpacing(7)
+        self._lay = QVBoxLayout(self)
+        self._lay.setContentsMargins(0, 0, 0, 0)
+        self._lay.setSpacing(0)
 
-        dot = QLabel("●")
-        dot.setFont(_mono(7))
-        dot.setStyleSheet(f"color: {_TEXT_3}; background: transparent; border: none;")
-        h.addWidget(dot, 0, Qt.AlignmentFlag.AlignVCenter)
+    def _new_row(self):
+        row = QFrame()
+        row.setObjectName("SettingsRow")
+        divider = f"border-top: 1px solid {_BORDER_SOFT};" if self._lay.count() else ""
+        row.setStyleSheet(f"QFrame#SettingsRow {{ background: transparent; border: none; {divider} }}")
+        self._lay.addWidget(row)
+        return row
 
-        cap = QLabel(title.upper())
-        cap.setFont(_mono(8, QFont.Weight.DemiBold))
-        cap.setStyleSheet(
-            f"color: {_TEXT_3}; background: transparent; border: none; letter-spacing: 1px;"
-        )
-        h.addWidget(cap, 1, Qt.AlignmentFlag.AlignVCenter)
+    def add_row(self, label, description=None, control=None, stretch_control=False):
+        """Add a row; ``label``/``description`` may be text or a ready QLabel."""
+        row = self._new_row()
+        h = QHBoxLayout(row)
+        h.setContentsMargins(16, 12, 16, 12)
+        h.setSpacing(20)
+        left = QVBoxLayout()
+        left.setSpacing(3)
+        title = label if isinstance(label, QLabel) else _lbl(label, color=_TEXT, size=13)
+        title.setFont(_mono(13, QFont.Weight.Medium))
+        left.addWidget(title)
+        if description is not None:
+            desc = description if isinstance(description, QLabel) else _lbl(description, color=_TEXT_3)
+            desc.setWordWrap(True)
+            left.addWidget(desc)
+        h.addLayout(left, 1)
+        if control is not None:
+            holder = QHBoxLayout()
+            holder.setSpacing(6)
+            holder.addStretch(0 if stretch_control else 1)
+            if isinstance(control, QWidget):
+                holder.addWidget(control, 1 if stretch_control else 0)
+            else:
+                holder.addLayout(control, 1 if stretch_control else 0)
+            h.addLayout(holder, 1 if stretch_control else 0)
+        return row
 
-        self._arrow = QLabel("▾" if initially_expanded else "▸")
-        self._arrow.setFont(_mono(9))
-        self._arrow.setStyleSheet(
-            f"color: {_TEXT_3}; background: transparent; border: none;"
-        )
-        h.addWidget(self._arrow, 0, Qt.AlignmentFlag.AlignVCenter)
-        root.addWidget(self._header)
-        self._header.mousePressEvent = lambda _e: self._toggle()
+    def add_widget(self, widget, margins=(16, 12, 16, 12)):
+        row = self._new_row()
+        v = QVBoxLayout(row)
+        v.setContentsMargins(*margins)
+        v.addWidget(widget)
+        return row
 
-        self._content = QWidget()
-        self._content.setObjectName("CollapsibleContent")
-        self._content.setStyleSheet(f"""
-            QWidget#CollapsibleContent {{
-                background: transparent;
-                border-top: 1px solid {_BORDER_SOFT};
-            }}
-        """)
-        self._body = QVBoxLayout(self._content)
-        self._body.setContentsMargins(14, 12, 14, 14)
-        self._body.setSpacing(10)
-        root.addWidget(self._content)
-        self._content.setVisible(initially_expanded)
 
-    def _toggle(self):
-        self._expanded = not self._expanded
-        self._content.setVisible(self._expanded)
-        self._arrow.setText("▾" if self._expanded else "▸")
-
-    def body(self):
-        return self._body
+def _group_header(title, description=""):
+    """Section title + muted description shown above a card."""
+    box = QWidget()
+    v = QVBoxLayout(box)
+    v.setContentsMargins(2, 0, 2, 2)
+    v.setSpacing(3)
+    t = _lbl(title, color=_TEXT, size=14)
+    t.setFont(_mono(14, QFont.Weight.DemiBold))
+    v.addWidget(t)
+    if description:
+        d = _lbl(description, color=_TEXT_3)
+        d.setWordWrap(True)
+        v.addWidget(d)
+    return box
 
 
 # ── Main dialog ───────────────────────────────────────────────────────────────
@@ -636,57 +686,162 @@ class SettingsDialog(QDialog):
         super().__init__(parent)
         self.config = config
         self.setWindowTitle("AgenticGIS — Settings")
-        self.setMinimumWidth(560)
-        self.setMinimumHeight(660)
-        self.resize(580, 760)
+        self.setMinimumSize(720, 560)
+        self.resize(820, 680)
         _install_tooltip_palette()
         self.setStyleSheet(_DIALOG_SS)
         self._build_ui()
         self._load()
 
     # ── build ─────────────────────────────────────────────────────────────────
+    _PAGES = ("Connection", "External agents", "Appearance")
+
     def _build_ui(self):
-        root = QVBoxLayout(self)
-        root.setContentsMargins(16, 16, 16, 14)
-        root.setSpacing(10)
+        root = QHBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
 
-        # ─ header ─
-        hdr = QHBoxLayout()
-        hdr.setContentsMargins(0, 0, 0, 0)
-        hdr.setSpacing(8)
+        # ─ left rail ─
+        rail = QFrame()
+        rail.setObjectName("SettingsRail")
+        rail.setFixedWidth(184)
+        rail.setStyleSheet(
+            f"QFrame#SettingsRail {{ background: {_SURFACE_2}; border: none;"
+            f" border-right: 1px solid {_BORDER_SOFT}; }}"
+        )
+        rail_col = QVBoxLayout(rail)
+        rail_col.setContentsMargins(10, 16, 10, 12)
+        rail_col.setSpacing(6)
+        brand = _lbl("AgenticGIS", color=_TEXT, size=13)
+        brand.setFont(_mono(13, QFont.Weight.DemiBold))
+        brand.setContentsMargins(8, 0, 0, 0)
+        rail_col.addWidget(brand)
+        group_lbl = _lbl("Settings", color=_TEXT_4, size=11)
+        group_lbl.setContentsMargins(8, 8, 0, 0)
+        rail_col.addWidget(group_lbl)
+        self._rail = QListWidget()
+        self._rail.setFont(_mono(13))
+        self._rail.setStyleSheet(_RAIL_SS)
+        self._rail.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        for name in self._PAGES:
+            self._rail.addItem(name)
+        rail_col.addWidget(self._rail, 1)
+        version = _plugin_version()
+        if version:
+            ver = _lbl(f"v{version}", color=_TEXT_4, size=11)
+            ver.setContentsMargins(8, 0, 0, 0)
+            rail_col.addWidget(ver)
+        root.addWidget(rail)
 
-        marker = QLabel("●")
-        marker.setFont(_mono(10))
-        marker.setStyleSheet(f"color: {_WARN}; background: transparent;")
-        hdr.addWidget(marker, 0, Qt.AlignmentFlag.AlignVCenter)
+        # ─ content column ─
+        content = QWidget()
+        col = QVBoxLayout(content)
+        col.setContentsMargins(0, 0, 0, 0)
+        col.setSpacing(0)
 
-        title = QLabel("AgenticGIS  —  Settings")
-        title.setFont(_mono(13, QFont.Weight.DemiBold))
-        title.setStyleSheet(f"color: {_TEXT}; background: transparent;")
-        hdr.addWidget(title, 1, Qt.AlignmentFlag.AlignVCenter)
-        root.addLayout(hdr)
-        root.addWidget(_separator())
+        crumb_bar = QFrame()
+        crumb_bar.setObjectName("SettingsCrumb")
+        crumb_bar.setFixedHeight(42)
+        crumb_bar.setStyleSheet(
+            f"QFrame#SettingsCrumb {{ background: transparent; border: none;"
+            f" border-bottom: 1px solid {_BORDER_SOFT}; }}"
+        )
+        crumb_row = QHBoxLayout(crumb_bar)
+        crumb_row.setContentsMargins(24, 0, 24, 0)
+        self._crumb = QLabel()
+        self._crumb.setFont(_mono(13))
+        self._crumb.setStyleSheet("background: transparent;")
+        crumb_row.addWidget(self._crumb)
+        col.addWidget(crumb_bar)
 
-        # ─ scrollable body ─
+        self._pages = QStackedWidget()
+        self._pages.setStyleSheet("QStackedWidget { background: transparent; }")
+        self._pages.addWidget(self._page(self._connection_page()))
+        self._pages.addWidget(self._page(self._mcp_section()))
+        self._pages.addWidget(self._page(self._appearance_section()))
+        col.addWidget(self._pages, 1)
+
+        # ─ footer ─
+        footer = QFrame()
+        footer.setObjectName("SettingsFooter")
+        footer.setStyleSheet(
+            f"QFrame#SettingsFooter {{ background: transparent; border: none;"
+            f" border-top: 1px solid {_BORDER_SOFT}; }}"
+        )
+        btn_row = QHBoxLayout(footer)
+        btn_row.setContentsMargins(24, 12, 24, 12)
+        btn_row.setSpacing(8)
+        note = _lbl("Runs entirely on QGIS's bundled Python — nothing to install.", color=_TEXT_4, size=11)
+        btn_row.addWidget(note, 1)
+
+        self._cancel_btn = QPushButton("Cancel")
+        self._cancel_btn.setFont(_mono(12))
+        self._cancel_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._cancel_btn.setStyleSheet(_BTN_SECONDARY_SS)
+        self._cancel_btn.clicked.connect(self.reject)
+        btn_row.addWidget(self._cancel_btn)
+
+        self._save_btn = QPushButton("Save")
+        self._save_btn.setFont(_mono(12, QFont.Weight.DemiBold))
+        self._save_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._save_btn.setStyleSheet(_BTN_PRIMARY_SS)
+        self._save_btn.setDefault(True)
+        self._save_btn.clicked.connect(self._save_and_accept)
+        btn_row.addWidget(self._save_btn)
+        col.addWidget(footer)
+        root.addWidget(content, 1)
+
+        self._rail.currentRowChanged.connect(self._show_page)
+        self._rail.setCurrentRow(0)
+
+    def _page(self, body):
+        """Wrap a page body in a scroll area with comfortable margins."""
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.Shape.NoFrame)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        holder = QWidget()
+        holder.setStyleSheet("background: transparent;")
+        v = QVBoxLayout(holder)
+        v.setContentsMargins(24, 20, 24, 24)
+        v.setSpacing(0)
+        v.addWidget(body)
+        v.addStretch(1)
+        scroll.setWidget(holder)
+        scroll.viewport().setStyleSheet("background: transparent;")
+        return scroll
 
-        body_w = QWidget()
-        body_w.setStyleSheet(f"background: {_SURFACE};")
-        body = QVBoxLayout(body_w)
-        body.setContentsMargins(0, 2, 0, 2)
-        body.setSpacing(10)
-        scroll.setWidget(body_w)
-        root.addWidget(scroll, 1)
+    def _show_page(self, index):
+        if index < 0:
+            return
+        self._pages.setCurrentIndex(index)
+        self._crumb.setText(
+            f"<span style='color:{_TEXT_3};'>Settings</span>"
+            f"<span style='color:{_TEXT_4};'>&nbsp;&nbsp;›&nbsp;&nbsp;</span>"
+            f"<span style='color:{_TEXT};'>{self._PAGES[index]}</span>"
+        )
 
-        # ─ Connection card ─
-        conn = _SectionCard("Connection")
-        cb = conn.body()
+    def _connection_page(self):
+        page = QWidget()
+        v = QVBoxLayout(page)
+        v.setContentsMargins(0, 0, 0, 0)
+        v.setSpacing(12)
+        v.addWidget(_group_header(
+            "Connection",
+            "How AgenticGIS reaches a model. Configure any mode; the one marked "
+            "“Active” is used for chat after you Save.",
+        ))
 
+        track = QFrame()
+        track.setObjectName("SegmentTrack")
+        track.setStyleSheet(
+            f"QFrame#SegmentTrack {{ background: {_SURFACE_2}; border: 1px solid {_BORDER_SOFT};"
+            f" border-radius: 8px; }}"
+        )
+        track_row = QHBoxLayout(track)
+        track_row.setContentsMargins(2, 2, 2, 2)
         self.connection_tabs = QTabBar()
-        self.connection_tabs.setFont(_mono(10, QFont.Weight.DemiBold))
+        self.connection_tabs.setFont(_mono(12, QFont.Weight.Medium))
         self.connection_tabs.setStyleSheet(_TAB_SS)
         self.connection_tabs.setDrawBase(False)
         self.connection_tabs.setExpanding(False)
@@ -694,80 +849,72 @@ class SettingsDialog(QDialog):
         for label, _ in _MODE_LABELS:
             self.connection_tabs.addTab(label)
         self.connection_tabs.currentChanged.connect(self.stack_set)
-        cb.addWidget(self.connection_tabs, 0, Qt.AlignmentFlag.AlignLeft)
+        track_row.addWidget(self.connection_tabs)
+        v.addWidget(track, 0, Qt.AlignmentFlag.AlignLeft)
 
-        self.stack = QStackedWidget()
-        self.stack.setStyleSheet("background: transparent; border: none;")
-        self.stack.addWidget(self._api_key_panel())
-        self.stack.addWidget(self._custom_panel())
-        self.stack.addWidget(self._cli_agent_panel())
-        cb.addWidget(self.stack)
-        body.addWidget(conn)
-
-        # ─ External agents (MCP) card ─
-        body.addWidget(self._mcp_section())
-
-        body.addStretch(1)
-
-        # ─ footer ─
-        footer = _lbl(
-            "No installation required — runs entirely on QGIS's bundled Python.",
-            color=_TEXT_3, size=9,
-        )
-        footer.setWordWrap(True)
-        root.addWidget(footer)
-
-        root.addWidget(_separator())
-
-        # ─ button row ─
-        btn_row = QHBoxLayout()
-        btn_row.setSpacing(8)
-        btn_row.addStretch(1)
-
-        self._cancel_btn = QPushButton("Cancel")
-        self._cancel_btn.setFont(_mono(10, QFont.Weight.DemiBold))
-        self._cancel_btn.setStyleSheet(_BTN_SECONDARY_SS)
-        self._cancel_btn.clicked.connect(self.reject)
-        btn_row.addWidget(self._cancel_btn)
-
-        self._save_btn = QPushButton("Save")
-        self._save_btn.setFont(_mono(10, QFont.Weight.DemiBold))
-        self._save_btn.setStyleSheet(_BTN_PRIMARY_SS)
-        self._save_btn.setDefault(True)
-        self._save_btn.clicked.connect(self._save_and_accept)
-        btn_row.addWidget(self._save_btn)
-
-        root.addLayout(btn_row)
+        # Only the active panel is visible, so the page is exactly as tall as
+        # it (a QStackedWidget is as tall as its tallest panel).
+        self._mode_panels = [self._api_key_panel(), self._custom_panel(), self._cli_agent_panel()]
+        for panel in self._mode_panels:
+            v.addWidget(panel)
+        return page
 
     # ── external agents (MCP) ────────────────────────────────────────────────
     def _mcp_section(self):
-        card = _SectionCard("External agent CLIs (MCP)")
-        cb = card.body()
-
-        self.mcp_enabled_check = QCheckBox(
-            "Expose QGIS tools to external agent CLIs (local MCP server on 127.0.0.1)"
-        )
-        self.mcp_enabled_check.setFont(_mono(10))
-        self.mcp_enabled_check.setStyleSheet(f"color: {_TEXT_2}; background: transparent;")
+        page = QWidget()
+        v = QVBoxLayout(page)
+        v.setContentsMargins(0, 0, 0, 0)
+        v.setSpacing(12)
+        v.addWidget(_group_header(
+            "External agents",
+            "Let agent CLIs outside QGIS drive this session through a local MCP server.",
+        ))
+        card = _Card()
+        self.mcp_enabled_check = _Toggle()
         self.mcp_enabled_check.setChecked(bool(self.config.get("mcp_enabled")))
-        cb.addWidget(self.mcp_enabled_check)
-
-        hint = _lbl(
-            "External CLIs (Claude Code, Codex, OpenCode, …) can then drive the "
-            "live QGIS session through AgenticGIS's stdio MCP proxy — one-line "
-            "setup per CLI in the README (\"External agent access (MCP)\"). "
-            "Localhost only; takes effect immediately.",
-            color=_TEXT_3, size=9,
+        card.add_row(
+            "Expose QGIS tools over MCP",
+            "Claude Code, Codex, OpenCode and others can use the live QGIS session via "
+            "AgenticGIS's stdio MCP proxy (setup per CLI in the README, \"External agent "
+            "access (MCP)\"). Listens on 127.0.0.1 only; takes effect immediately.",
+            self.mcp_enabled_check,
         )
-        hint.setWordWrap(True)
-        cb.addWidget(hint)
+        v.addWidget(card)
+        return page
 
-        return card
+    # ── appearance ───────────────────────────────────────────────────────────
+    def _appearance_section(self):
+        page = QWidget()
+        v = QVBoxLayout(page)
+        v.setContentsMargins(0, 0, 0, 0)
+        v.setSpacing(12)
+        v.addWidget(_group_header("Appearance", "Text size in the chat dock and this dialog."))
+        card = _Card()
+        self.font_scale_combo = _cmb(QComboBox())
+        self.font_scale_combo.setMinimumWidth(110)
+        saved = clamp_font_scale(self.config.get("font_scale"))
+        scales = sorted({0.75, 0.9, 1.0, 1.15, 1.25, 1.5, 1.75, 2.0, saved})
+        for scale in scales:
+            self.font_scale_combo.addItem(f"{round(scale * 100)}%", scale)
+        self.font_scale_combo.setCurrentIndex(scales.index(saved))
+        card.add_row(
+            "Font size",
+            "Follows the QGIS font size (Settings → Options → General) and scales on top "
+            "of it. New messages update right away; reload the plugin or restart QGIS to "
+            "resize what is already on screen.",
+            self.font_scale_combo,
+        )
+        v.addWidget(card)
+        return page
 
     # ── stack panels ──────────────────────────────────────────────────────────
     def stack_set(self, index):
-        self.stack.setCurrentIndex(index)
+        for i, panel in enumerate(self._mode_panels):
+            panel.setVisible(i == index)
         self._update_connection_tab_labels()
+        if (index == 2 and getattr(self, "_loaded", False)
+                and not getattr(self, "_cli_scan_performed", False)):
+            self._scan_cli_agents()
 
     def _current_mode(self):
         return getattr(self, "_pending_connection_mode", self.config.get("connection_mode"))
@@ -852,192 +999,177 @@ class SettingsDialog(QDialog):
             "\n".join(part for part in (active_label(2, cli_text), agent_label, cli_model, cli_path) if part),
         )
 
-    @staticmethod
-    def _panel_form(w):
-        form = QFormLayout(w)
-        form.setSpacing(10)
-        form.setContentsMargins(0, 4, 0, 4)
-        form.setLabelAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
-        return form
-
-    def _model_group(self, picker_attr):
-        """Hidden-until-connected widget containing the model picker."""
-        group = QWidget()
-        group.setStyleSheet("background: transparent;")
-        mg = QFormLayout(group)
-        mg.setSpacing(6)
-        mg.setContentsMargins(0, 2, 0, 0)
-        mg.setLabelAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
-
+    def _model_group(self, card, picker_attr):
+        """Hidden-until-connected card row holding the model picker."""
         picker = _ModelPickerWidget("Select or type a model name")
+        picker.setMinimumWidth(240)
         picker.modelChanged.connect(self._update_connection_tab_labels)
         setattr(self, picker_attr, picker)
-        mg.addRow(_lbl("Model:"), picker)
-
-        hint = _lbl(
-            "Select from the list or type a custom model name, then press Enter.",
-            color=_TEXT_3, size=9, italic=True,
+        row = card.add_row(
+            "Model", "Pick from the list or type a custom name, then press Enter.", picker,
         )
-        hint.setWordWrap(True)
-        mg.addRow(hint)
-        group.setVisible(False)
-        return group
+        row.setVisible(False)
+        return row
 
-    def _test_row(self, btn_attr, status_attr, mode, use_btn_attr=None):
-        row = QHBoxLayout()
-        row.setSpacing(8)
+    def _test_row(self, card, btn_attr, status_attr, mode, use_btn_attr=None):
+        buttons = QHBoxLayout()
+        buttons.setSpacing(6)
         btn = _ghost_btn("Test connection")
         btn.clicked.connect(lambda: self._test_connection(mode))
         setattr(self, btn_attr, btn)
-        row.addWidget(btn, 0)
+        buttons.addWidget(btn)
         if use_btn_attr:
             use_btn = _ghost_btn("Use")
             use_btn.clicked.connect(lambda _checked=False, m=mode: self._use_connection_mode(m))
             setattr(self, use_btn_attr, use_btn)
-            row.addWidget(use_btn, 0)
-        status = _lbl("", color=_TEXT_3, size=9)
+            buttons.addWidget(use_btn)
+        status = _lbl("Not tested yet", color=_TEXT_3)
         status.setWordWrap(True)
         setattr(self, status_attr, status)
-        row.addWidget(status, 1)
-        return row
+        card.add_row("Connection", status, buttons)
 
-    def _api_key_panel(self):
+    @staticmethod
+    def _panel_column():
         w = QWidget()
         w.setStyleSheet("background: transparent;")
         col = QVBoxLayout(w)
-        col.setContentsMargins(0, 4, 0, 4)
-        col.setSpacing(10)
+        col.setContentsMargins(0, 0, 0, 0)
+        col.setSpacing(12)
+        return w, col
 
-        form_w = QWidget()
-        form_w.setStyleSheet("background: transparent;")
-        form = QFormLayout(form_w)
-        form.setSpacing(10)
-        form.setContentsMargins(0, 0, 0, 0)
-        form.setLabelAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+    def _api_key_panel(self):
+        w, col = self._panel_column()
+        card = _Card()
 
         self.provider_combo = _cmb(QComboBox())
+        self.provider_combo.setMinimumWidth(220)
         for p in providers.all_providers():
             self.provider_combo.addItem(p["label"], p["id"])
-        form.addRow(_lbl("Provider:"), self.provider_combo)
+        card.add_row("Provider", "Built-in API provider.", self.provider_combo)
 
         self.api_base_url_edit = _inp(QLineEdit())
+        self.api_base_url_edit.setMinimumWidth(260)
         self.api_base_url_edit.setPlaceholderText("Provider API base URL")
         self.api_base_url_edit.textChanged.connect(self._update_connection_tab_labels)
-        form.addRow(_lbl("Base URL:"), self.api_base_url_edit)
+        card.add_row("Base URL", "Leave the default unless you use a proxy.", self.api_base_url_edit)
 
         self.api_key_edit = _inp(QLineEdit())
+        self.api_key_edit.setMinimumWidth(260)
         self.api_key_edit.setEchoMode(QLineEdit.EchoMode.Password)
         self.api_key_edit.setPlaceholderText("Paste your API key here")
-        form.addRow(_lbl("API key:"), self.api_key_edit)
-        col.addWidget(form_w)
+        card.add_row("API key", "Stored in your QGIS settings on this machine.", self.api_key_edit)
 
         self.provider_combo.currentIndexChanged.connect(self._on_provider_changed)
-
-        col.addLayout(
-            self._test_row(
-                "api_test_btn", "api_status", config_mod.MODE_API_KEY,
-                use_btn_attr="api_use_btn",
-            )
-        )
-        self.api_model_group = self._model_group("model_picker")
-        col.addWidget(self.api_model_group)
+        self._test_row(card, "api_test_btn", "api_status", config_mod.MODE_API_KEY, use_btn_attr="api_use_btn")
+        self.api_model_group = self._model_group(card, "model_picker")
+        col.addWidget(card)
         return w
 
     def _custom_panel(self):
-        w = QWidget()
-        w.setStyleSheet("background: transparent;")
-        col = QVBoxLayout(w)
-        col.setContentsMargins(0, 4, 0, 4)
-        col.setSpacing(10)
-
-        form_w = QWidget()
-        form_w.setStyleSheet("background: transparent;")
-        form = QFormLayout(form_w)
-        form.setSpacing(10)
-        form.setContentsMargins(0, 0, 0, 0)
-        form.setLabelAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        w, col = self._panel_column()
+        card = _Card()
 
         self.custom_url_edit = _inp(QLineEdit())
+        self.custom_url_edit.setMinimumWidth(260)
         self.custom_url_edit.setPlaceholderText("https://api.example.com")
         self.custom_url_edit.textChanged.connect(self._update_connection_tab_labels)
-        form.addRow(_lbl("Base URL:"), self.custom_url_edit)
+        card.add_row("Base URL", "Any OpenAI- or Anthropic-compatible server.", self.custom_url_edit)
 
         self.custom_key_edit = _inp(QLineEdit())
+        self.custom_key_edit.setMinimumWidth(260)
         self.custom_key_edit.setEchoMode(QLineEdit.EchoMode.Password)
         self.custom_key_edit.setPlaceholderText("API key for this endpoint")
-        form.addRow(_lbl("API key:"), self.custom_key_edit)
+        card.add_row("API key", "Optional for local servers.", self.custom_key_edit)
 
         self.custom_format_combo = _cmb(QComboBox())
+        self.custom_format_combo.setMinimumWidth(220)
         for label, value in _FORMAT_LABELS:
             self.custom_format_combo.addItem(label, value)
         self.custom_format_combo.currentIndexChanged.connect(self._update_connection_tab_labels)
         self.custom_format_combo.currentIndexChanged.connect(
             lambda _i: self._reset_model_group(config_mod.MODE_CUSTOM)
         )
-        form.addRow(_lbl("Wire format:"), self.custom_format_combo)
-        col.addWidget(form_w)
+        card.add_row("Wire format", "The API shape the server speaks.", self.custom_format_combo)
 
-        col.addLayout(
-            self._test_row(
-                "custom_test_btn", "custom_status", config_mod.MODE_CUSTOM,
-                use_btn_attr="custom_use_btn",
-            )
+        self._test_row(
+            card, "custom_test_btn", "custom_status", config_mod.MODE_CUSTOM, use_btn_attr="custom_use_btn",
         )
-        self.custom_model_group = self._model_group("custom_model_picker")
-        col.addWidget(self.custom_model_group)
+        self.custom_model_group = self._model_group(card, "custom_model_picker")
+        col.addWidget(card)
         return w
 
     def _cli_agent_panel(self):
-        w = QWidget()
-        w.setStyleSheet("background: transparent;")
-        col = QVBoxLayout(w)
-        col.setContentsMargins(0, 4, 0, 4)
-        col.setSpacing(10)
+        w, col = self._panel_column()
+        col.setSpacing(8)
+        self._cli_auth_state = None     # None until checked; see _apply_cli_auth
+        self._cli_detail_agent = None
 
-        scan_row = QHBoxLayout()
-        scan_row.setSpacing(8)
-        self.cli_scan_btn = _ghost_btn("Scan")
+        card = _Card()
+        col.addWidget(card)
+
+        # Agents: icon tiles. Picking one checks sign-in and loads its models.
+        self.cli_scan_btn = _ghost_btn("↻")
+        self.cli_scan_btn.setToolTip("Rescan for installed agent CLIs")
         self.cli_scan_btn.clicked.connect(self._scan_cli_agents)
-        scan_row.addWidget(self.cli_scan_btn, 0)
-        self.cli_rescan_btn = _ghost_btn("Rescan")
-        self.cli_rescan_btn.clicked.connect(self._scan_cli_agents)
-        scan_row.addWidget(self.cli_rescan_btn, 0)
-        self.cli_scan_status = _lbl("", color=_TEXT_3, size=9)
-        scan_row.addWidget(self.cli_scan_status, 1)
-        col.addLayout(scan_row)
-
-        self.cli_agent_list = QListWidget()
-        self.cli_agent_list.setStyleSheet(_LIST_SS)
-        self.cli_agent_list.setMinimumHeight(190)
+        self.cli_rescan_btn = self.cli_scan_btn   # one button; old name kept for _run_busy lists
+        self.cli_scan_status = _lbl("", color=_TEXT_3)
+        card.add_row("Agent", self.cli_scan_status, self.cli_scan_btn)
+        self.cli_agent_list = _TileList()
+        self.cli_agent_list.setFont(_mono(11))
+        self.cli_agent_list.setStyleSheet(_AGENT_TILES_SS)
         self.cli_agent_list.currentItemChanged.connect(self._on_cli_agent_selected)
-        col.addWidget(self.cli_agent_list)
+        card.add_widget(self.cli_agent_list, margins=(8, 2, 8, 2))
 
-        details = QWidget()
-        details.setStyleSheet("background: transparent;")
-        form = self._panel_form(details)
-
-        self.cli_agent_name = _lbl("Select an agent", color=_TEXT, size=10)
-        form.addRow(_lbl("Selected:"), self.cli_agent_name)
-
-        self.cli_agent_credentials = _lbl("", color=_TEXT_3, size=9)
-        self.cli_agent_credentials.setWordWrap(True)
-        form.addRow(_lbl("Credentials:"), self.cli_agent_credentials)
-
-        self.cli_agent_warning = _lbl("", color=_WARN, size=9)
+        # Status: who, sign-in result, re-check, use.
+        self.cli_agent_name = _lbl("Select an agent", color=_TEXT, size=13)
+        self.cli_auth_status = _lbl("Not checked yet", color=_TEXT_3)
+        self.cli_auth_status.setWordWrap(True)
+        self.cli_auth_btn = _ghost_btn("↻")
+        self.cli_auth_btn.setToolTip("Check sign-in again and reload models")
+        self.cli_auth_btn.clicked.connect(self._check_cli_auth)
+        self.cli_use_btn = QPushButton("Use")
+        self.cli_use_btn.setFont(_mono(12, QFont.Weight.DemiBold))
+        self.cli_use_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.cli_use_btn.setStyleSheet(_BTN_PRIMARY_SS)
+        self.cli_use_btn.clicked.connect(self._use_cli_agent)
+        controls = QHBoxLayout()
+        controls.setSpacing(6)
+        controls.addWidget(self.cli_auth_btn)
+        controls.addWidget(self.cli_use_btn)
+        card.add_row(self.cli_agent_name, self.cli_auth_status, controls)
+        self.cli_agent_warning = _lbl("", color=_WARN)
         self.cli_agent_warning.setWordWrap(True)
         self.cli_agent_warning.setVisible(False)
-        form.addRow(self.cli_agent_warning)
+        card.add_widget(self.cli_agent_warning, margins=(16, 0, 16, 10))
 
-        self.cli_auth_status = _lbl("Auth not checked", color=_TEXT_3, size=9)
-        self.cli_auth_status.setWordWrap(True)
-        form.addRow(_lbl("Auth:"), self.cli_auth_status)
+        self.cli_model_group = self._model_group(card, "cli_model_picker")
+        self.cli_model_group.setVisible(True)
+        self.cli_model_picker.modelChanged.connect(self._refresh_cli_steps)
 
+        # ─ advanced: binary path + smoke test ─
+        self._cli_adv_btn = QPushButton("Advanced  ›")
+        self._cli_adv_btn.setFlat(True)
+        self._cli_adv_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._cli_adv_btn.setFont(_mono(12))
+        self._cli_adv_btn.setStyleSheet(
+            f"QPushButton {{ color: {_TEXT_3}; background: transparent; border: none;"
+            f" padding: 6px 2px; text-align: left; }}"
+            f"QPushButton:hover {{ color: {_TEXT}; }}"
+        )
+        col.addWidget(self._cli_adv_btn, 0, Qt.AlignmentFlag.AlignLeft)
+        adv = _Card()
+        adv.setVisible(False)
+        self._cli_adv_btn.clicked.connect(lambda: (
+            adv.setVisible(not adv.isVisible()),
+            self._cli_adv_btn.setText("Advanced  ⌄" if adv.isVisible() else "Advanced  ›"),
+        ))
         path_row = QHBoxLayout()
         path_row.setSpacing(6)
         self._cli_path_is_override = False
         self._syncing_cli_path = False
         self._syncing_cli_selection = False
         self.cli_path_edit = _inp(QLineEdit())
+        self.cli_path_edit.setMinimumWidth(220)
         self.cli_path_edit.setPlaceholderText("Auto-detect on PATH (leave empty)")
         self.cli_path_edit.editingFinished.connect(self._scan_cli_agents)
         self.cli_path_edit.textEdited.connect(self._mark_cli_path_override)
@@ -1046,38 +1178,50 @@ class SettingsDialog(QDialog):
         browse_cli = _ghost_btn("Browse…")
         browse_cli.clicked.connect(self._browse_cli)
         path_row.addWidget(browse_cli)
-        form.addRow(_lbl("Command path:"), path_row)
-
-        self.cli_resolved_path = _lbl("", color=_TEXT_3, size=9)
+        self.cli_resolved_path = _lbl("", color=_TEXT_3, size=11)
         self.cli_resolved_path.setWordWrap(True)
         self.cli_resolved_path.setVisible(False)
-        form.addRow(_lbl("Resolved:"), self.cli_resolved_path)
-
-        test_row = QHBoxLayout()
-        test_row.setSpacing(8)
+        adv.add_row("Command path", self.cli_resolved_path, path_row, stretch_control=True)
+        self.cli_test_status = _lbl("Runs the CLI's version check.", color=_TEXT_3)
+        self.cli_test_status.setWordWrap(True)
         self.cli_test_btn = _ghost_btn("Test binary")
         self.cli_test_btn.clicked.connect(self._test_cli_agent)
-        test_row.addWidget(self.cli_test_btn, 0)
-        self.cli_auth_btn = _ghost_btn("Check auth")
-        self.cli_auth_btn.clicked.connect(self._check_cli_auth)
-        test_row.addWidget(self.cli_auth_btn, 0)
-        self.cli_use_btn = _ghost_btn("Use")
-        self.cli_use_btn.clicked.connect(self._use_cli_agent)
-        test_row.addWidget(self.cli_use_btn, 0)
-        self.cli_test_status = _lbl("", color=_TEXT_3, size=9)
-        self.cli_test_status.setWordWrap(True)
-        test_row.addWidget(self.cli_test_status, 1)
-        form.addRow(_lbl("Agent:"), test_row)
+        adv.add_row("Binary", self.cli_test_status, self.cli_test_btn)
+        col.addWidget(adv)
 
         self.sub_status = _lbl(
             "Delegates to the selected local CLI. AgenticGIS never reads OAuth tokens.",
-            color=_TEXT_3, size=9, italic=True,
+            color=_TEXT_4, size=11,
         )
-        form.addRow(self.sub_status)
-        col.addWidget(details)
-        self.cli_model_group = self._model_group("cli_model_picker")
-        col.addWidget(self.cli_model_group)
+        self.sub_status.setContentsMargins(4, 0, 0, 0)
+        col.addWidget(self.sub_status)
         return w
+
+    def _cli_agent_ready(self):
+        row = self._cli_scan_row(self._selected_cli_agent_id())
+        has_path = bool(self.cli_path_edit.text().strip())
+        return bool(row and row.get("installed")) or has_path
+
+    def _refresh_cli_steps(self, *_args):
+        """Sync the Use button and the in-use ring with the current selection."""
+        if not hasattr(self, "cli_use_btn"):
+            return
+        in_use = (
+            self._current_mode() == config_mod.MODE_CLI_TOOL
+            and self._selected_cli_agent_id() == getattr(self, "_cli_used_agent", None)
+        )
+        self.cli_use_btn.setText("✓ In use" if in_use else "Use")
+        self.cli_use_btn.setEnabled(self._cli_agent_ready() and not in_use)
+        self._paint_cli_agent_icons()
+
+    def _paint_cli_agent_icons(self):
+        used = getattr(self, "_cli_used_agent", None) if self._current_mode() == config_mod.MODE_CLI_TOOL else None
+        for i in range(self.cli_agent_list.count()):
+            item = self.cli_agent_list.item(i)
+            agent_id = item.data(Qt.ItemDataRole.UserRole)
+            row = self._cli_scan_row(agent_id) or {}
+            item.setIcon(_agent_icon(agent_id, row.get("label", agent_id), agent_id == used,
+                                     bool(row.get("installed"))))
 
     # ── slots ─────────────────────────────────────────────────────────────────
     def _use_connection_mode(self, mode):
@@ -1166,21 +1310,14 @@ class SettingsDialog(QDialog):
                 )
             return client.list_models()
 
-        self._set_status(status, "Checking…", _TEXT_3)
-        btn.setEnabled(False)
-        btn.setText("Checking…")
+        def done(result, err, m=mode):
+            models, fetch_err = result if result else ([], "")
+            self._on_models_fetched(m, list(models or []), err or fetch_err or "")
 
-        worker = _ModelFetchWorker(fetch, self)
-        self._fetch_worker = worker  # keep a reference so it isn't GC'd
-        worker.done.connect(
-            lambda models, err, m=mode: self._on_models_fetched(m, models, err)
-        )
-        worker.start()
+        self._run_busy(fetch, done, status, "Checking connection…", [btn])
 
     def _on_models_fetched(self, mode, models, err):
-        status, btn, picker, group = self._panel_widgets(mode)
-        btn.setEnabled(True)
-        btn.setText("Test connection")
+        status, _btn, picker, group = self._panel_widgets(mode)
 
         if err:
             self._set_status(status, f"Failed — {err}", _DANGER)
@@ -1260,13 +1397,65 @@ class SettingsDialog(QDialog):
             if preserve_path_override:
                 self._syncing_cli_selection = False
 
+    def _run_busy(self, fn, on_done, label, text, buttons):
+        """Run ``fn`` in the background with a spinner in ``label``.
+
+        ``buttons`` are disabled until it finishes; ``on_done(result, err)``
+        then runs on the UI thread.
+        """
+        for btn in buttons:
+            btn.setEnabled(False)
+        label.setStyleSheet(f"color: {_TEXT_3}; background: transparent;")
+        frame = [0]
+
+        def tick():
+            label.setText(f"{_SPINNER[frame[0] % len(_SPINNER)]}  {text}")
+            frame[0] += 1
+
+        tick()
+        timer = QTimer(self)
+        timer.timeout.connect(tick)
+        timer.start(80)
+
+        task = _BgTask(fn)
+        _LIVE_TASKS.add(task)
+
+        def finish(result, err):
+            _LIVE_TASKS.discard(task)
+            task.deleteLater()
+            try:
+                timer.stop()
+                for btn in buttons:
+                    btn.setEnabled(True)
+                on_done(result, err)
+            except RuntimeError:
+                pass  # dialog was closed while the task ran  # nosec B110
+
+        task.done.connect(finish)
+        task.start()
+
     def _scan_cli_agents(self):
         from ..backends.cli_backend import scan_cli_agents
 
-        selected = self._selected_cli_agent_id()
-        self._cli_scan_rows = scan_cli_agents(self._cli_path_overrides())
-        self._cli_scan_performed = True
-        self._fill_cli_agent_list(selected, scanned=True)
+        if getattr(self, "_cli_scanning", False):
+            return
+        self._cli_scanning = True
+        overrides = self._cli_path_overrides()
+
+        def done(rows, err):
+            self._cli_scanning = False
+            if err:
+                self._set_status(self.cli_scan_status, f"Scan failed · {err}", _DANGER)
+                return
+            self._cli_scan_rows = rows
+            self._cli_scan_performed = True
+            self._fill_cli_agent_list(self._selected_cli_agent_id(), scanned=True)
+
+        self._run_busy(
+            lambda: scan_cli_agents(overrides), done, self.cli_scan_status,
+            "Scanning for agent CLIs…",
+            [self.cli_scan_btn, self.cli_rescan_btn, self.cli_test_btn, self.cli_auth_btn],
+        )
 
     def _fill_cli_agent_list(self, selected, scanned):
         self.cli_agent_list.blockSignals(True)
@@ -1285,24 +1474,34 @@ class SettingsDialog(QDialog):
                 active_row = row
             else:
                 rest.append(row)
+        if scanned:
+            rest.sort(key=lambda r: not r.get("installed"))
         ordered_rows = ([active_row] if active_row is not None else []) + rest
         for row in ordered_rows:
             found += 1 if row.get("installed") else 0
             if row.get("installed") and (scanned or row.get("_selected_probe")):
-                status = "found"
+                status = "installed"
             else:
-                status = "missing" if scanned else "not scanned"
-            active = "  ·  active" if row.get("id") == active_id else ""
-            item = QListWidgetItem(f"{row['label']}  ·  {status}{active}")
+                status = "not installed" if scanned else "not scanned"
+            active = " · in use" if row.get("id") == active_id else ""
+            item = QListWidgetItem(row["label"].replace(" CLI", ""))
             item.setData(Qt.ItemDataRole.UserRole, row["id"])
-            item.setForeground(QColor(_TEXT if row.get("installed") or not scanned else _TEXT_3))
+            item.setToolTip(f"{row['label']} · {status}{active}\n{row.get('credential_style', '')}".strip())
+            item.setTextAlignment(Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop)
             self.cli_agent_list.addItem(item)
+            # Only installed agents get a tile (plus the saved one, so it stays selectable).
+            item.setHidden(not row.get("installed") and row.get("id") != selected)
         self.cli_agent_list.blockSignals(False)
+        self.cli_agent_list.fit()
         self._select_cli_agent(selected, preserve_path_override=True)
         if scanned:
-            self.cli_scan_status.setText(f"{found} of {len(self._cli_scan_rows)} agents found")
+            missing = len(self._cli_scan_rows) - found
+            self.cli_scan_status.setText(
+                f"{found} installed · {missing} more supported" if found
+                else "None found — install an agent CLI, or set its path under Advanced."
+            )
         else:
-            self.cli_scan_status.setText("Open this tab or click Scan to detect installed CLIs.")
+            self.cli_scan_status.setText("Scanning when this tab opens…")
         self.cli_scan_status.setStyleSheet(f"color: {_TEXT_3}; background: transparent;")
         self._update_cli_agent_detail()
 
@@ -1332,11 +1531,17 @@ class SettingsDialog(QDialog):
         self._fill_cli_agent_list(selected, scanned=False)
 
     def _on_cli_agent_selected(self, _current, _previous=None):
-        self.cli_test_status.setText("")
-        self.cli_auth_status.setText("Auth not checked")
-        self.cli_auth_status.setStyleSheet(f"color: {_TEXT_3}; background: transparent;")
-        if hasattr(self, "cli_model_group"):
-            self.cli_model_group.setVisible(False)
+        agent_id = self._selected_cli_agent_id()
+        if agent_id != self._cli_detail_agent:
+            # A list rebuild (scan) re-selects the same agent — keep its state.
+            self._cli_detail_agent = agent_id
+            self._cli_auth_state = None
+            self.cli_test_status.setText("Runs the CLI's version check.")
+            self._set_status(self.cli_auth_status, "Not checked yet", _TEXT_3)
+            self.cli_model_picker.setModels([], keep_current=False)
+            self.cli_model_picker.setCurrentText("")
+            if self._cli_agent_ready():
+                QTimer.singleShot(0, self._check_cli_auth)
         if not getattr(self, "_syncing_cli_selection", False):
             self._cli_path_is_override = False
         self._update_cli_agent_detail()
@@ -1351,7 +1556,7 @@ class SettingsDialog(QDialog):
             return
 
         self.cli_agent_name.setText(row["label"])
-        self.cli_agent_credentials.setText(row.get("credential_style", ""))
+        self.cli_agent_name.setToolTip(row.get("credential_style", ""))
         warning = row.get("warning", "")
         self.cli_agent_warning.setText(warning)
         self.cli_agent_warning.setVisible(bool(warning))
@@ -1376,92 +1581,116 @@ class SettingsDialog(QDialog):
         has_path = bool(self.cli_path_edit.text().strip())
         self.cli_test_btn.setEnabled(installed or has_path)
         self.cli_auth_btn.setEnabled(installed or has_path)
-        self.cli_use_btn.setEnabled(True)
+        self._refresh_cli_steps()
 
-    def _selected_cli_backend(self):
+    def _selected_cli_backend_factory(self):
+        """Return a thread-safe ``make()`` that builds the selected CLI backend.
+
+        Widget state and settings are read here on the UI thread; ``make()``
+        only resolves the binary (may spawn processes) and needs no Qt/QGIS.
+        """
         from ..backends.cli_backend import _resolve_binary, CliToolBackend
 
         agent_id = self._selected_cli_agent_id()
         path = self.cli_path_edit.text().strip() if self._cli_path_is_override else ""
-        binary = _resolve_binary(agent_id, path)
-        if not binary:
-            return None
-        backend = CliToolBackend(self.config, None, None)
-        backend.tool = agent_id
-        backend.binary = binary
-        return backend
+        settings = self.config.all()  # plain dict: no QSettings access off-thread
+
+        def make():
+            binary = _resolve_binary(agent_id, path)
+            if not binary:
+                return None
+            backend = CliToolBackend(settings, None, None)
+            backend.tool = agent_id
+            backend.binary = binary
+            return backend
+
+        return make
 
     def _test_cli_agent(self):
-        backend = self._selected_cli_backend()
-        if backend is None:
-            self.cli_test_status.setText("Binary not found")
-            self.cli_test_status.setStyleSheet(f"color: {_DANGER}; background: transparent;")
-            return
+        make = self._selected_cli_backend_factory()
 
-        self.cli_test_status.setText("Testing…")
-        self.cli_test_status.setStyleSheet(f"color: {_TEXT_3}; background: transparent;")
-        ok, detail = backend.test_cli()
-        color = _SUCCESS if ok else _DANGER
-        prefix = "OK" if ok else "Failed"
-        self.cli_test_status.setText(f"{prefix} · {detail}")
-        self.cli_test_status.setStyleSheet(f"color: {color}; background: transparent;")
+        def work():
+            backend = make()
+            return None if backend is None else backend.test_cli()
+
+        def done(result, err):
+            if err:
+                ok, detail = False, err
+            elif result is None:
+                ok, detail = False, "Binary not found"
+            else:
+                ok, detail = result
+            color = _SUCCESS if ok else _DANGER
+            text = f"{'OK' if ok else 'Failed'} · {detail}" if result else detail
+            self._set_status(self.cli_test_status, text, color)
+
+        self._run_busy(
+            work, done, self.cli_test_status, "Testing…",
+            [self.cli_test_btn, self.cli_auth_btn, self.cli_scan_btn, self.cli_rescan_btn],
+        )
 
     def _check_cli_auth(self):
-        backend = self._selected_cli_backend()
-        if backend is None:
-            self.cli_auth_status.setText("Binary not found")
-            self.cli_auth_status.setStyleSheet(f"color: {_DANGER}; background: transparent;")
-            if hasattr(self, "cli_model_group"):
-                self.cli_model_group.setVisible(False)
-            return
+        make = self._selected_cli_backend_factory()
 
-        self.cli_auth_status.setText("Checking…")
-        self.cli_auth_status.setStyleSheet(f"color: {_TEXT_3}; background: transparent;")
-        state, detail = backend.auth_status()
-        if state == "ready":
-            color = _SUCCESS
-            text = f"Ready · {detail}"
-            self.cli_auth_status.setText(text)
-            self.cli_auth_status.setStyleSheet(f"color: {color}; background: transparent;")
-            if hasattr(self, "cli_model_group"):
+        def work():
+            backend = make()
+            if backend is None:
+                return None
+            state, detail = backend.auth_status()
+            try:
+                models = backend.list_models()
+            except Exception:  # noqa: BLE001 — a model list is optional
                 models = []
-                try:
-                    models = backend.list_models()
-                except Exception:
-                    models = []
-                saved = self.config.get("cli_model") or ""
-                self.cli_model_picker.setActive(saved)
-                self._fill_models(self.cli_model_picker, models)
-                if not self.cli_model_picker.currentText():
-                    if saved:
-                        self.cli_model_picker.setCurrentText(saved)
-                    elif models:
-                        self.cli_model_picker.setCurrentText(models[0])
-                self.cli_model_group.setVisible(True)
+            return state, detail, models
+
+        def done(result, err):
+            if err:
+                result = ("unknown", err, [])
+            if result is None:
+                result = ("missing", "Binary not found", [])
+            self._apply_cli_auth(*result)
+
+        self._run_busy(
+            work, done, self.cli_auth_status, "Checking auth…",
+            [self.cli_auth_btn, self.cli_test_btn, self.cli_scan_btn, self.cli_rescan_btn],
+        )
+
+    def _apply_cli_auth(self, state, detail, models):
+        self._cli_auth_state = state
+        n = len(models)
+        loaded = f" · {n} model{'s' if n != 1 else ''}" if n else ""
+        if state == "ready":
+            self._set_status(self.cli_auth_status, f"Signed in · {detail}{loaded}", _SUCCESS)
+        elif state == "login_required":
+            self._set_status(
+                self.cli_auth_status,
+                f"Not signed in · {detail}. Run the CLI in a terminal to log in, then check again.",
+                _WARN,
+            )
+        elif state == "missing":
+            self._set_status(self.cli_auth_status, detail, _DANGER)
         else:
-            if state == "login_required":
-                color = _WARN
-                text = f"Login required · {detail}"
-            elif state == "missing":
-                color = _DANGER
-                text = detail
-            else:
-                color = _TEXT_3
-                text = f"Auth check unavailable · {detail}"
-            self.cli_auth_status.setText(text)
-            self.cli_auth_status.setStyleSheet(f"color: {color}; background: transparent;")
-            if hasattr(self, "cli_model_group"):
-                self.cli_model_group.setVisible(False)
+            self._set_status(
+                self.cli_auth_status,
+                f"This CLI can't report sign-in status — continue if it works in a terminal{loaded}",
+                _TEXT_3,
+            )
+        saved = self.config.get("cli_model") or ""
+        self.cli_model_picker.setActive(saved)
+        self._fill_models(self.cli_model_picker, models)
+        if not self.cli_model_picker.currentText().strip():
+            same_agent = self._selected_cli_agent_id() == (self.config.get("cli_tool") or "")
+            if saved and same_agent:
+                self.cli_model_picker.setCurrentText(saved)
+            elif models:
+                self.cli_model_picker.setCurrentText(models[0])
+        self._refresh_cli_steps()
         self._update_connection_tab_labels()
 
     def _use_cli_agent(self):
-        self.connection_tabs.setCurrentIndex(2)
+        self._cli_used_agent = self._selected_cli_agent_id()
         self._set_active_connection_mode(config_mod.MODE_CLI_TOOL)
-        agent_id = self._selected_cli_agent_id()
-        row = self._cli_scan_row(agent_id)
-        label = row.get("label", agent_id) if row else agent_id
-        self.cli_test_status.setText(f"Using {label}")
-        self.cli_test_status.setStyleSheet(f"color: {_SUCCESS}; background: transparent;")
+        self._refresh_cli_steps()
         self._update_connection_tab_labels()
 
     # ── load / save ───────────────────────────────────────────────────────────
@@ -1472,7 +1701,7 @@ class SettingsDialog(QDialog):
         self._pending_connection_mode = mode
         index = next((i for i, (_, m) in enumerate(_MODE_LABELS) if m == mode), 0)
         self.connection_tabs.setCurrentIndex(index)
-        self.stack.setCurrentIndex(index)
+        self.stack_set(index)
 
         pid = self.config.get("provider")
         idx = self.provider_combo.findData(pid)
@@ -1523,10 +1752,19 @@ class SettingsDialog(QDialog):
         cli_model = self.config.get("cli_model") or ""
         self.cli_model_picker.setCurrentText(cli_model)
         self.cli_model_picker.setActive(cli_model)
-        if cli_model:
-            self.cli_model_group.setVisible(True)
+        if mode == config_mod.MODE_CLI_TOOL:
+            # Set up before: unlock the steps; Check sign-in refreshes models.
+            self._cli_used_agent = self.config.get("cli_tool") or "claude"
+            self._cli_auth_state = "saved"
+            self._set_status(
+                self.cli_auth_status, "Set up previously — check again to refresh the model list.", _TEXT_3,
+            )
+        self._refresh_cli_steps()
 
         self._update_connection_tab_labels()
+        self._loaded = True
+        if index == 2:
+            QTimer.singleShot(0, self._scan_cli_agents)
 
     def _save_and_accept(self):
         mode = self._current_mode()
@@ -1579,5 +1817,8 @@ class SettingsDialog(QDialog):
             "mcp_enabled",
             self.mcp_enabled_check.isChecked(),
         )
+        font_scale = self.font_scale_combo.currentData()
+        self.config.set("font_scale", font_scale)
+        set_font_scale(font_scale)
 
         self.accept()

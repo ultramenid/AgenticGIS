@@ -17,19 +17,21 @@ from qgis.PyQt.QtCore import QEvent, Qt
 from qgis.PyQt.QtGui import QCursor
 from qgis.PyQt.QtWidgets import QFileDialog, QMessageBox, QToolButton
 
-_BTN_STYLE = """
-    QToolButton {
-        background-color: #1e1e1e;
-        color: #a0a0a0;
-        border: 1px solid #2e2e2e;
-        border-radius: 4px;
+from .theme import DOCK_BORDER, DOCK_SURFACE_2, DOCK_TEXT, DOCK_TEXT_2, DOCK_TEXT_4
+
+_BTN_STYLE = f"""
+    QToolButton {{
+        background-color: {DOCK_SURFACE_2};
+        color: {DOCK_TEXT_2};
+        border: 1px solid {DOCK_BORDER};
+        border-radius: 6px;
         font-size: 13px;
         padding: 0px;
-    }
-    QToolButton:hover {
-        color: #ececec;
-        border-color: #3a3a3a;
-    }
+    }}
+    QToolButton:hover {{
+        color: {DOCK_TEXT};
+        border-color: {DOCK_TEXT_4};
+    }}
 """
 
 

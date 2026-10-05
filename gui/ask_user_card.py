@@ -20,26 +20,28 @@ from qgis.PyQt.QtWidgets import (
     QSizePolicy,
     QVBoxLayout,
 )
-
-_SURFACE = "#1f1f1d"
-_SURFACE_2 = "#262521"
-_SURFACE_HOV = "#2d2b25"
-_INPUT_BG = "#191918"
-_BORDER = "#4a4234"
-_BORDER_SOFT = "#343129"
-_TEXT = "#eeeeea"
-_TEXT_2 = "#bbb7ad"
-_TEXT_3 = "#7d786d"
-_ACCENT = "#e7dfcf"
-_ACCENT_HOV = "#f2eadb"
-_WARN = "#d99a3c"
+from .theme import (
+    fs,
+    ui_font,
+    DOCK_SURFACE as _SURFACE,
+    DOCK_SURFACE_2 as _SURFACE_2,
+    DOCK_BORDER as _SURFACE_HOV,
+    DOCK_CANVAS as _INPUT_BG,
+    DOCK_BORDER as _BORDER,
+    DOCK_BORDER_SOFT as _BORDER_SOFT,
+    DOCK_TEXT as _TEXT,
+    DOCK_TEXT_2 as _TEXT_2,
+    DOCK_TEXT_3 as _TEXT_3,
+    DOCK_ACCENT as _ACCENT,
+    DOCK_ACCENT_HOV as _ACCENT_HOV,
+    DOCK_BLUE as _BLUE,
+    DOCK_WARN as _WARN,
+)
 
 
 def _mono(size, weight=QFont.Weight.Normal):
-    font = QFont("JetBrains Mono", size)
-    font.setStyleHint(QFont.StyleHint.Monospace)
-    font.setWeight(weight)
-    return font
+    """Interface font (historical name — the card used to be monospace)."""
+    return ui_font(size + 2, weight)
 
 
 class _OptionRow(QFrame):
@@ -69,7 +71,7 @@ class _OptionRow(QFrame):
         title.setWordWrap(True)
         title.setMinimumWidth(0)
         title.setStyleSheet(
-            f"color:{_TEXT}; background:transparent; border:none; font-size:12px;"
+            f"color:{_TEXT}; background:transparent; border:none; font-size:{fs(12)}px;"
         )
         layout.addWidget(title)
 
@@ -82,7 +84,7 @@ class _OptionRow(QFrame):
             desc.setMinimumWidth(0)
             desc.setStyleSheet(
                 f"color:{_TEXT_2}; background:transparent; border:none; "
-                f"font-size:11px; line-height:1.35;"
+                f"font-size:{fs(11)}px; line-height:1.35;"
             )
             layout.addWidget(desc)
         else:
@@ -113,7 +115,7 @@ class _OptionRow(QFrame):
 
     def _apply_style(self):
         bg = _SURFACE_HOV if self._hovered else _SURFACE_2
-        border = _WARN if self.hasFocus() else _BORDER_SOFT
+        border = _BLUE if self.hasFocus() else _BORDER
         if self._pressed:
             bg = _ACCENT
             border = _ACCENT
@@ -121,7 +123,7 @@ class _OptionRow(QFrame):
             QFrame#AskUserOptionRow {{
                 background-color: {bg};
                 border: 1px solid {border};
-                border-radius: 7px;
+                border-radius: 8px;
             }}
         """)
 
@@ -193,7 +195,7 @@ class AskUserCard(QFrame):
             QFrame#AskUserCard {{
                 background-color: {_SURFACE};
                 border: 1px solid {_BORDER};
-                border-radius: 8px;
+                border-radius: 14px;
             }}
         """)
         self._options = list(options)
@@ -206,17 +208,14 @@ class AskUserCard(QFrame):
         header_row.setContentsMargins(0, 0, 0, 0)
         header_row.setSpacing(8)
 
-        marker = QLabel("")
-        marker.setFixedSize(9, 9)
-        marker.setStyleSheet(
-            f"background:{_WARN}; border:1px solid {_WARN}; border-radius:4px;"
-        )
+        marker = QLabel("●")
+        marker.setStyleSheet(f"color:{_WARN}; background:transparent; border:none; font-size:{fs(10)}px;")
         header_row.addWidget(marker, 0, Qt.AlignmentFlag.AlignVCenter)
 
         header = QLabel("Action required")
         header.setFont(_mono(10, QFont.Weight.DemiBold))
         header.setStyleSheet(
-            f"color:{_TEXT_2}; font-size:11px;"
+            f"color:{_TEXT_2}; font-size:{fs(11)}px;"
             f"background:transparent; border:none;"
         )
         header_row.addWidget(header)
@@ -230,7 +229,7 @@ class AskUserCard(QFrame):
         q.setMinimumWidth(0)
         q.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         q.setStyleSheet(
-            f"color:{_TEXT}; font-size:13px; line-height:1.45; "
+            f"color:{_TEXT}; font-size:{fs(13)}px; line-height:1.45; "
             f"background:transparent; border:none;"
         )
         outer.addWidget(q)
@@ -258,14 +257,13 @@ class AskUserCard(QFrame):
                     background-color: {_INPUT_BG};
                     color: {_TEXT};
                     border: 1px solid {_BORDER_SOFT};
-                    border-radius: 7px;
+                    border-radius: 8px;
                     padding: 7px 10px;
-                    font-size: 12px;
-                    selection-background-color: {_TEXT};
-                    selection-color: {_SURFACE};
+                    font-size: {fs(13)}px;
+                    selection-background-color: {_BLUE};
                 }}
                 QLineEdit:focus {{
-                    border-color: {_WARN};
+                    border-color: {_BLUE};
                 }}
             """)
             self._free_text.returnPressed.connect(self._on_free_text)
@@ -282,9 +280,9 @@ class AskUserCard(QFrame):
                     background-color: {_ACCENT};
                     color: {_SURFACE};
                     border: none;
-                    border-radius: 7px;
+                    border-radius: 8px;
                     padding: 7px 12px;
-                    font-size: 12px;
+                    font-size: {fs(12)}px;
                     font-weight: 600;
                 }}
                 QPushButton:hover {{ background-color: {_ACCENT_HOV}; }}
@@ -318,7 +316,7 @@ class AskUserCard(QFrame):
                 border: 1px solid {_BORDER_SOFT};
                 border-radius: 6px;
                 padding: 5px 12px;
-                font-size: 11px;
+                font-size: {fs(11)}px;
             }}
             QPushButton:hover {{
                 background-color: {_SURFACE_2};

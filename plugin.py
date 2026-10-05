@@ -226,6 +226,7 @@ class AgenticGisPlugin:
         # message is fast.
         if self._dock is not None:
             try:
+                self._dock.refresh_composer()
                 self._dock._maybe_prewarm()
             except Exception:  # nosec B110
                 pass

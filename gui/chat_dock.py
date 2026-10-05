@@ -11,19 +11,16 @@ import sys
 import threading
 import time
 from collections import deque
-from datetime import datetime
 
 from qgis.gui import QgsDockWidget
 from qgis.PyQt.QtCore import Qt, QEvent, QThread, pyqtSignal, QTimer
 from qgis.PyQt.QtGui import QFont, QTextCursor
 from qgis.PyQt.QtWidgets import (
-    QAction,
     QDialog,
     QFrame,
     QHBoxLayout,
     QLabel,
     QLineEdit,
-    QMenu,
     QPushButton,
     QScrollArea,
     QSizePolicy,
@@ -32,6 +29,8 @@ from qgis.PyQt.QtWidgets import (
     QWidget,
 )
 
+from .. import config as config_mod
+from ..backends import providers
 from ..backends.base import AgentEvent, EventType, should_compact
 from ..core.dev_logging import log_ttft_event, new_trace_id
 from ..core.input_metrics import input_box_metrics
@@ -45,8 +44,14 @@ from .message_bubble import MessageContainer
 from .stats_widget import StatsWidget
 from .typing_indicator import TypingIndicator
 from .ask_user_card import AskUserCard
+from .formatting import format_elapsed
+from .session_popup import SessionPopup
 from .theme import (
+    fs,
+    ui_font,
+    sans_family,
     DOCK_CANVAS as _CANVAS,
+    DOCK_BLUE as _BLUE,
     DOCK_SURFACE as _SURFACE,
     DOCK_SURFACE_2 as _SURFACE_2,
     DOCK_BORDER as _BORDER,
@@ -263,6 +268,7 @@ class ChatDock(QgsDockWidget):
         self._last_stream_render_at = 0.0
         self._ttft_trace_id = None
         self._ttft_started_at = None
+        self._turn_started_at = None
         self._ttft_first_ui_render_logged = False
         self._thinking_text = ""           # accumulated thinking/progress text
         self._thinking_started = False     # whether add_thinking_block was called this turn
@@ -286,12 +292,13 @@ class ChatDock(QgsDockWidget):
         self._stream_render_timer = QTimer(self)
         self._stream_render_timer.setSingleShot(True)
         self._stream_render_timer.timeout.connect(self._flush_stream_render)
-        self._set_status("Ready", _SUCCESS, icon="✓")
+        self._set_status("Ready", _SUCCESS, icon="●")
         self._ask_user_signal.connect(self._show_ask_user, QUEUED_CONNECTION)
         if self._toolkit is not None:
             self._toolkit.set_ask_user_emitter(
                 self._emit_ask_user_threadsafe
             )
+        self.refresh_composer()
         self._restore_active_session()
 
     # ------------------------------------------------------------------ #
@@ -311,37 +318,36 @@ class ChatDock(QgsDockWidget):
 
         # -- Top bar (slim, no chrome) ----------------------------------- #
         top = QHBoxLayout()
-        top.setContentsMargins(20, 14, 16, 14)
-        top.setSpacing(8)
+        top.setContentsMargins(16, 10, 10, 10)
+        top.setSpacing(4)
 
         self.status = QLabel(
-            f"<span style='color:{_SUCCESS};font-size:11px;'>✓</span> "
-            f"<span style='color:{_TEXT_3}; font-size:11px;'>Ready</span>"
+            f"<span style='color:{_TEXT_3}; font-size:{fs(12)}px;'>Ready</span>"
         )
         self.status.setTextFormat(Qt.TextFormat.RichText)
         self.status.setStyleSheet("background: transparent; padding-right: 4px;")
+        self.status.setFont(ui_font(13))
         top.addWidget(self.status)
 
         top.addStretch(1)
 
-        for label, tip, width in (
-            ("Setting", "Settings", 58),
-            ("▦ Session", "Chat sessions", 76),
+        for label, tip in (
+            ("Settings", "Settings"),
+            ("Sessions ⌄", "Chat sessions"),
         ):
             btn = QPushButton(label)
             btn.setToolTip(tip)
-            btn.setFixedSize(width, 28)
+            btn.setFixedHeight(28)
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn.setFont(ui_font(12))
             btn.setStyleSheet(f"""
                 QPushButton {{
-                    font-size: 10px;
-                    font-weight: 500;
-                    letter-spacing: 0;
+                    font-size: {fs(12)}px;
                     border: none;
                     border-radius: 6px;
                     background: transparent;
                     color: {_TEXT_3};
-                    padding: 0px;
-                    text-align: center;
+                    padding: 0px 10px;
                 }}
                 QPushButton:hover {{
                     background-color: {_SURFACE_2};
@@ -353,41 +359,14 @@ class ChatDock(QgsDockWidget):
         self._settings_btn = top.itemAt(top.count() - 2).widget()
         self._session_btn = top.itemAt(top.count() - 1).widget()
         self._settings_btn.clicked.connect(self._open_settings)
-        self._session_menu = QMenu(self)
-        self._session_menu.setStyleSheet(f"""
-            QMenu {{
-                background-color: {_SURFACE};
-                color: {_TEXT};
-                border: 1px solid {_BORDER};
-                border-radius: 6px;
-                padding: 4px;
-                font-size: 11px;
-            }}
-            QMenu::item {{
-                padding: 6px 18px 6px 10px;
-                border-radius: 4px;
-            }}
-            QMenu::item:selected {{
-                background-color: {_SURFACE_2};
-            }}
-        """)
-        for text, handler in (
-            ("New session", self._new_session_from_menu),
-            ("Session list", self._show_session_list),
-            ("Rename current", self._rename_current_session),
-            ("Delete current", self._delete_current_session),
-        ):
-            action = QAction(text, self)
-            action.triggered.connect(handler)
-            self._session_menu.addAction(action)
-        self._session_btn.clicked.connect(self._show_session_menu)
+        self._session_btn.clicked.connect(self._show_session_popup)
         layout.addLayout(top)
 
         # -- Hairline divider -------------------------------------------- #
         divider = QFrame()
         divider.setFrameShape(QFrame.Shape.HLine)
         divider.setFixedHeight(1)
-        divider.setStyleSheet(f"background-color: {_BORDER}; border: none;")
+        divider.setStyleSheet(f"background-color: {_BORDER_SOFT}; border: none;")
         layout.addWidget(divider)
         self._top_bar_divider = divider
 
@@ -421,8 +400,8 @@ class ChatDock(QgsDockWidget):
         self.transcript_widget = QWidget()
         self.transcript_widget.setStyleSheet(f"background-color: {_CANVAS};")
         self.transcript_layout = QVBoxLayout(self.transcript_widget)
-        self.transcript_layout.setContentsMargins(0, 12, 0, 12)
-        self.transcript_layout.setSpacing(12)
+        self.transcript_layout.setContentsMargins(0, 16, 0, 16)
+        self.transcript_layout.setSpacing(16)
         self.transcript_layout.addStretch(1)
 
         self.scroll.setWidget(self.transcript_widget)
@@ -432,43 +411,44 @@ class ChatDock(QgsDockWidget):
         # forcing horizontal overflow and unwanted sideways scrolling.
         self.scroll.viewport().installEventFilter(self)
 
-        # -- Hairline divider above input -------------------------------- #
-        divider2 = QFrame()
-        divider2.setFrameShape(QFrame.Shape.HLine)
-        divider2.setFixedHeight(1)
-        divider2.setStyleSheet(f"background-color: {_BORDER}; border: none;")
-        layout.addWidget(divider2)
-
-        # -- Input bar --------------------------------------------------- #
+        # -- Composer card: input on top, chips + send/stop underneath ------ #
         input_wrap = QWidget()
         self._input_wrap = input_wrap  # kept for layout lookups in _show_ask_user
         input_wrap.setStyleSheet(f"background-color: {_CANVAS};")
         input_bar = QVBoxLayout(input_wrap)
-        input_bar.setContentsMargins(8, 8, 8, 8)
+        input_bar.setContentsMargins(10, 6, 10, 10)
         input_bar.setSpacing(0)
 
-        # Input field — action button lives inside the same frame
-        input_frame = QFrame()
-        self._input_frame = input_frame
-        self._input_min_h = 28
-        self._input_max_h = 104
-        self._input_frame_min_h = 38
-        self._input_frame_max_h = 118
-        input_frame.setMinimumHeight(self._input_frame_min_h)
-        input_frame.setMaximumHeight(self._input_frame_max_h)
-        input_frame.setStyleSheet(f"""
-            QFrame {{
+        composer = QFrame()
+        composer.setObjectName("Composer")
+        composer.setStyleSheet(f"""
+            QFrame#Composer {{
                 background-color: {_SURFACE};
                 border: 1px solid {_BORDER};
-                border-radius: 6px;
+                border-radius: 12px;
             }}
         """)
+        composer_layout = QVBoxLayout(composer)
+        composer_layout.setContentsMargins(12, 8, 8, 8)
+        composer_layout.setSpacing(6)
+
+        # Input field — sized by _resize_input via input_box_metrics
+        input_frame = QFrame()
+        input_frame.setObjectName("ComposerInput")
+        input_frame.setStyleSheet("QFrame#ComposerInput { background: transparent; border: none; }")
+        self._input_frame = input_frame
+        self._input_min_h = 28
+        self._input_max_h = 140
+        self._input_frame_min_h = 30
+        self._input_frame_max_h = 150
+        input_frame.setMinimumHeight(self._input_frame_min_h)
+        input_frame.setMaximumHeight(self._input_frame_max_h)
         field_row = QHBoxLayout(input_frame)
-        field_row.setContentsMargins(10, 0, 4, 0)
+        field_row.setContentsMargins(0, 0, 0, 0)
         field_row.setSpacing(0)
 
         self.input = QTextEdit()
-        self.input.setPlaceholderText("Message AgenticGIS…")
+        self.input.setPlaceholderText("Ask AgenticGIS…  (↑ for history)")
         self.input.setAcceptRichText(False)
         self.input.setTabChangesFocus(True)
         self.input.setLineWrapMode(QTextEdit.LineWrapMode.WidgetWidth)
@@ -476,14 +456,13 @@ class ChatDock(QgsDockWidget):
         self.input.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.input.setFixedHeight(self._input_min_h)
         self.input.document().setDocumentMargin(0)
-        mono_font = QFont("JetBrains Mono")
-        mono_font.setStyleHint(QFont.StyleHint.Monospace)
-        mono_font.setPointSize(10)
-        self.input.setFont(mono_font)
+        input_font = QFont()
+        input_font.setPixelSize(fs(13))
+        self.input.setFont(input_font)
         self.input.setStyleSheet(f"""
             QTextEdit {{
-                font-family: 'JetBrains Mono', 'Fira Code', monospace;
-                font-size: 12px;
+                font-family: {sans_family()};
+                font-size: {fs(13)}px;
                 border: none;
                 background: transparent;
                 color: {_TEXT};
@@ -504,49 +483,100 @@ class ChatDock(QgsDockWidget):
         self.input.textChanged.connect(self._resize_input)
         self._resize_input()
         field_row.addWidget(self.input, 1, Qt.AlignmentFlag.AlignVCenter)
+        composer_layout.addWidget(input_frame)
 
-        # Send button — inside the field frame, right edge
-        self.send_btn = QPushButton("→")
+        chip_row = QHBoxLayout()
+        chip_row.setContentsMargins(0, 0, 0, 0)
+        chip_row.setSpacing(6)
+        self._conn_chip = self._make_chip()
+        self._model_chip = self._make_chip()
+        chip_row.addWidget(self._conn_chip)
+        chip_row.addWidget(self._model_chip)
+        chip_row.addStretch(1)
+
+        # Send / Stop — round button at the right of the chip row
+        self.send_btn = QPushButton("↑")
         self.send_btn.setToolTip("Send (Enter) · New line (Shift+Enter)")
         self.send_btn.setFixedSize(28, 28)
+        self.send_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.send_btn.setStyleSheet(f"""
             QPushButton {{
-                font-size: 14px; font-weight: 600;
-                border: none; border-radius: 4px;
-                background: transparent; color: {_ACCENT};
+                font-size: {fs(15)}px; font-weight: 700;
+                border: none; border-radius: 14px;
+                background: {_ACCENT}; color: {_CANVAS};
             }}
-            QPushButton:hover {{ background-color: {_BORDER}; color: {_ACCENT_HOV}; }}
-            QPushButton:pressed {{ color: {_ACCENT_DIM}; }}
-            QPushButton:disabled {{ color: {_TEXT_3}; }}
+            QPushButton:hover {{ background-color: {_ACCENT_HOV}; }}
+            QPushButton:pressed {{ background-color: {_ACCENT_DIM}; }}
+            QPushButton:disabled {{ background-color: {_BORDER}; color: {_TEXT_3}; }}
         """)
         self.send_btn.clicked.connect(self._on_send)
-        field_row.addWidget(self.send_btn, 0, Qt.AlignmentFlag.AlignVCenter)
+        chip_row.addWidget(self.send_btn, 0, Qt.AlignmentFlag.AlignVCenter)
 
-        # Stop button — inside the field frame, replaces send when running
         self.stop_btn = QPushButton("■")
         self.stop_btn.setToolTip("Stop (Esc)")
         self.stop_btn.setFixedSize(28, 28)
+        self.stop_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.stop_btn.setStyleSheet(f"""
             QPushButton {{
-                font-size: 10px;
-                border: none; border-radius: 4px;
-                background: transparent; color: {_DANGER};
+                font-size: {fs(10)}px;
+                border: 1px solid {_BORDER}; border-radius: 14px;
+                background: {_SURFACE_2}; color: {_DANGER};
             }}
-            QPushButton:hover {{ background-color: {_BORDER}; }}
+            QPushButton:hover {{ border-color: {_DANGER}; }}
             QPushButton:disabled {{ color: {_TEXT_3}; }}
         """)
         self.stop_btn.clicked.connect(self._on_stop)
         self.stop_btn.setEnabled(False)
         self.stop_btn.setVisible(False)
-        field_row.addWidget(self.stop_btn, 0, Qt.AlignmentFlag.AlignVCenter)
+        chip_row.addWidget(self.stop_btn, 0, Qt.AlignmentFlag.AlignVCenter)
+        composer_layout.addLayout(chip_row)
 
-        input_bar.addWidget(input_frame)
+        input_bar.addWidget(composer)
         layout.addWidget(input_wrap)
 
         self.setWidget(container)
 
         # Install event filter on the input widget so Enter-to-send works
         self.input.installEventFilter(self)
+
+    def _make_chip(self):
+        chip = QPushButton("")
+        chip.setCursor(Qt.CursorShape.PointingHandCursor)
+        # Qt ignores border-radius entirely if it exceeds half the height, so pin both.
+        h = fs(11) + 10
+        chip.setFixedHeight(h)
+        chip.setStyleSheet(f"""
+            QPushButton {{
+                color: {_TEXT_2}; background: {_SURFACE_2};
+                border: 1px solid {_BORDER}; border-radius: {h // 2 - 1}px;
+                padding: 0px 9px; font-size: {fs(11)}px;
+            }}
+            QPushButton:hover {{ color: {_TEXT}; border-color: {_TEXT_3}; }}
+        """)
+        chip.clicked.connect(self._open_settings)
+        return chip
+
+    @staticmethod
+    def _connection_labels():
+        """``(connection, model)`` from the saved settings, for chips and footers."""
+        try:
+            cfg = config_mod.Config()
+            mode = cfg.get("connection_mode")
+            if mode in (config_mod.MODE_CLI_TOOL, config_mod.MODE_SUBSCRIPTION):
+                return f"CLI · {cfg.get('cli_tool') or 'claude'}", cfg.get("cli_model") or ""
+            if mode == config_mod.MODE_CUSTOM:
+                return "Custom endpoint", cfg.get("custom_model") or cfg.get("model") or ""
+            provider = providers.get_provider(cfg.get("provider")) or {}
+            return provider.get("label") or "API", cfg.get("model") or ""
+        except Exception:
+            return "Not configured", ""
+
+    def refresh_composer(self):
+        """Re-read the connection settings into the composer chips."""
+        conn, model = self._connection_labels()
+        for chip, text in ((self._conn_chip, conn), (self._model_chip, model or "Default model")):
+            chip.setToolTip(f"{text} — click to change in Settings")
+            chip.setText(chip.fontMetrics().elidedText(text, Qt.TextElideMode.ElideRight, 150))
 
     def _maybe_prewarm(self):
         """Fire prewarm in a daemon thread if the connection may have gone stale.
@@ -578,6 +608,7 @@ class ChatDock(QgsDockWidget):
 
     def showEvent(self, event):
         super().showEvent(event)
+        self.refresh_composer()
         self.input.setFocus(Qt.FocusReason.OtherFocusReason)
         self._maybe_prewarm()
         if self._show_startup_picker and not self._startup_picker_shown and self._session_store.had_existing_sessions:
@@ -605,7 +636,9 @@ class ChatDock(QgsDockWidget):
                 if event.isAutoRepeat():
                     return True
                 return self._handle_input_escape()
-            if event.key() in (Qt.Key.Key_Up, Qt.Key.Key_Down) and event.modifiers() == Qt.KeyboardModifier.NoModifier:
+            # macOS flags arrow keys with KeypadModifier, so ignore it when checking "no modifier".
+            mods = event.modifiers() & ~Qt.KeyboardModifier.KeypadModifier
+            if event.key() in (Qt.Key.Key_Up, Qt.Key.Key_Down) and mods == Qt.KeyboardModifier.NoModifier:
                 if self._handle_prompt_history_key(event.key()):
                     return True
             if event.key() == Qt.Key.Key_V and bool(event.modifiers() & Qt.KeyboardModifier.ControlModifier):
@@ -838,12 +871,7 @@ class ChatDock(QgsDockWidget):
         container.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Maximum)
         vl = QVBoxLayout(container)
         vl.setContentsMargins(16, 0, 16, 0)
-        vl.setSpacing(3)
-        sender = QLabel("AgenticGIS")
-        sender.setStyleSheet(
-            f"color:{_TEXT_3}; font-size:10px; background:transparent; border:none;"
-        )
-        vl.addWidget(sender)
+        vl.setSpacing(0)
         turn = AgentTurnBubble()
         vl.addWidget(turn)
         self._add_widget(container)
@@ -899,11 +927,11 @@ class ChatDock(QgsDockWidget):
             turn_event.setdefault("files", []).append(dict(data or {}))
 
     def _add_compaction_notice(self):
-        w = QLabel("── history compacted ──")
+        w = QLabel("Earlier messages were summarised to save context")
         w.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        w.setFont(ui_font(11))
         w.setStyleSheet(
-            f"color:{_TEXT_4}; font-size:10px; font-family:'JetBrains Mono',monospace;"
-            f" padding:4px 0; background:transparent;"
+            f"color:{_TEXT_4}; font-size:{fs(11)}px; padding:4px 0; background:transparent;"
         )
         self._add_widget(w)
         self._record_transcript_event({"type": "compaction"})
@@ -917,6 +945,11 @@ class ChatDock(QgsDockWidget):
         self._restoring_transcript = True
         self._clear_live_ui()
         self._pending_restore_events = list(events or [])
+        # Up/Down recall this session's earlier prompts, also after a restart.
+        self._prompt_history = []
+        for event in self._pending_restore_events:
+            if isinstance(event, dict) and event.get("type") == "user":
+                self._remember_prompt(event.get("text", ""))
         self._restore_index = 0
         self._restore_transcript_batch()
 
@@ -985,6 +1018,8 @@ class ChatDock(QgsDockWidget):
             if widget is not None:
                 turn.add_visual(widget)
         turn.finalize()
+        if text:  # sessions saved before footers existed simply have no meta
+            turn.set_footer(event.get("model") or "", event.get("elapsed") or "")
 
     def _build_visual_widget(self, kind, data):
         if kind == "chart":
@@ -998,7 +1033,7 @@ class ChatDock(QgsDockWidget):
     # -- Typing indicator ----------------------------------------------- #
     def _show_typing(self):
         if self._typing_widget is None:
-            self._typing_widget = TypingIndicator("AgenticGIS")
+            self._typing_widget = TypingIndicator("Working")
             self._add_widget(self._typing_widget)
 
     def _hide_typing(self):
@@ -1041,10 +1076,11 @@ class ChatDock(QgsDockWidget):
         session_name = self._status_session_name or DEFAULT_SESSION_NAME
         try:
             self.status.setText(
-                f"<span style='color:{self._status_color};font-size:11px;'>{html.escape(mark)}</span> "
-                f"<span style='color:{_TEXT_3}; font-size:11px;'>{html.escape(status_text)}</span>"
-                f"<span style='color:{_TEXT_4}; font-size:11px;'> - </span>"
-                f"<span style='color:{_TEXT_2}; font-size:11px;'>{html.escape(session_name)}</span>"
+                f"<span style='color:{self._status_color};font-size:{fs(12)}px;'>{html.escape(mark)}</span>"
+                f"&nbsp;&nbsp;<span style='color:{_TEXT}; font-size:{fs(13)}px; font-weight:600;'>"
+                f"{html.escape(session_name)}</span>"
+                f"<span style='color:{_TEXT_4}; font-size:{fs(12)}px;'>&nbsp;&nbsp;·&nbsp;&nbsp;</span>"
+                f"<span style='color:{_TEXT_3}; font-size:{fs(12)}px;'>{html.escape(status_text)}</span>"
             )
         except RuntimeError:
             pass
@@ -1171,7 +1207,7 @@ class ChatDock(QgsDockWidget):
         if cancelled:
             self._set_status("Cancelled", _DANGER, icon="!")
         else:
-            self._set_status("Ready", _SUCCESS, icon="✓")
+            self._set_status("Ready", _SUCCESS, icon="●")
         if self._toolkit is not None:
             self._toolkit._resolve_ask_user({
                 "choice": payload.get("choice"),
@@ -1232,10 +1268,19 @@ class ChatDock(QgsDockWidget):
         super().resizeEvent(event)
 
     # ------------------------------------------------------------------ #
-    def _show_session_menu(self):
-        pos = self._session_btn.mapToGlobal(self._session_btn.rect().bottomRight())
-        pos.setX(pos.x() - self._session_menu.sizeHint().width())
-        self._session_menu.exec(pos)
+    def _show_session_popup(self):
+        popup = SessionPopup(
+            self._session_store.list_sessions(),
+            self._active_session_id,
+            on_open=self._switch_to_session,
+            on_new=self._new_session_from_menu,
+            on_rename=self._rename_session,
+            on_delete=self._delete_session,
+            format_size=self._format_session_size,
+            parent=self,
+        )
+        popup.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        popup.show_below(self._session_btn, max(260, min(380, self.width() - 16)))
 
     def _show_startup_session_picker(self):
         dialog = QDialog(self)
@@ -1253,15 +1298,15 @@ class ChatDock(QgsDockWidget):
         previous = QPushButton("Continue previous")
         sessions = QPushButton("Session list")
         new_session = QPushButton("New session")
-        for button in (previous, sessions, new_session):
-            button.setMinimumHeight(36)
+        for button, role in ((previous, "wide"), (sessions, "secondary"), (new_session, "secondary")):
+            button.setMinimumHeight(34)
             button.setCursor(Qt.CursorShape.PointingHandCursor)
-            button.setStyleSheet(self._session_dialog_button_style("wide"))
+            button.setStyleSheet(self._session_dialog_button_style(role))
             card_layout.addWidget(button)
 
         previous.clicked.connect(lambda: (dialog.accept(), self._switch_to_session(
             self._session_store.active_session()["id"])))
-        sessions.clicked.connect(lambda: (dialog.accept(), self._show_session_list()))
+        sessions.clicked.connect(lambda: (dialog.accept(), self._show_session_popup()))
         new_session.clicked.connect(lambda: (dialog.accept(), self._new_session_from_menu()))
         dialog.exec()
 
@@ -1284,7 +1329,7 @@ class ChatDock(QgsDockWidget):
             QFrame#SessionDialogCard {{
                 background-color: {_SURFACE};
                 border: 1px solid {_BORDER};
-                border-radius: 8px;
+                border-radius: 12px;
             }}
         """)
         layout = QVBoxLayout(card)
@@ -1294,13 +1339,9 @@ class ChatDock(QgsDockWidget):
         header_row = QHBoxLayout()
         header_row.setContentsMargins(0, 0, 0, 0)
         header_row.setSpacing(8)
-        marker = QLabel("")
-        marker.setFixedSize(9, 9)
-        marker.setStyleSheet(f"background:{_WARN}; border:1px solid {_WARN}; border-radius:4px;")
-        header_row.addWidget(marker, 0, Qt.AlignmentFlag.AlignVCenter)
         header = QLabel(title)
-        header.setFont(QFont("JetBrains Mono", 10, QFont.Weight.DemiBold))
-        header.setStyleSheet(f"color:{_TEXT_2}; font-size:11px;")
+        header.setFont(ui_font(14, QFont.Weight.DemiBold))
+        header.setStyleSheet(f"color:{_TEXT}; font-size:{fs(14)}px; font-weight:600;")
         header_row.addWidget(header)
         header_row.addStretch(1)
         layout.addLayout(header_row)
@@ -1308,8 +1349,8 @@ class ChatDock(QgsDockWidget):
         if subtitle:
             desc = QLabel(subtitle)
             desc.setWordWrap(True)
-            desc.setFont(QFont("JetBrains Mono", 10))
-            desc.setStyleSheet(f"color:{_TEXT_3}; font-size:11px; line-height:1.35;")
+            desc.setFont(ui_font(12))
+            desc.setStyleSheet(f"color:{_TEXT_3}; font-size:{fs(12)}px;")
             layout.addWidget(desc)
         return card, layout
 
@@ -1331,21 +1372,20 @@ class ChatDock(QgsDockWidget):
         field = QLineEdit(current or "")
         field.setObjectName("SessionNameField")
         field.setMinimumHeight(36)
-        field.setFont(QFont("JetBrains Mono", 10))
+        field.setFont(ui_font(13))
         field.setPlaceholderText(DEFAULT_SESSION_NAME)
         field.setStyleSheet(f"""
             QLineEdit {{
                 background-color: {_SURFACE_2};
                 color: {_TEXT};
                 border: 1px solid {_BORDER_SOFT};
-                border-radius: 7px;
-                padding: 7px 10px;
-                font-size: 12px;
-                selection-background-color: {_TEXT};
-                selection-color: {_SURFACE};
+                border-radius: 6px;
+                padding: 6px 10px;
+                font-size: {fs(13)}px;
+                selection-background-color: {_BLUE};
             }}
             QLineEdit:focus {{
-                border-color: {_WARN};
+                border-color: {_BLUE};
             }}
         """)
         card_layout.addWidget(field)
@@ -1401,11 +1441,11 @@ class ChatDock(QgsDockWidget):
         row_layout.setSpacing(3)
         title = QLabel(name)
         title.setWordWrap(True)
-        title.setFont(QFont("JetBrains Mono", 11, QFont.Weight.DemiBold))
-        title.setStyleSheet(f"color:{_TEXT}; font-size:12px;")
+        title.setFont(ui_font(13, QFont.Weight.DemiBold))
+        title.setStyleSheet(f"color:{_TEXT}; font-size:{fs(13)}px;")
         meta = QLabel("Deletion cannot be undone")
-        meta.setFont(QFont("JetBrains Mono", 10))
-        meta.setStyleSheet(f"color:{_DANGER}; font-size:10px;")
+        meta.setFont(ui_font(12))
+        meta.setStyleSheet(f"color:{_DANGER}; font-size:{fs(12)}px;")
         row_layout.addWidget(title)
         row_layout.addWidget(meta)
         card_layout.addWidget(row)
@@ -1440,44 +1480,39 @@ class ChatDock(QgsDockWidget):
 
     def _session_dialog_button_style(self, role="secondary"):
         if role == "danger":
-            bg = _SURFACE_2
-            hover = "#3a2424"
-            color = _DANGER
-            border = _BORDER_SOFT
+            bg = "#3a1f24"
+            hover = "#4a252c"
+            color = "#ffb3bc"
+            border = "#4a2a30"
         elif role == "wide":
-            bg = _SURFACE_2
-            hover = _BORDER
-            color = _TEXT
-            border = _BORDER_SOFT
+            bg = _ACCENT
+            hover = _ACCENT_HOV
+            color = _CANVAS
+            border = _ACCENT
         else:
-            bg = _SURFACE_2
-            hover = _BORDER
+            bg = "transparent"
+            hover = _SURFACE_2
             color = _TEXT_2
-            border = _BORDER_SOFT
+            border = _BORDER
         return f"""
             QPushButton {{
                 background: {bg};
                 color: {color};
                 border: 1px solid {border};
                 border-radius: 6px;
-                padding: 6px 10px;
-                font-size: 11px;
+                padding: 6px 12px;
+                font-size: {fs(12)}px;
                 font-weight: 500;
                 text-align: center;
             }}
             QPushButton:hover {{
                 background: {hover};
-                color: {_TEXT};
-            }}
-            QPushButton:pressed {{
-                background: {_ACCENT};
-                color: {_SURFACE};
             }}
         """
 
     def _session_row_style(self, active=False):
-        border = _WARN if active else _BORDER_SOFT
-        bg = _SURFACE_2 if active else "#202020"
+        border = _BORDER if active else _BORDER_SOFT
+        bg = _SURFACE_2 if active else _SURFACE
         return f"""
             QFrame#SessionListRow {{
                 background-color: {bg};
@@ -1511,88 +1546,7 @@ class ChatDock(QgsDockWidget):
             self._toolkit.reset_agent_state()
         self._switch_to_session(session["id"], save_current=False)
 
-    def _rename_current_session(self):
-        session = self._session_store.get_session(self._active_session_id)
-        if session is None:
-            return
-        name = self._prompt_session_name("Rename session", session.get("name", ""))
-        if name is None:
-            return
-        self._session_store.rename_session(self._active_session_id, name)
-        self._update_session_name_label()
-
-    def _delete_current_session(self):
-        self._delete_session(self._active_session_id)
-
-    def _show_session_list(self):
-        dialog = QDialog(self)
-        dialog.setWindowTitle("Sessions")
-        dialog.setModal(True)
-        dialog.setMinimumWidth(560)
-        dialog.setStyleSheet(self._session_dialog_style())
-        layout = QVBoxLayout(dialog)
-        layout.setContentsMargins(14, 14, 14, 14)
-        layout.setSpacing(0)
-
-        sessions = self._session_store.list_sessions()
-        card, card_layout = self._session_dialog_card(
-            "Sessions",
-            f"{len(sessions)} saved chats. Latest 20 are kept. Large sessions are highlighted.",
-        )
-        layout.addWidget(card)
-
-        for session in sessions:
-            active = session["id"] == self._active_session_id
-            row = QFrame(dialog)
-            row.setObjectName("SessionListRow")
-            row.setStyleSheet(self._session_row_style(active))
-            row_layout = QHBoxLayout(row)
-            row_layout.setContentsMargins(12, 9, 10, 9)
-            row_layout.setSpacing(8)
-
-            text_col = QVBoxLayout()
-            text_col.setContentsMargins(0, 0, 0, 0)
-            text_col.setSpacing(3)
-            name = QLabel(session.get("name", DEFAULT_SESSION_NAME))
-            name.setWordWrap(True)
-            name.setFont(QFont("JetBrains Mono", 11, QFont.Weight.DemiBold))
-            name.setStyleSheet(f"color:{_TEXT}; font-size:12px;")
-            size_text = self._format_session_size(session.get("size_bytes", 0))
-            meta = QLabel(
-                f"{'Current' if active else 'Updated'} - "
-                f"{self._format_session_time(session.get('updated_at'))} - {size_text}"
-            )
-            meta.setFont(QFont("JetBrains Mono", 10))
-            meta_color = _WARN if (active or session.get("size_warning")) else _TEXT_3
-            meta.setStyleSheet(f"color:{meta_color}; font-size:10px;")
-            text_col.addWidget(name)
-            text_col.addWidget(meta)
-            row_layout.addLayout(text_col, 1)
-
-            for text, handler in (
-                ("Open", lambda _checked=False, sid=session["id"]: (dialog.accept(), self._switch_to_session(sid))),
-                ("Rename", lambda _checked=False, sid=session["id"]: self._rename_session_from_list(sid, dialog)),
-                ("Delete", lambda _checked=False, sid=session["id"]: self._delete_session_from_list(sid, dialog)),
-            ):
-                button = QPushButton(text)
-                button.setCursor(Qt.CursorShape.PointingHandCursor)
-                button.setFixedHeight(28)
-                button.setMinimumWidth(58)
-                role = "danger" if text == "Delete" else "secondary"
-                button.setStyleSheet(self._session_dialog_button_style(role))
-                button.clicked.connect(handler)
-                row_layout.addWidget(button)
-            card_layout.addWidget(row)
-
-        close = QPushButton("Close")
-        close.setCursor(Qt.CursorShape.PointingHandCursor)
-        close.setMinimumHeight(34)
-        close.setStyleSheet(self._session_dialog_button_style("wide"))
-        close.clicked.connect(dialog.reject)
-        card_layout.addWidget(close)
-        dialog.exec()
-
-    def _rename_session_from_list(self, session_id, dialog):
+    def _rename_session(self, session_id):
         session = self._session_store.get_session(session_id)
         if session is None:
             return
@@ -1602,13 +1556,6 @@ class ChatDock(QgsDockWidget):
         self._session_store.rename_session(session_id, name)
         if session_id == self._active_session_id:
             self._update_session_name_label()
-        dialog.accept()
-        self._show_session_list()
-
-    def _delete_session_from_list(self, session_id, dialog):
-        if self._delete_session(session_id):
-            dialog.accept()
-            self._show_session_list()
 
     def _delete_session(self, session_id):
         session = self._session_store.get_session(session_id)
@@ -1622,16 +1569,6 @@ class ChatDock(QgsDockWidget):
         if session_id == self._active_session_id and fallback is not None:
             self._switch_to_session(fallback["id"], save_current=False)
         return True
-
-    @staticmethod
-    def _format_session_time(value):
-        if not value:
-            return ""
-        try:
-            dt = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
-            return dt.strftime("%Y-%m-%d %H:%M")
-        except ValueError:
-            return str(value)
 
     @staticmethod
     def _format_session_size(size_bytes):
@@ -1768,7 +1705,7 @@ class ChatDock(QgsDockWidget):
         self._import_backend_state(session.get("backend_state") or {})
         self._restore_transcript(self._transcript_events)
         self._update_session_name_label()
-        self._set_status("Ready", _SUCCESS, icon="✓")
+        self._set_status("Ready", _SUCCESS, icon="●")
         if self._toolkit is not None:
             self._toolkit.reset_agent_state()
         return True
@@ -1804,7 +1741,7 @@ class ChatDock(QgsDockWidget):
         if hasattr(self, "_ask_overlay") and self._ask_overlay is not None:
             self._ask_overlay.hide()
         self._clear_transcript_widgets()
-        self._set_status("Ready", _SUCCESS, icon="✓")
+        self._set_status("Ready", _SUCCESS, icon="●")
         self._typing_widget = None
         self._current_agent_turn = None
         self._current_tool_row = None
@@ -1844,6 +1781,7 @@ class ChatDock(QgsDockWidget):
 
         self._ttft_trace_id = trace_id
         self._ttft_started_at = trace_started_at
+        self._turn_started_at = trace_started_at
         self._ttft_first_ui_render_logged = False
         log_ttft_event(
             "send_accepted",
@@ -1851,6 +1789,8 @@ class ChatDock(QgsDockWidget):
             started_at=trace_started_at,
         )
         self._remember_prompt(message)
+        if self._toolkit is not None:
+            self._toolkit.pyqgis_streak = 0  # new request: fresh run_pyqgis budget
         self.input.clear()
         self._resize_input()
         self._add_user_message(message)
@@ -2172,6 +2112,7 @@ class ChatDock(QgsDockWidget):
             self._flush_stream_render()
             self._hide_typing()
             self._finish_streaming()
+            self._add_turn_footer()
             self._finalize_current_turn_event()
             self._save_current_session()
             self._streaming = False
@@ -2181,7 +2122,7 @@ class ChatDock(QgsDockWidget):
             self._showing_tool_progress = False
             self._current_agent_turn = None
             if self._status_text != "Cancelled":
-                self._set_status("Ready", _SUCCESS, icon="✓")
+                self._set_status("Ready", _SUCCESS, icon="●")
             self._scroll_to_bottom()
             self._pending_tool = None
 
@@ -2208,6 +2149,20 @@ class ChatDock(QgsDockWidget):
             # No text and no turn yet — create an empty turn so the tool row
             # has somewhere to live.
             self._get_or_create_agent_turn()
+
+    def _add_turn_footer(self):
+        """Stamp the finished turn with its model and how long it took."""
+        turn = self._current_agent_turn
+        if turn is None:
+            return
+        conn, model = self._connection_labels()
+        started = self._turn_started_at
+        elapsed = format_elapsed(time.monotonic() - started) if started else ""
+        turn.set_footer(model or conn, elapsed)
+        turn_event = self._ensure_current_turn_event()
+        if turn_event is not None:
+            turn_event["model"] = model or conn
+            turn_event["elapsed"] = elapsed
 
     def _remove_current_agent_turn(self):
         turn = self._current_agent_turn
@@ -2281,7 +2236,8 @@ class ChatDock(QgsDockWidget):
 
         turn = self._get_or_create_agent_turn()
         if kind == "tool":
-            turn.set_streaming_text(self._tool_progress_text)
+            # Progress while a tool runs — a plain status line, not the answer bubble.
+            turn.set_progress_text(self._tool_progress_text)
         elif kind == "final":
             turn.set_streaming_text(self._current_text)
 
@@ -2335,7 +2291,7 @@ class ChatDock(QgsDockWidget):
             self.send_btn.setVisible(True)
             self.stop_btn.setEnabled(False)
             self.stop_btn.setVisible(False)
-            self._set_status("Ready", _SUCCESS, icon="✓")
+            self._set_status("Ready", _SUCCESS, icon="●")
         except RuntimeError:
             pass
         self._stop_requested = False

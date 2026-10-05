@@ -372,30 +372,50 @@ def _cleanup_gee_download(path):
         pass
 
 
+# Chart types that need row shapes a layer field scan can't produce.
+_DATA_ONLY_CHARTS = {
+    "scatter": ("x", "y"),
+    "sankey": ("source", "target", "value"),
+}
+_DATA_ONLY_ERROR = "chart_type {!r} needs data mode: pass data=[...] instead of layer_id"
+
+
 def _chart_from_data(data, chart_type, colors, title):
-    """Build a chart result from agent-supplied label/value pairs.
+    """Build a chart result from agent-supplied rows.
 
     Lets the agent chart numbers it already computed (e.g. inside vs
-    outside counts) without fabricating a memory layer first.
+    outside counts) without fabricating a memory layer first. Rows are
+    {label, value} for bar/hbar/line/pie, {x, y, label?} for scatter and
+    {source, target, value} for sankey.
     """
+    required = _DATA_ONLY_CHARTS.get(chart_type, ("label", "value"))
     if not isinstance(data, list) or not data:
-        return {"ok": False, "error": "data must be a non-empty list of {label, value} objects"}
+        return {"ok": False, "error": f"data must be a non-empty list of {{{', '.join(required)}}} objects"}
     rows = []
     for item in data:
-        if not isinstance(item, dict) or "label" not in item or "value" not in item:
-            return {"ok": False, "error": "each data item must be an object with 'label' and 'value'"}
-        num = _coerce_number(item.get("value"))
-        if num is None:
-            return {"ok": False, "error": f"value for {item.get('label')!r} is not numeric"}
-        if num.is_integer():
-            num = int(num)
-        rows.append(_chart_row(item.get("label"), num))
+        if not isinstance(item, dict) or any(k not in item for k in required):
+            return {"ok": False, "error": f"each data item for {chart_type} must have {', '.join(required)}"}
+        row = {}
+        for key in required:
+            if key in ("label", "source", "target"):
+                row[key] = str(item[key])
+                continue
+            num = _coerce_number(item[key])
+            if num is None:
+                return {"ok": False, "error": f"{key} for {item!r} is not numeric"}
+            row[key] = int(num) if num.is_integer() else num
+        if chart_type == "sankey" and row["value"] <= 0:
+            return {"ok": False, "error": f"sankey value must be positive: {item!r}"}
+        if chart_type == "scatter" and item.get("label") is not None:
+            row["label"] = str(item["label"])
+        rows.append(row)
+    limit = {"scatter": 500, "sankey": 60}.get(chart_type, 20)
     result = {
         "ok": True,
         "chart_type": chart_type,
         "title": str(title) if title else "Chart",
-        "data": rows[:20],
-        "truncated": len(rows) > 20,
+        "data": rows[:limit],
+        "truncated": len(rows) > limit,
     }
     if colors:
         result["colors"] = colors
@@ -508,6 +528,8 @@ def _calculate_chart_for_layer(
     pump_events=False,
 ):
     start = time.perf_counter()
+    if chart_type in _DATA_ONLY_CHARTS:
+        return {"ok": False, "error": _DATA_ONLY_ERROR.format(chart_type)}
     if layer is None:
         return {"ok": False, "error": "No layer provided"}
     if not isinstance(layer, QgsVectorLayer):
@@ -5229,6 +5251,8 @@ class QgisToolkit:
             return {"ok": False, "error": color_error}
         if data is not None:
             return _chart_from_data(data, chart_type, clean_colors, title)
+        if chart_type in _DATA_ONLY_CHARTS:
+            return {"ok": False, "error": _DATA_ONLY_ERROR.format(chart_type)}
         if not layer_id or not field_name:
             return {"ok": False, "error": "provide either data, or layer_id + field_name"}
         agg, agg_error = _resolve_chart_aggregate(aggregate, value_field)

@@ -49,6 +49,11 @@ Before calling any tool, decide what the user's deliverable is:
   inspect first, then produce the summary, table, chart, derived layer,
   and Methodology block as applicable.
 
+**When in doubt, ask — don't try.** If you are not sure what the user means,
+which layer/data/area they want, or whether something is available, call
+ask_user with 2-4 concrete options BEFORE running tools. One quick question
+beats a chain of exploratory calls. Never use run_pyqgis to guess.
+
 If a request contains both, perform the operation first, then analyse
 only what was actually asked. When unsure, the deliverable decides:
 a changed project means execute; an answer means analyse.
@@ -264,6 +269,8 @@ applies instead and inspection is skipped.)
   Use label_field for readable chart labels when field_name contains codes/IDs.
   For numbers you already computed, skip the layer entirely:
   create_chart(data=[{"label": ..., "value": ...}, ...], title=...).
+  chart_type also accepts "hbar" (long labels), "scatter" (data rows {x, y, label?}) and
+  "sankey" (data rows {source, target, value}, e.g. land-cover change flows).
 - get_layer_statistics(layer_id, field_name): renders stat card inline.
   Always check the ``"truncated"`` flag in the result — if true and the
   user needs an exact aggregate, fall back to run_pyqgis (see Performance
@@ -330,6 +337,24 @@ applies instead and inspection is skipped.)
   than run_pyqgis. Before any overlay/intersect/clip, confirm both layers
   share a CRS via get_layer_summary; if not, reproject first — overlaying
   layers in different CRSs silently produces wrong geometry.
+
+## Understand the request before acting
+
+- Read GIS shorthand the way a GIS analyst would: GEE / EE = Google Earth
+  Engine; S2 = Sentinel-2; L8/L9 = Landsat 8/9; DEM / DTM / DSM = elevation
+  models; AOI = area of interest; CRS / EPSG = coordinate reference system;
+  NDVI / NDWI / NBR / EVI = spectral indices; LULC = land use / land cover;
+  OSM = OpenStreetMap; WMS / WFS / XYZ = web map services; gif / timelapse =
+  an animation over time. Resolve typos and mixed-language wording the same way.
+- Pick the dedicated tool for the job (layers, processing, GEE, charts) from
+  the tool list. Do NOT probe the environment with run_pyqgis (importing
+  sys/os/subprocess, listing plugins or files) to discover what is installed
+  or what the user meant — the tool list and workspace state already tell you.
+- If the request is still ambiguous after that, ask ONE short clarifying
+  question (ask_user) instead of guessing through repeated tool calls.
+- Never re-issue a call that just failed or returned nothing useful more than
+  once. Read the result, change approach, or stop and tell the user what is
+  missing and how to fix it.
 
 ## Context & memory
 
@@ -724,6 +749,18 @@ timelapse/GIF creation. The only sanctioned network paths are web_fetch and
 the gee_* tools (Earth Engine)."""
 
 
+_PROMPT_NO_GEE = """
+## Google Earth Engine — not available
+
+The Google Earth Engine QGIS plugin (ee_plugin) is not installed in this QGIS,
+so no gee_* tools exist in this session. If the user asks for GEE / Earth Engine
+work (satellite imagery, NDVI composites, timelapse GIFs), do not try to work
+around it with run_pyqgis. Answer directly: Earth Engine needs the "Google Earth
+Engine" plugin — install it from Plugins → Manage and Install Plugins, sign in
+to Earth Engine when it prompts, then restart QGIS (or reload AgenticGIS) and ask
+again. Offer what can be done without it (e.g. local rasters, web map layers)."""
+
+
 def build_system_prompt(include_gee=True):
     """Return the full system prompt, optionally omitting the GEE sections.
 
@@ -735,7 +772,7 @@ def build_system_prompt(include_gee=True):
     """
     if include_gee:
         return _PROMPT_CORE + _PROMPT_SPATIAL + _PROMPT_GEE
-    return _PROMPT_CORE + _PROMPT_SPATIAL
+    return _PROMPT_CORE + _PROMPT_SPATIAL + _PROMPT_NO_GEE
 
 
 DEFAULT_SYSTEM_PROMPT = build_system_prompt(include_gee=True)

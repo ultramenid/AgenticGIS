@@ -15,12 +15,15 @@ from qgis.PyQt.QtWidgets import (
 )
 
 from .downloadable import HoverDownloadButton, save_file_copy
+from .theme import (
+    fs,
+    ui_font,
+    DOCK_SURFACE as _SURFACE,
+    DOCK_BORDER as _BORDER,
+    DOCK_TEXT as _TEXT,
+    DOCK_TEXT_2 as _TEXT_2,
+)
 
-_SURFACE = "#161616"
-_BORDER = "#2e2e2e"
-_TEXT = "#ececec"
-_TEXT_2 = "#a0a0a0"
-_ACCENT = "#e7dfcf"
 
 _FILE_ICONS = {
     ".tif": "🗺", ".tiff": "🗺", ".geotiff": "🗺",
@@ -62,7 +65,7 @@ class DownloadWidget(QFrame):
             DownloadWidget {{
                 background-color: {_SURFACE};
                 border: 1px solid {_BORDER};
-                border-radius: 8px;
+                border-radius: 12px;
             }}
         """)
         self.setMaximumWidth(600)
@@ -80,16 +83,16 @@ class DownloadWidget(QFrame):
         info_row.addWidget(icon_label)
 
         name_label = QLabel(os.path.basename(file_path) or "Download")
-        name_label.setFont(QFont("JetBrains Mono", 11, QFont.Weight.DemiBold))
+        name_label.setFont(ui_font(13, QFont.Weight.DemiBold))
         name_label.setStyleSheet(
-            f"color: {_TEXT}; font-size: 13px; background: transparent;"
+            f"color: {_TEXT}; font-size: {fs(13)}px; background: transparent;"
         )
         name_label.setWordWrap(True)
         info_row.addWidget(name_label, 1)
 
         size_label = QLabel(_human_size(file_path))
         size_label.setStyleSheet(
-            f"color: {_TEXT_2}; font-size: 11px; background: transparent;"
+            f"color: {_TEXT_2}; font-size: {fs(11)}px; background: transparent;"
         )
         info_row.addWidget(size_label)
 
@@ -100,7 +103,7 @@ class DownloadWidget(QFrame):
         if desc:
             desc_label = QLabel(desc)
             desc_label.setStyleSheet(
-                f"color: {_TEXT_2}; font-size: 11px; background: transparent;"
+                f"color: {_TEXT_2}; font-size: {fs(11)}px; background: transparent;"
             )
             desc_label.setWordWrap(True)
             layout.addWidget(desc_label)

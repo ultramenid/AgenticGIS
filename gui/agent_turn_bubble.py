@@ -1,21 +1,25 @@
 """AgentTurnBubble — one widget per complete agent response turn.
 
-Reasoning ticker streams LLM thinking in one line above grouped tool calls.
-Tool calls group by name with braille spinners → ✓/! on completion.
+Reasoning ticker streams LLM thinking in one line above the tool calls.
+Each tool call is one row (spinner → ✓/!/—) with a readable result summary;
+the answer itself sits in a bubble below.
 """
 
 import html as _html
 import json
+import re
 
 from qgis.PyQt.QtCore import Qt, QElapsedTimer, QSize, QTimer
-from qgis.PyQt.QtGui import QFont
+from qgis.PyQt.QtGui import QFont, QKeySequence
 from qgis.PyQt.QtWidgets import (
-    QFrame, QHBoxLayout, QLabel, QPushButton,
-    QSizePolicy, QVBoxLayout, QWidget,
+    QAbstractItemView, QFrame, QHBoxLayout, QLabel, QMenu, QPushButton,
+    QSizePolicy, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
 )
 
+from .formatting import humanize_tool_name, summarize_tool_args, summarize_tool_result, split_md_tables
 from .downloadable import HoverDownloadButton, save_text, _safe_name
 from .message_bubble import (
+    _copy_to_clipboard,
     _md_inline,
     _md_to_html,
     _show_code_context_menu,
@@ -24,7 +28,14 @@ from .message_bubble import (
 )
 
 from .theme import (
+    fs,
+    mono_font,
+    MONO_STACK,
+    ui_font,
+    sans_family,
+    DOCK_CANVAS as _CANVAS,
     DOCK_SURFACE as _SURFACE,
+    DOCK_BLUE as _BLUE,
     DOCK_SURFACE_2 as _SURFACE_2,
     DOCK_BORDER as _BORDER,
     DOCK_BORDER_SOFT as _BORDER_SOFT,
@@ -45,6 +56,97 @@ _SPINNER_FRAMES = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇"
 _STALL_HINT_SECONDS = 45
 
 
+class MarkdownTable(QTableWidget):
+    """Read-only table for a finished answer: scrolls sideways when wider than the bubble."""
+
+    _MAX_VISIBLE_ROWS = 12
+
+    def __init__(self, rows, parent=None):
+        cols = max(len(r) for r in rows)
+        super().__init__(len(rows) - 1, cols, parent)
+        self._rows = rows
+        self.setHorizontalHeaderLabels(rows[0] + [""] * (cols - len(rows[0])))
+        for r, row in enumerate(rows[1:]):
+            for c, value in enumerate(row):
+                item = QTableWidgetItem(value)
+                item.setToolTip(value)
+                self.setItem(r, c, item)
+
+        self.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.setHorizontalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
+        self.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self.setWordWrap(False)
+        self.setTextElideMode(Qt.TextElideMode.ElideRight)
+        self.setShowGrid(False)
+        self.setAlternatingRowColors(True)
+        self.setFrameShape(QFrame.Shape.NoFrame)
+        self.setFocusPolicy(Qt.FocusPolicy.ClickFocus)
+        self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.customContextMenuRequested.connect(self._show_menu)
+
+        self.verticalHeader().setVisible(False)
+        self.verticalHeader().setDefaultSectionSize(fs(13) + 14)
+        header = self.horizontalHeader()
+        header.setDefaultAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        header.setHighlightSections(False)
+        header.setMaximumSectionSize(320)
+        self.resizeColumnsToContents()
+        header.setStretchLastSection(True)
+
+        self.setStyleSheet(f"""
+            QTableWidget {{
+                background:{_SURFACE}; alternate-background-color:{_BORDER_SOFT};
+                color:{_TEXT_2}; border:1px solid {_BORDER}; border-radius:8px;
+                font-family:{sans_family()}; font-size:{fs(12)}px;
+                selection-background-color:{_BORDER}; selection-color:{_TEXT};
+            }}
+            QTableWidget::item {{ padding:0 10px; border:none; }}
+            QHeaderView::section {{
+                background:{_SURFACE_2}; color:{_TEXT}; font-weight:600;
+                padding:6px 10px; border:none; border-bottom:1px solid {_BORDER};
+            }}
+            QTableCornerButton::section {{ background:{_SURFACE_2}; border:none; }}
+            QScrollBar:horizontal {{ background:transparent; height:8px; margin:0 4px 2px 4px; }}
+            QScrollBar:vertical {{ background:transparent; width:8px; margin:4px 2px 4px 0; }}
+            QScrollBar::handle {{ background:{_BORDER}; border-radius:3px; min-width:24px; min-height:24px; }}
+            QScrollBar::handle:hover {{ background:{_TEXT_4}; }}
+            QScrollBar::add-line, QScrollBar::sub-line {{ width:0; height:0; }}
+            QScrollBar::add-page, QScrollBar::sub-page {{ background:transparent; }}
+        """)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        visible = min(self.rowCount(), self._MAX_VISIBLE_ROWS)
+        # Reserve the scrollbar's strip so a wide table doesn't hide its last row.
+        self.setFixedHeight(
+            header.sizeHint().height() + visible * self.verticalHeader().defaultSectionSize() + 12
+        )
+
+    def _as_tsv(self, selected_only=False):
+        if not selected_only:
+            return "\n".join("\t".join(r) for r in self._rows)
+        cells = sorted((i.row(), i.column(), i.text()) for i in self.selectedItems())
+        lines, last = [], None
+        for r, _c, text in cells:
+            if r != last:
+                lines.append([])
+                last = r
+            lines[-1].append(text)
+        return "\n".join("\t".join(line) for line in lines)
+
+    def keyPressEvent(self, event):
+        if event.matches(QKeySequence.StandardKey.Copy):
+            _copy_to_clipboard(self._as_tsv(selected_only=True))
+            return
+        super().keyPressEvent(event)
+
+    def _show_menu(self, pos):
+        menu = QMenu(self)
+        if self.selectedItems():
+            menu.addAction("Copy selection", lambda: _copy_to_clipboard(self._as_tsv(selected_only=True)))
+        menu.addAction("Copy table", lambda: _copy_to_clipboard(self._as_tsv()))
+        menu.exec(self.viewport().mapToGlobal(pos))
+
+
 class ReasoningTicker(QWidget):
     """Single-line streaming reasoning display. Shows last 100 chars of LLM thinking."""
 
@@ -57,12 +159,11 @@ class ReasoningTicker(QWidget):
         self.setVisible(False)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
 
-        mono = QFont("JetBrains Mono", 10)
-        mono.setStyleHint(QFont.StyleHint.Monospace)
+        mono = ui_font(12)
         mono.setItalic(True)
 
         hbox = QHBoxLayout(self)
-        hbox.setContentsMargins(12, 2, 12, 2)
+        hbox.setContentsMargins(2, 2, 2, 2)
         hbox.setSpacing(4)
 
         self._prefix_lbl = QLabel(_SPINNER_FRAMES[0])
@@ -123,138 +224,158 @@ class ReasoningTicker(QWidget):
         self._lbl.setText(_html.escape(display))
 
 
-class ToolSubItem(QWidget):
-    """One tool call line: [connector]  [icon]  [key_label]  [json_suffix]"""
+class ToolCallRow(QFrame):
+    """One tool call: status glyph, readable name, argument, result summary, time.
 
-    def __init__(self, tool_input: dict, group, is_last: bool = False, parent=None):
+    Click the row to expand the full input and result.
+    """
+
+    def __init__(self, tool_name: str, tool_input: dict, parent=None):
         super().__init__(parent)
-        self._group = group   # ToolGroupRow | None
         self._done = False
         self._bubble = None   # set by AgentTurnBubble.add_tool()
         self._result = ""
         self._input = tool_input
         self._input_json = json.dumps(tool_input, default=str)
         self._expanded = False
-
-        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-        self.setStyleSheet("background:transparent;")
-
-        # Outer vertical layout: tool row on top, collapsible details below.
-        outer = QVBoxLayout(self)
-        outer.setContentsMargins(0, 1, 0, 1)
-        outer.setSpacing(0)
-
-        mono = QFont("JetBrains Mono", 10)
-        mono.setStyleHint(QFont.StyleHint.Monospace)
-
-        hbox = QHBoxLayout()
-        hbox.setContentsMargins(20, 0, 12, 0)
-        hbox.setSpacing(4)
-
-        self._conn_lbl = QLabel("└─" if is_last else "├─")
-        self._conn_lbl.setFont(mono)
-        self._conn_lbl.setStyleSheet(f"color:{_BORDER}; background:transparent;")
-        hbox.addWidget(self._conn_lbl)
-
-        self._icon_lbl = QLabel("·")
-        self._icon_lbl.setFont(mono)
-        self._icon_lbl.setStyleSheet(f"color:{_WARN}; background:transparent;")
-        self._icon_lbl.setFixedWidth(14)
-        hbox.addWidget(self._icon_lbl)
-
-        key_lbl = QLabel(self._extract_key(tool_input))
-        key_lbl.setFont(mono)
-        key_lbl.setStyleSheet(f"color:{_TEXT}; background:transparent; font-size:10px;")
-        key_lbl.setTextFormat(Qt.TextFormat.PlainText)
-        hbox.addWidget(key_lbl)
-
-        json_str = self._input_json
-        if len(json_str) > 60:
-            json_str = json_str[:60] + "…"
-        json_lbl = QLabel(json_str)
-        json_lbl.setFont(mono)
-        json_lbl.setStyleSheet(f"color:{_TEXT_3}; background:transparent; font-size:10px;")
-        json_lbl.setTextFormat(Qt.TextFormat.PlainText)
-        hbox.addWidget(json_lbl)
-        hbox.addStretch()
-
-        # Collapsible "Details" toggle — hidden until a result is set.
-        self._toggle = QPushButton("▸ Details")
-        self._toggle.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._toggle.setFlat(True)
-        self._toggle.setFont(mono)
-        self._toggle.setStyleSheet(
-            f"QPushButton {{ color:{_TEXT_3}; background:transparent;"
-            f" border:none; padding:0 4px; font-size:10px; }}"
-            f"QPushButton:hover {{ color:{_TEXT_2}; }}"
-        )
-        self._toggle.setFixedHeight(16)
-        self._toggle.setVisible(False)
-        self._toggle.clicked.connect(self._toggle_details)
-        hbox.addWidget(self._toggle)
-
-        outer.addLayout(hbox)
-
-        # Details panel (input + result) — created lazily, hidden by default.
         self._details = None
-        self._outer = outer
+        self._pulse = 0
+        self._elapsed = QElapsedTimer()
+        self._elapsed.start()
+
+        self.setObjectName("ToolRow")
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setToolTip(tool_name)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.setStyleSheet(
+            f"QFrame#ToolRow {{ background:transparent; border:none; border-radius:8px; }}"
+            f"QFrame#ToolRow:hover {{ background:{_SURFACE}; }}"
+        )
+
+        self._outer = QVBoxLayout(self)
+        self._outer.setContentsMargins(8, 5, 8, 5)
+        self._outer.setSpacing(1)
+
+        top = QHBoxLayout()
+        top.setContentsMargins(0, 0, 0, 0)
+        top.setSpacing(8)
+        self._icon_lbl = QLabel(_SPINNER_FRAMES[0])
+        self._icon_lbl.setFont(mono_font(12))
+        self._icon_lbl.setFixedWidth(14)
+        self._icon_lbl.setStyleSheet(f"color:{_BLUE}; background:transparent;")
+        top.addWidget(self._icon_lbl)
+
+        name_lbl = QLabel(humanize_tool_name(tool_name))
+        name_lbl.setTextFormat(Qt.TextFormat.PlainText)
+        name_lbl.setFont(ui_font(12.5, QFont.Weight.Medium))
+        name_lbl.setStyleSheet(f"color:{_TEXT}; background:transparent; font-size:{fs(12.5)}px;")
+        top.addWidget(name_lbl)
+
+        self._arg_lbl = QLabel(summarize_tool_args(tool_input))
+        self._arg_lbl.setTextFormat(Qt.TextFormat.PlainText)
+        self._arg_lbl.setFont(mono_font(11))
+        self._arg_lbl.setStyleSheet(f"color:{_TEXT_3}; background:transparent; font-size:{fs(11)}px;")
+        self._arg_lbl.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        top.addWidget(self._arg_lbl, 1)
+
+        self._time_lbl = QLabel("")
+        self._time_lbl.setFont(ui_font(11))
+        self._time_lbl.setStyleSheet(f"color:{_TEXT_4}; background:transparent; font-size:{fs(11)}px;")
+        top.addWidget(self._time_lbl)
+
+        self._chev_lbl = QLabel("›")
+        self._chev_lbl.setFont(ui_font(13))
+        self._chev_lbl.setFixedWidth(10)
+        self._chev_lbl.setStyleSheet(f"color:{_TEXT_4}; background:transparent; font-size:{fs(13)}px;")
+        top.addWidget(self._chev_lbl)
+        self._outer.addLayout(top)
+
+        # Result summary line — indented under the name, filled on completion.
+        self._summary_lbl = QLabel("Running…")
+        self._summary_lbl.setTextFormat(Qt.TextFormat.PlainText)
+        self._summary_lbl.setFont(ui_font(11.5))
+        self._summary_lbl.setStyleSheet(
+            f"color:{_TEXT_3}; background:transparent; font-size:{fs(11.5)}px; padding-left:19px;"
+        )
+        self._summary_lbl.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        self._outer.addWidget(self._summary_lbl)
+
+        self._timer = QTimer(self)
+        self._timer.setInterval(120)
+        self._timer.timeout.connect(self._tick)
+        self._timer.start()
 
     # ── Public API ────────────────────────────────────────────────────────
 
-    def set_last(self, is_last: bool) -> None:
-        """Recalculate connector prefix when a new sibling is added."""
-        try:
-            self._conn_lbl.setText("└─" if is_last else "├─")
-        except RuntimeError:
-            pass
-
-    def mark_done(self, is_error: bool = False, is_cancelled: bool = False) -> None:
-        """Show ✓, !, or —. Internal — call set_result() from chat_dock."""
-        if self._done:
-            return
-        self._done = True
-        try:
-            if is_error:
-                self._icon_lbl.setText("!")
-                self._icon_lbl.setStyleSheet(f"color:{_DANGER}; background:transparent;")
-            elif is_cancelled:
-                self._icon_lbl.setText("—")
-                self._icon_lbl.setStyleSheet(f"color:{_WARN}; background:transparent;")
-            else:
-                self._icon_lbl.setText("✓")
-                self._icon_lbl.setStyleSheet(f"color:{_SUCCESS}; background:transparent;")
-        except RuntimeError:
-            pass
-
     def set_result(self, result_str: str, is_error: bool = False, is_cancelled: bool = False) -> None:
-        """Called by chat_dock.py. Marks done, stores result, shows toggle."""
+        """Called by chat_dock.py with the tool's output."""
         if self._done:
             return
         self._result = result_str
-        self.mark_done(is_error=is_error, is_cancelled=is_cancelled)
-        if self._group is not None:
-            self._group.on_item_done(self, is_error=is_error, is_cancelled=is_cancelled)
-        # Reveal the Details toggle now that there is something to show.
+        if is_cancelled:
+            summary = "Cancelled"
+        else:
+            summary = summarize_tool_result(result_str, is_error) or "Done"
+        self.mark_done("error" if is_error else "cancelled" if is_cancelled else "ok", summary)
+
+    def mark_done(self, state: str = "ok", summary: str = "") -> None:
+        """Stop the spinner; ``state`` is ok / error / cancelled / unknown."""
+        if self._done:
+            return
+        self._done = True
+        self._timer.stop()
+        glyph, color = {
+            "ok": ("✓", _SUCCESS),
+            "error": ("!", _DANGER),
+            "cancelled": ("—", _WARN),
+        }.get(state, ("·", _TEXT_3))
         try:
-            self._toggle.setVisible(True)
+            self._icon_lbl.setText(glyph)
+            self._icon_lbl.setStyleSheet(f"color:{color}; background:transparent;")
+            secs = self._elapsed.elapsed() / 1000.0
+            self._time_lbl.setText(f"{secs:.1f}s" if secs >= 0.1 else "")
+            self._summary_lbl.setText(summary)
+            self._summary_lbl.setStyleSheet(
+                f"color:{_DANGER if state == 'error' else _TEXT_3}; background:transparent;"
+                f" font-size:{fs(11.5)}px; padding-left:19px;"
+            )
+            self._summary_lbl.setVisible(bool(summary))
         except RuntimeError:
             pass
+        self._relayout()
+
+    def append_reasoning(self, delta: str) -> None:
+        """Called by chat_dock.py; reasoning belongs to the turn's ticker."""
+        if self._bubble is not None:
+            self._bubble.stream_reasoning(delta)
+
+    # ── Internals ─────────────────────────────────────────────────────────
+
+    def _tick(self) -> None:
+        self._pulse = (self._pulse + 1) % len(_SPINNER_FRAMES)
+        try:
+            self._icon_lbl.setText(_SPINNER_FRAMES[self._pulse])
+            self._time_lbl.setText(f"{self._elapsed.elapsed() / 1000.0:.1f}s")
+        except RuntimeError:
+            self._timer.stop()
+
+    def mouseReleaseEvent(self, event):
+        super().mouseReleaseEvent(event)
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._toggle_details()
 
     def _toggle_details(self) -> None:
         self._expanded = not self._expanded
+        if self._expanded and self._details is None:
+            self._build_details()
         try:
-            if self._expanded:
-                self._toggle.setText("▾ Details")
-                if self._details is None:
-                    self._build_details()
-                self._details.setVisible(True)
-            else:
-                self._toggle.setText("▸ Details")
-                if self._details is not None:
-                    self._details.setVisible(False)
-        except RuntimeError:
+            self._chev_lbl.setText("⌄" if self._expanded else "›")
+            self._details.setVisible(self._expanded)
+        except (RuntimeError, AttributeError):
             pass
-        # Notify the parent layout that our height changed.
+        self._relayout()
+
+    def _relayout(self) -> None:
         try:
             self.updateGeometry()
             if self._bubble is not None:
@@ -262,228 +383,63 @@ class ToolSubItem(QWidget):
         except RuntimeError:
             pass
 
+    @staticmethod
+    def _pretty(text: str) -> str:
+        try:
+            text = json.dumps(json.loads(text), indent=2, ensure_ascii=False, default=str)
+        except (TypeError, ValueError):
+            pass
+        # ponytail: long outputs are clipped for the label; Copy gives the full text.
+        return text if len(text) <= 6000 else text[:6000] + "\n…"
+
     def _build_details(self) -> None:
-        """Build the collapsed-details panel showing input + result."""
         panel = QFrame()
+        panel.setObjectName("ToolDetails")
+        panel.setCursor(Qt.CursorShape.ArrowCursor)
         panel.setStyleSheet(
-            f"QFrame {{ background:{_SURFACE_2}; border:1px solid {_BORDER_SOFT};"
-            f" border-radius:4px; }}"
+            f"QFrame#ToolDetails {{ background:{_CANVAS}; border:1px solid {_BORDER};"
+            f" border-radius:8px; }}"
         )
         col = QVBoxLayout(panel)
-        col.setContentsMargins(10, 6, 10, 6)
+        col.setContentsMargins(10, 8, 10, 8)
         col.setSpacing(4)
 
-        mono = QFont("JetBrains Mono", 10)
-        mono.setStyleHint(QFont.StyleHint.Monospace)
-
-        def _section(label_text: str, body_text: str, copyable: bool = False):
+        def _section(label_text: str, body_text: str):
             head_row = QHBoxLayout()
             head_row.setContentsMargins(0, 0, 0, 0)
-            head_row.setSpacing(6)
-            head = QLabel(label_text)
-            head.setFont(mono)
-            head.setStyleSheet(f"color:{_TEXT_3}; background:transparent; font-size:10px;")
+            head = QLabel(label_text.upper())
+            head.setFont(ui_font(10, QFont.Weight.DemiBold))
+            head.setStyleSheet(
+                f"color:{_TEXT_4}; background:transparent; font-size:{fs(10)}px; letter-spacing:0.5px;"
+            )
             head_row.addWidget(head)
             head_row.addStretch()
-            if copyable and body_text:
+            if body_text:
                 btn = QPushButton("Copy")
                 btn.setCursor(Qt.CursorShape.PointingHandCursor)
                 btn.setFlat(True)
-                btn.setFont(mono)
                 btn.setStyleSheet(
                     f"QPushButton {{ color:{_TEXT_3}; background:transparent;"
-                    f" border:none; padding:0 2px; font-size:10px; }}"
-                    f"QPushButton:hover {{ color:{_TEXT_2}; }}"
+                    f" border:none; padding:0 2px; font-size:{fs(11)}px; }}"
+                    f"QPushButton:hover {{ color:{_TEXT}; }}"
                 )
-                import qgis.PyQt.QtGui as _qtgui
-
-                def _copy(_checked=False, _text=body_text):
-                    clip = _qtgui.QGuiApplication.clipboard()
-                    if clip is not None:
-                        clip.setText(_text)
-
-                btn.clicked.connect(_copy)
+                btn.clicked.connect(lambda _checked=False, t=body_text: _copy_to_clipboard(t))
                 head_row.addWidget(btn)
             col.addLayout(head_row)
-            body = QLabel(body_text if body_text else "(none)")
-            body.setFont(mono)
+            body = QLabel(self._pretty(body_text) if body_text else "(none)")
+            body.setFont(mono_font(11))
             body.setWordWrap(True)
             body.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
             body.setTextFormat(Qt.TextFormat.PlainText)
-            body.setStyleSheet(
-                f"color:{_TEXT_2}; background:transparent; font-size:10px;"
-                f" border:none;"
-            )
+            body.setStyleSheet(f"color:{_TEXT_2}; background:transparent; font-size:{fs(11)}px; border:none;")
             col.addWidget(body)
 
-        _section("Input", self._input_json, copyable=False)
-        _section("Result", self._result, copyable=True)
+        _section("Input", self._input_json if self._input else "")
+        if self._done:
+            _section("Result", self._result)
         self._details = panel
-        self._outer.addWidget(self._details)
-
-    def append_reasoning(self, delta: str) -> None:
-        """Called by chat_dock.py. Delegates to parent bubble's ReasoningTicker.
-
-        _bubble is set by AgentTurnBubble.add_tool() before any deltas arrive.
-        Deltas received before _bubble is set are silently dropped (safe: the
-        ReasoningTicker belongs to the turn, not the individual tool item).
-        """
-        if self._bubble is not None:
-            self._bubble.stream_reasoning(delta)
-
-    # ── Helpers ───────────────────────────────────────────────────────────
-
-    @staticmethod
-    def _extract_key(tool_input: dict) -> str:
-        """Return the most meaningful short label from tool_input dict."""
-        if not isinstance(tool_input, dict):
-            s = str(tool_input)
-            return s[:40] if len(s) > 40 else s
-        for k in ("path", "file_path", "filename",
-                  "layer", "layer_name", "layer_id",
-                  "query", "sql", "name", "id"):
-            if k in tool_input:
-                s = str(tool_input[k])
-                return s[:40] if len(s) > 40 else s
-        for v in tool_input.values():
-            s = str(v)
-            return s[:40] if len(s) > 40 else s
-        return ""
-
-
-class ToolGroupRow(QWidget):
-    """Groups all ToolSubItems for one tool_name under a CLI-style spinner."""
-
-    def __init__(self, tool_name: str, parent=None):
-        super().__init__(parent)
-        self._items: list = []
-        self._running_count = 0
-        self._had_error = False
-        self._finalized = False
-        self._pulse = 0
-        self._elapsed = QElapsedTimer()
-        self._elapsed.start()
-
-        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
-        self.setStyleSheet("background:transparent;")
-
-        mono = QFont("JetBrains Mono", 10)
-        mono.setStyleHint(QFont.StyleHint.Monospace)
-
-        self._layout = QVBoxLayout(self)
-        self._layout.setContentsMargins(0, 2, 0, 2)
-        self._layout.setSpacing(0)
-
-        # Header row
-        header = QWidget()
-        header.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-        hbox = QHBoxLayout(header)
-        hbox.setContentsMargins(12, 2, 12, 2)
-        hbox.setSpacing(6)
-
-        self._dot_lbl = QLabel(_SPINNER_FRAMES[0])
-        self._dot_lbl.setFont(mono)
-        self._dot_lbl.setFixedWidth(18)
-        self._dot_lbl.setStyleSheet(f"color:{_WARN}; background:transparent;")
-        hbox.addWidget(self._dot_lbl)
-
-        name_lbl = QLabel(_html.escape(tool_name))
-        name_lbl.setFont(mono)
-        name_lbl.setStyleSheet(
-            f"color:{_TEXT}; background:transparent; font-size:10px;"
-        )
-        name_lbl.setTextFormat(Qt.TextFormat.PlainText)
-        hbox.addWidget(name_lbl)
-
-        self._count_lbl = QLabel("")
-        self._count_lbl.setFont(mono)
-        self._count_lbl.setStyleSheet(
-            f"color:{_TEXT_3}; background:transparent; font-size:10px;"
-        )
-        hbox.addWidget(self._count_lbl)
-        hbox.addStretch()
-
-        self._state_lbl = QLabel("·")
-        self._state_lbl.setFont(mono)
-        self._state_lbl.setStyleSheet(f"color:{_WARN}; background:transparent;")
-        hbox.addWidget(self._state_lbl)
-
-        self._layout.addWidget(header)
-
-        self._timer = QTimer(self)
-        self._timer.setInterval(250)
-        self._timer.timeout.connect(self._tick_running)
-        self._timer.start()
-        self._tick_running()
-
-    def add_item(self, tool_input: dict) -> ToolSubItem:
-        """Append a sub-item; recalculate connectors so only the last shows └─."""
-        if self._items:
-            self._items[-1].set_last(False)
-        item = ToolSubItem(tool_input, group=self, is_last=True, parent=self)
-        self._items.append(item)
-        self._running_count += 1
-        self._layout.addWidget(item)
-        self._count_lbl.setText(f"({len(self._items)})")
-        return item
-
-    def on_item_done(self, item: ToolSubItem, is_error: bool = False, is_cancelled: bool = False) -> None:
-        """Called by ToolSubItem.set_result(). Finalizes header when all done."""
-        self._running_count = max(0, self._running_count - 1)
-        if is_error:
-            self._had_error = True
-        if is_cancelled:
-            self._had_cancelled = True
-        if self._running_count == 0:
-            self._finalize_header()
-
-    def force_finalize(self) -> None:
-        """Mark all still-running items as timed out. Called by AgentTurnBubble.finalize()."""
-        any_forced = False
-        for item in self._items:
-            if not item._done:
-                item.mark_done(is_error=True)
-                any_forced = True
-        if any_forced or self._running_count > 0:
-            self._running_count = 0
-            self._had_error = True
-            self._finalize_header()
-
-    def _finalize_header(self) -> None:
-        if self._finalized:
-            return
-        self._finalized = True
-        if hasattr(self, "_timer"):
-            self._timer.stop()
-        try:
-            if self._had_error:
-                self._dot_lbl.setText("!")
-                self._dot_lbl.setStyleSheet(f"color:{_DANGER}; background:transparent;")
-                self._state_lbl.setText("!")
-                self._state_lbl.setStyleSheet(f"color:{_DANGER}; background:transparent;")
-            elif getattr(self, "_had_cancelled", False):
-                self._dot_lbl.setText("—")
-                self._dot_lbl.setStyleSheet(f"color:{_WARN}; background:transparent;")
-                self._state_lbl.setText("—")
-                self._state_lbl.setStyleSheet(f"color:{_WARN}; background:transparent;")
-            else:
-                self._dot_lbl.setText("✓")
-                self._dot_lbl.setStyleSheet(f"color:{_SUCCESS}; background:transparent;")
-                self._state_lbl.setText("✓")
-                self._state_lbl.setStyleSheet(f"color:{_SUCCESS}; background:transparent;")
-        except RuntimeError:
-            pass
-
-    def _tick_running(self) -> None:
-        if self._finalized:
-            return
-        self._pulse = (self._pulse + 1) % len(_SPINNER_FRAMES)
-        elapsed = self._elapsed.elapsed() / 1000.0
-        try:
-            self._dot_lbl.setText(_SPINNER_FRAMES[self._pulse])
-            self._state_lbl.setText(f"processing {elapsed:.1f}s")
-        except RuntimeError:
-            self._timer.stop()
+        self._outer.addSpacing(4)
+        self._outer.addWidget(panel)
 
 
 class AgentTurnBubble(QFrame):
@@ -491,14 +447,15 @@ class AgentTurnBubble(QFrame):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self._groups: dict = {}   # tool_name → ToolGroupRow
-        self._tool_keys: dict = {}  # (name, input_json) → ToolSubItem (dedup)
+        self._tool_rows: list = []
+        self._tool_keys: dict = {}  # (name, input_json) → ToolCallRow (dedup)
         self._stream_text = ""
         self._stream_html = ""
         self._progress_text = ""
         self._progress_phase = 0
         self._progress_elapsed = QElapsedTimer()
         self._user_decision_lbl = None
+        self._footer = None
         self._last_stream_text = ""
         self._last_stream_html = ""
         # True when the text view's document holds something other than the
@@ -529,17 +486,10 @@ class AgentTurnBubble(QFrame):
 
         self.setFrameShape(QFrame.Shape.NoFrame)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Maximum)
-        self.setStyleSheet(f"""
-            AgentTurnBubble {{
-                background: {_SURFACE};
-                border: 1px solid {_BORDER};
-                border-left: 2px solid {_TEXT_2};
-                border-radius: 0px;
-            }}
-        """)
+        self.setStyleSheet("AgentTurnBubble { background: transparent; border: none; }")
 
         self._outer = QVBoxLayout(self)
-        self._outer.setContentsMargins(0, 6, 0, 8)
+        self._outer.setContentsMargins(0, 2, 0, 4)
         self._outer.setSpacing(0)
 
         self._ticker = ReasoningTicker(self)
@@ -550,8 +500,8 @@ class AgentTurnBubble(QFrame):
         self._tools_area.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         self._tools_area.setStyleSheet("background:transparent;")
         self._tools_layout = QVBoxLayout(self._tools_area)
-        self._tools_layout.setContentsMargins(0, 0, 0, 0)
-        self._tools_layout.setSpacing(0)
+        self._tools_layout.setContentsMargins(0, 0, 0, 6)
+        self._tools_layout.setSpacing(1)
         self._outer.addWidget(self._tools_area)
 
         # Inline file/download cards — between tool rows and the answer text.
@@ -560,31 +510,23 @@ class AgentTurnBubble(QFrame):
         self._files_area.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         self._files_area.setStyleSheet("background:transparent;")
         self._files_layout = QVBoxLayout(self._files_area)
-        self._files_layout.setContentsMargins(12, 6, 12, 10)
+        self._files_layout.setContentsMargins(2, 6, 2, 8)
         self._files_layout.setSpacing(6)
         self._outer.addWidget(self._files_area)
 
-        self.text_lbl = QLabel("")
-        self.text_lbl.setWordWrap(True)
-        self.text_lbl.setMinimumWidth(0)
-        self.text_lbl.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred)
-        self.text_lbl.setTextFormat(Qt.TextFormat.RichText)
-        self.text_lbl.setTextInteractionFlags(
-            Qt.TextInteractionFlag.TextBrowserInteraction | Qt.TextInteractionFlag.TextSelectableByMouse
-        )
-        self.text_lbl.setOpenExternalLinks(True)
-        self.text_lbl.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
-        self.text_lbl.customContextMenuRequested.connect(self._show_text_context_menu)
-        font = QFont("JetBrains Mono", 12)
-        font.setStyleHint(QFont.StyleHint.Monospace)
-        self.text_lbl.setFont(font)
-        self.text_lbl.setStyleSheet(f"""
-            color:{_TEXT}; background:transparent; border:none;
-            font-family:'JetBrains Mono',monospace;
-            font-size:12px; line-height:1.5;
-        """)
-        self.text_lbl.setContentsMargins(12, 6, 12, 0)
-        self._outer.addWidget(self.text_lbl)
+        self.text_lbl = self._new_text_label()
+        # Extra answer pieces (text labels / MarkdownTable) after text_lbl, only
+        # on a finished answer that contains markdown tables.
+        self._segments: list = []
+        self._final_text = None
+        # Answer bubble — hidden while empty or while showing a progress line.
+        self._answer = QFrame(self)
+        self._answer.setObjectName("AnswerBubble")
+        self._answer_layout = QVBoxLayout(self._answer)
+        self._answer_layout.addWidget(self.text_lbl)
+        self._set_bubble(True)
+        self._answer.setVisible(False)
+        self._outer.addWidget(self._answer)
 
         # Inline visuals (charts/stats/gifs) — rendered inside this turn,
         # below the answer text, instead of in a separate transcript bubble.
@@ -593,7 +535,7 @@ class AgentTurnBubble(QFrame):
         self._visuals_area.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         self._visuals_area.setStyleSheet("background:transparent;")
         self._visuals_layout = QVBoxLayout(self._visuals_area)
-        self._visuals_layout.setContentsMargins(12, 6, 12, 4)
+        self._visuals_layout.setContentsMargins(2, 6, 2, 4)
         self._visuals_layout.setSpacing(6)
         self._outer.addWidget(self._visuals_area)
 
@@ -631,30 +573,98 @@ class AgentTurnBubble(QFrame):
 
         target_w = self._effective_width()
         margins = self._outer.contentsMargins()
-        label_w = max(50, target_w - margins.left() - margins.right())
-        if self.text_lbl.maximumWidth() != label_w or self.text_lbl.minimumWidth() != label_w:
-            self.text_lbl.setFixedWidth(label_w)
-
-        self.text_lbl.updateGeometry()
+        label_w = max(50, target_w - margins.left() - margins.right() - self._text_inset()[0])
+        for w in [self.text_lbl, *self._segments]:
+            if w.maximumWidth() != label_w or w.minimumWidth() != label_w:
+                w.setFixedWidth(label_w)
+            w.updateGeometry()
         self.updateGeometry()
 
-    def _show_text_context_menu(self, pos) -> None:
-        _show_code_context_menu(self, self.text_lbl, pos, self._stream_text)
+    def _new_text_label(self) -> QLabel:
+        lbl = QLabel("")
+        lbl.setWordWrap(True)
+        lbl.setMinimumWidth(0)
+        lbl.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred)
+        lbl.setTextFormat(Qt.TextFormat.RichText)
+        lbl.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextBrowserInteraction | Qt.TextInteractionFlag.TextSelectableByMouse
+        )
+        lbl.setOpenExternalLinks(True)
+        lbl.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        lbl.customContextMenuRequested.connect(
+            lambda pos, lbl=lbl: _show_code_context_menu(self, lbl, pos, self._stream_text)
+        )
+        font = QFont()
+        font.setPixelSize(fs(13))
+        lbl.setFont(font)
+        lbl.setStyleSheet(f"""
+            color:{_TEXT}; background:transparent; border:none;
+            font-family:{sans_family()};
+            font-size:{fs(13)}px; line-height:1.6;
+        """)
+        return lbl
 
-    def add_tool(self, tool_name: str, tool_input: dict) -> ToolSubItem:
-        """Add a tool call; creates group if tool_name is new. Returns ToolSubItem."""
+    def _set_bubble(self, on: bool) -> None:
+        """Bubble chrome for answers; none for the transient progress line."""
+        if getattr(self, "_bubble_on", None) == on:
+            return
+        self._bubble_on = on
+        self._answer_layout.setContentsMargins(*((14, 10, 14, 10) if on else (2, 0, 2, 0)))
+        self._answer.setStyleSheet(
+            f"QFrame#AnswerBubble {{ background:{_SURFACE}; border:1px solid {_BORDER};"
+            f" border-radius:14px; }}" if on else
+            "QFrame#AnswerBubble { background:transparent; border:none; }"
+        )
+
+    def _set_text(self, html: str, bubble: bool = True) -> None:
+        self._final_text = None
+        for w in self._segments:
+            self._answer_layout.removeWidget(w)
+            w.deleteLater()
+        self._segments = []
+        self.text_lbl.setText(html)
+        self.text_lbl.setVisible(True)
+        self._set_bubble(bubble)
+        self._answer.setVisible(bool(html))
+
+    def _set_final(self, text: str) -> None:
+        """Render a finished answer; markdown tables become scrollable MarkdownTable widgets."""
+        parts = split_md_tables(text) if text else []
+        if not any(kind == "table" for kind, _ in parts):
+            self._set_text(_md_to_html(text) if text else "")
+        else:
+            first = parts[0][1] if parts[0][0] == "text" else ""
+            self._set_text(_md_to_html(first) if first else "")
+            self.text_lbl.setVisible(bool(first))
+            for kind, value in parts[1:] if first else parts:
+                if kind == "table":
+                    w = MarkdownTable(value, self._answer)
+                else:
+                    w = self._new_text_label()
+                    w.setText(_md_to_html(value))
+                self._answer_layout.addWidget(w)
+                self._segments.append(w)
+            self._answer.setVisible(True)
+        self._final_text = text
+
+    def _text_inset(self):
+        """Horizontal and vertical space the answer frame adds around the text."""
+        m = self._answer_layout.contentsMargins()
+        border = 2 if self._bubble_on else 0
+        return m.left() + m.right() + border, m.top() + m.bottom() + border
+
+    def add_tool(self, tool_name: str, tool_input: dict) -> ToolCallRow:
+        """Add a tool call row (deduplicated on name + input)."""
         tool_key = (tool_name, json.dumps(tool_input or {}, sort_keys=True))
         if tool_key in self._tool_keys:
             # Duplicate TOOL_USE event (e.g. CLI backend emits during stream
             # and again in _dispatch_one_tool).  Return the existing item.
             return self._tool_keys[tool_key]
-        if tool_name not in self._groups:
-            group = ToolGroupRow(tool_name, self._tools_area)
-            self._groups[tool_name] = group
-            self._tools_layout.addWidget(group)
-            self._tools_area.setVisible(True)
-        item = self._groups[tool_name].add_item(tool_input)
+        item = ToolCallRow(tool_name, tool_input or {}, self._tools_area)
         item._bubble = self
+        self._tool_rows.append(item)
+        self._tools_layout.addWidget(item)
+        self._tools_area.setVisible(True)
         self._tool_keys[tool_key] = item
         # Force layout + paint so the tool row appears immediately,
         # even when the next queued slot blocks the main thread.
@@ -743,7 +753,7 @@ class AgentTurnBubble(QFrame):
             self._last_stream_text = text
             self._last_stream_html = body
             self._stream_html = body
-            self.text_lbl.setText(body + cursor)
+            self._set_text(body + cursor)
             self._stream_doc_dirty = False
             if not self._geo_timer.isActive():
                 self._geo_timer.start()
@@ -766,10 +776,10 @@ class AgentTurnBubble(QFrame):
             self._last_stream_html += html_delta
             self._stream_html = self._last_stream_html
         if rewound or self._stream_doc_dirty or not delta:
-            self.text_lbl.setText(self._last_stream_html + cursor)
+            self._set_text(self._last_stream_html + cursor)
             self._stream_doc_dirty = False
         else:
-            self.text_lbl.setText(self._last_stream_html + cursor)
+            self._set_text(self._last_stream_html + cursor)
 
         if not self._geo_timer.isActive():
             self._geo_timer.start()
@@ -802,16 +812,8 @@ class AgentTurnBubble(QFrame):
         self._reset_format_cache()
         self._done = True
         self._stream_doc_dirty = True
-        self.text_lbl.setText(self._stream_html)
+        self._set_final(text)
         self._refresh_text_geometry()
-        self.setStyleSheet(f"""
-            AgentTurnBubble {{
-                background: {_SURFACE};
-                border: 1px solid {_BORDER};
-                border-left: 2px solid {_BORDER};
-                border-radius: 0px;
-            }}
-        """)
 
     def finalize(self) -> None:
         """Stop all spinners; mark any still-running tools as timed out."""
@@ -823,10 +825,11 @@ class AgentTurnBubble(QFrame):
         self._reset_format_cache()
         self._done = True
         self._stream_doc_dirty = True
-        self.text_lbl.setText(self._stream_html)
+        if self._final_text is None or self._final_text != self._stream_text:
+            self._set_text(self._stream_html)
         self._refresh_text_geometry()
-        for group in self._groups.values():
-            group.force_finalize()
+        for row in self._tool_rows:
+            row.mark_done("unknown", "No result reported")
 
     def mark_stopped(self) -> None:
         """Mark this turn as stopped by the user, keeping any partial output.
@@ -846,10 +849,10 @@ class AgentTurnBubble(QFrame):
         # is dropped and the document holds the partial answer.
         if self._stream_text:
             self._stream_html = _md_to_html(self._stream_text)
-            self.text_lbl.setText(self._stream_html)
+            self._set_final(self._stream_text)
         self._refresh_text_geometry()
-        for group in self._groups.values():
-            group.force_finalize()
+        for row in self._tool_rows:
+            row.mark_done("cancelled", "Stopped")
         # Append a visible "Stopped" note if not already present.
         if self._user_decision_lbl is None or "Stopped" not in (
             self._user_decision_lbl.text() if self._user_decision_lbl else ""
@@ -877,12 +880,12 @@ class AgentTurnBubble(QFrame):
         self._reset_format_cache()
         self._done = False
         self._stream_doc_dirty = False
-        self.text_lbl.setText("")
+        self._set_text("")
         self.updateGeometry()
 
     def has_content(self) -> bool:
         return (
-            bool(self._groups) or bool(self._stream_text) or bool(self._progress_text)
+            bool(self._tool_rows) or bool(self._stream_text) or bool(self._progress_text)
             or self._ticker.isVisible() or self._files_area.isVisible()
             or self._visuals_area.isVisible()
         )
@@ -913,7 +916,7 @@ class AgentTurnBubble(QFrame):
         self._last_stream_text = text
         self._last_stream_html = body
         self._stream_html = body
-        self.text_lbl.setText(body + cursor)
+        self._set_text(body + cursor)
         self._stream_doc_dirty = False
         if not self._geo_timer.isActive():
             self._geo_timer.start()
@@ -923,7 +926,7 @@ class AgentTurnBubble(QFrame):
             self._progress_timer.stop()
         if self._progress_text:
             self._stream_html = ""
-            self.text_lbl.setText("")
+            self._set_text("")
             self._refresh_text_geometry()
         self._progress_text = ""
         self._progress_elapsed.invalidate()
@@ -949,21 +952,20 @@ class AgentTurnBubble(QFrame):
             and self._progress_elapsed.elapsed() >= _STALL_HINT_SECONDS * 1000
         )
         spinner_color = _WARN if stalled else _TEXT_3
-        prefix = (
-            f'<span style="color:{spinner_color};font-weight:400;">{frame}</span>'
-            f'<span style="color:{_TEXT_4};">&nbsp;&nbsp;</span>'
+        # One inline line (no markdown → no <p>), so the spinner sits beside the label.
+        label = _html.escape(f"{self._progress_text}{tail}{self._progress_elapsed_suffix()}")
+        label = re.sub(r"`([^`]+)`", rf'<span style="font-family:{MONO_STACK};">\1</span>', label)
+        hint = (
+            f'<span style="color:{_WARN};"> — taking longer than usual, press Esc to stop</span>'
+            if stalled else ""
         )
-        body = _md_to_html(f"{self._progress_text}{tail}{self._progress_elapsed_suffix()}")
-        if stalled:
-            hint = (
-                f'<span style="color:{_WARN};"> — taking longer than usual, '
-                f'press Esc to stop</span>'
-            )
-            body = body[:-len("</div>")] + hint + "</div>" if body.endswith("</div>") else body + hint
-        body = body.replace(">", f">{prefix}", 1)
+        body = (
+            f'<span style="color:{spinner_color};">{frame}</span>&nbsp;&nbsp;'
+            f'<span style="color:{_TEXT_2};">{label}</span>{hint}'
+        )
         self._stream_html = body
         self._stream_doc_dirty = True
-        self.text_lbl.setText(body)
+        self._set_text(body, bubble=False)
         self._refresh_text_geometry()
 
     def set_user_decision(self, text: str) -> None:
@@ -978,8 +980,8 @@ class AgentTurnBubble(QFrame):
             self._user_decision_lbl.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
             self._user_decision_lbl.setStyleSheet(
                 f"color:{_TEXT_2}; background:{_SURFACE_2}; border:1px solid {_BORDER_SOFT};"
-                f" border-radius:5px; padding:5px 9px; margin:6px 12px 0 12px;"
-                f" font-size:10.5px; font-family:'JetBrains Mono',monospace;"
+                f" border-radius:8px; padding:6px 10px; margin:6px 2px 0 2px;"
+                f" font-size:{fs(12)}px;"
             )
             self._outer.addWidget(self._user_decision_lbl)
         if clean.startswith("—") and clean.endswith("—"):
@@ -989,6 +991,41 @@ class AgentTurnBubble(QFrame):
         else:
             self._user_decision_lbl.setText(f"User chose: {clean}")
         self.updateGeometry()
+
+    def set_footer(self, model: str = "", elapsed: str = "") -> None:
+        """Quiet row under a finished answer: Copy · model · duration."""
+        if self._footer is None:
+            self._footer = QWidget(self)
+            self._footer.setStyleSheet("background:transparent;")
+            row = QHBoxLayout(self._footer)
+            row.setContentsMargins(2, 8, 2, 0)
+            row.setSpacing(8)
+            copy_btn = QPushButton("⧉ Copy")
+            copy_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            copy_btn.setToolTip("Copy response as Markdown")
+            copy_btn.setStyleSheet(
+                f"QPushButton {{ color:{_TEXT_3}; background:transparent; border:none;"
+                f" padding:0; font-size:{fs(11)}px; }}"
+                f"QPushButton:hover {{ color:{_TEXT}; }}"
+            )
+            copy_btn.clicked.connect(self._copy_answer)
+            row.addWidget(copy_btn)
+            self._footer_meta = QLabel("")
+            self._footer_meta.setTextFormat(Qt.TextFormat.PlainText)
+            self._footer_meta.setStyleSheet(
+                f"color:{_TEXT_4}; background:transparent; font-size:{fs(11)}px;"
+            )
+            row.addWidget(self._footer_meta)
+            row.addStretch(1)
+            self._outer.addWidget(self._footer)
+        bits = [b for b in (model, f"worked for {elapsed}" if elapsed else "") if b]
+        self._footer_meta.setText("  ·  ".join(bits))
+        self._footer.setVisible(bool(self._stream_text.strip()))
+        self.updateGeometry()
+
+    def _copy_answer(self) -> None:
+        if self._stream_text.strip():
+            _copy_to_clipboard(self._stream_text)
 
     # ── Layout ────────────────────────────────────────────────────────────
 
@@ -1006,9 +1043,11 @@ class AgentTurnBubble(QFrame):
 
         raw_text = self.text_lbl.text() or ""
         if raw_text.strip():
-            lh = self.text_lbl.heightForWidth(inner_w)
+            inset_w, inset_h = self._text_inset()
+            lh = self.text_lbl.heightForWidth(inner_w - inset_w)
             if lh <= 0:
                 lh = self.text_lbl.sizeHint().height()
+            lh += inset_h
         else:
             lh = 0
 
@@ -1024,8 +1063,13 @@ class AgentTurnBubble(QFrame):
             if self._user_decision_lbl is not None and self._user_decision_lbl.isVisible()
             else 0
         )
+        footer_h = (
+            self._footer.sizeHint().height()
+            if self._footer is not None and self._footer.isVisible()
+            else 0
+        )
         total = (
-            lh + tools_h + files_h + visuals_h + ticker_h + decision_h
+            lh + tools_h + files_h + visuals_h + ticker_h + decision_h + footer_h
             + m.top() + m.bottom()
         )
         return max(1, total)
@@ -1048,7 +1092,7 @@ class AgentTurnBubble(QFrame):
         super().resizeEvent(event)
         if self._outer:
             m = self._outer.contentsMargins()
-            w = event.size().width() - m.left() - m.right()
+            w = event.size().width() - m.left() - m.right() - self._text_inset()[0]
             if w > 0 and self.text_lbl.width() != w:
                 self.text_lbl.setFixedWidth(w)
         if not self._geo_timer.isActive():

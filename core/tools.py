@@ -507,7 +507,7 @@ TOOL_SPECS = [
         "name": "create_chart",
         "method": "create_chart",
         "description": (
-            "Create a bar/line/pie chart. Two modes: (1) from a vector layer — "
+            "Create a bar/hbar/line/pie/scatter/sankey chart. Two modes: (1) from a vector layer — "
             "pass layer_id + field_name; by default counts features per distinct "
             "field_name value. For a numeric measure (e.g. total area per "
             "category), set value_field and aggregate='sum'/'mean'/'max'/'min'; "
@@ -516,7 +516,11 @@ TOOL_SPECS = [
             "for readable display labels when field_name holds codes/IDs. "
             "(2) from values you already computed — pass data=[{label, value}, "
             "...] (and optionally title) with NO layer_id; never build a memory "
-            "layer just to chart numbers you already have. Supply colors (hex "
+            "layer just to chart numbers you already have. scatter and sankey are "
+            "data mode only: scatter rows are {x, y, label?}; sankey rows are "
+            "{source, target, value} flows (e.g. land-cover change from→to area; "
+            "chain stages with shared node names). Use hbar for long category "
+            "labels or many categories. Supply colors (hex "
             "strings) to override the default palette; cycles if shorter than "
             "the data."
         ),
@@ -534,17 +538,22 @@ TOOL_SPECS = [
                 "data": {
                     "type": "array",
                     "description": (
-                        "Already-computed chart rows: [{'label': str, 'value': "
-                        "number}, ...]. When given, layer_id/field_name are "
-                        "ignored and no layer is read."
+                        "Already-computed chart rows. bar/hbar/line/pie: "
+                        "[{'label': str, 'value': number}]; scatter: [{'x': number, "
+                        "'y': number, 'label'?: str}]; sankey: [{'source': str, "
+                        "'target': str, 'value': number}]. When given, "
+                        "layer_id/field_name are ignored and no layer is read."
                     ),
                     "items": {
                         "type": "object",
                         "properties": {
                             "label": {"type": "string"},
                             "value": {"type": "number"},
+                            "x": {"type": "number"},
+                            "y": {"type": "number"},
+                            "source": {"type": "string"},
+                            "target": {"type": "string"},
                         },
-                        "required": ["label", "value"],
                     },
                 },
                 "title": {
@@ -576,8 +585,11 @@ TOOL_SPECS = [
                 },
                 "chart_type": {
                     "type": "string",
-                    "enum": ["bar", "line", "pie"],
-                    "description": "Chart type: bar (default), line, or pie.",
+                    "enum": ["bar", "hbar", "line", "pie", "scatter", "sankey"],
+                    "description": (
+                        "bar (default), hbar (horizontal bars), line, pie, "
+                        "scatter (x/y rows), or sankey (source/target/value flows)."
+                    ),
                 },
                 "colors": {
                     "type": "array",
@@ -1213,10 +1225,43 @@ def _pyqgis_background_reason(code):
             "routed off main thread by default")
 
 
+# After this many run_pyqgis calls in a row the result tells the model to stop
+# guessing and ask the user (seen: agents probing sys/os/plugins for "gee").
+PYQGIS_STREAK_LIMIT = 3
+
+
 def dispatch(toolkit, executor, name, arguments, should_stop=None):
     """Run tool ``name`` with ``arguments`` against ``toolkit`` on the main
     thread (via ``executor``) and return its result. Returns a structured
     error dict for an unknown tool name instead of raising ``KeyError``."""
+    result = _dispatch(toolkit, executor, name, arguments, should_stop)
+    return _nudge_pyqgis_streak(toolkit, name, result)
+
+
+def _nudge_pyqgis_streak(toolkit, name, result):
+    """Count consecutive run_pyqgis calls; past the limit, add a stop-and-ask hint.
+
+    Any other tool (ask_user included) resets the count; the chat dock also
+    resets ``toolkit.pyqgis_streak`` when the user sends a new message.
+    """
+    streak = (getattr(toolkit, "pyqgis_streak", 0) or 0) + 1 if name == "run_pyqgis" else 0
+    try:
+        toolkit.pyqgis_streak = streak
+    except AttributeError:
+        return result
+    if streak >= PYQGIS_STREAK_LIMIT and isinstance(result, dict):
+        result = dict(result)
+        result["next_step"] = (
+            f"You have called run_pyqgis {streak} times in a row. Stop trying "
+            "variations. If you are unsure what the user wants, what is installed, "
+            "or how to proceed, call ask_user now with 2-4 concrete options — or "
+            "give the user your answer and what is missing. Do not probe the "
+            "environment further."
+        )
+    return result
+
+
+def _dispatch(toolkit, executor, name, arguments, should_stop=None):
     spec = TOOL_BY_NAME.get(name)
     if spec is None:
         result = {

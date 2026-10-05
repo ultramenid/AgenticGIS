@@ -742,6 +742,35 @@ def elide_stale_tool_results(messages, keep_recent_user_turns=4):
     return result
 
 
+def _result_dict(result):
+    """Tool result as a dict: accepts a dict, its JSON text, or an MCP ``content`` wrapper."""
+    if isinstance(result, str):
+        try:
+            result = json.loads(result)
+        except ValueError:
+            return None
+    if isinstance(result, dict) and "ok" not in result and isinstance(result.get("content"), list):
+        texts = [c.get("text") for c in result["content"] if isinstance(c, dict)]
+        return _result_dict(texts[0]) if len(texts) == 1 and isinstance(texts[0], str) else None
+    return result if isinstance(result, dict) else None
+
+
+def emit_result_visuals(name, result, emit):
+    """Emit chart/stats/gif or a download card for a successful tool result.
+
+    Shared by our own dispatch and by tools a CLI ran itself over MCP, so
+    visuals land in the chat whichever side executed the tool.
+    """
+    result = _result_dict(result)
+    if not result or not result.get("ok"):
+        return
+    if name in _VISUALIZATION_TOOLS:
+        emit(AgentEvent(EventType.VISUALIZATION, {"type": _VISUALIZATION_TOOLS[name], "data": result}))
+    elif result.get("file_path") or result.get("download_path"):
+        # Generic file download card for any tool that produced a file.
+        emit(AgentEvent(EventType.VISUALIZATION, {"type": "file", "data": result}))
+
+
 def _dispatch_one_tool(toolkit, executor, name, tool_input, emit, should_stop):
     from ..core import tools as tools_mod
 
@@ -790,33 +819,7 @@ def _dispatch_one_tool(toolkit, executor, name, tool_input, emit, should_stop):
     )
     if should_stop() or is_cancelled:
         return payload, is_error, is_cancelled, result
-    if name in _VISUALIZATION_TOOLS and isinstance(result, dict) and result.get("ok"):
-        emit(
-            AgentEvent(
-                EventType.VISUALIZATION,
-                {
-                    "type": _VISUALIZATION_TOOLS[name],
-                    "data": result,
-                },
-            )
-        )
-    # Generic file download card: any tool returning a successful dict with a
-    # file_path or download_path gets a download widget.
-    if (
-        isinstance(result, dict)
-        and result.get("ok")
-        and name not in _VISUALIZATION_TOOLS
-        and (result.get("file_path") or result.get("download_path"))
-    ):
-        emit(
-            AgentEvent(
-                EventType.VISUALIZATION,
-                {
-                    "type": "file",
-                    "data": result,
-                },
-            )
-        )
+    emit_result_visuals(name, result, emit)
     return payload, is_error, is_cancelled, result
 
 

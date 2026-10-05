@@ -4,16 +4,8 @@ Anti-AI-SLOP: no emoji, no heavy icons, pure typography.
 """
 
 from qgis.PyQt.QtCore import QTimer
-from qgis.PyQt.QtGui import QFont
 from qgis.PyQt.QtWidgets import QHBoxLayout, QLabel, QSizePolicy, QWidget
-
-# Design tokens (must match chat_dock.py)
-_INPUT_BG = "#1c1c1c"
-_BORDER = "#2b2b2b"
-_TEXT = "#e8e8e8"
-_TEXT_2 = "#9a9a9a"
-_TEXT_3 = "#6f6f6f"
-_ACCENT = "#e8e8e8"
+from .theme import fs, ui_font, DOCK_TEXT_3 as _TEXT_3, DOCK_TEXT_4 as _TEXT_4
 
 # Blink states: visible cursor vs blank
 _CURSOR_ON = "▋"
@@ -36,53 +28,33 @@ class TypingIndicator(QWidget):
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum)
 
         outer = QHBoxLayout(self)
-        outer.setContentsMargins(16, 0, 16, 0)
+        outer.setContentsMargins(18, 0, 16, 0)
         outer.setSpacing(0)
 
         bubble = QWidget()
         bubble.setObjectName("typingBubble")
-        bubble.setStyleSheet(f"""
-            QWidget#typingBubble {{
-                background-color: {_INPUT_BG};
-                border: 1px solid {_BORDER};
-                border-radius: 4px;
-            }}
-        """)
+        bubble.setStyleSheet("QWidget#typingBubble { background: transparent; border: none; }")
         bubble.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum)
 
         layout = QHBoxLayout(bubble)
-        layout.setContentsMargins(14, 9, 14, 9)
-        layout.setSpacing(6)
+        layout.setContentsMargins(0, 4, 0, 4)
+        layout.setSpacing(4)
 
         # Prefix label — primary text color
         self.prefix_label = QLabel(self.base_text)
-        font = QFont()
-        font.setFamily("JetBrains Mono")
-        font.setPointSize(12)
-        font.setStyleHint(QFont.StyleHint.Monospace)
-        self.prefix_label.setFont(font)
-        self.prefix_label.setStyleSheet(f"""
-            color: {_TEXT};
-            background: transparent;
-            border: none;
-            font-family: 'JetBrains Mono', 'Fira Code', monospace;
-        """)
+        self.prefix_label.setFont(ui_font(13))
+        self.prefix_label.setStyleSheet(
+            f"color: {_TEXT_3}; background: transparent; border: none; font-size: {fs(13)}px;"
+        )
         layout.addWidget(self.prefix_label)
 
         # Blinking terminal cursor label — dim monospace
         self.cursor_label = QLabel(_CURSOR_ON)
-        cursor_font = QFont()
-        cursor_font.setFamily("JetBrains Mono")
-        cursor_font.setStyleHint(QFont.StyleHint.Monospace)
-        cursor_font.setPointSize(12)
-        self.cursor_label.setFont(cursor_font)
+        self.cursor_label.setFont(ui_font(13))
         self.cursor_label.setMinimumWidth(12)
-        self.cursor_label.setStyleSheet(f"""
-            color: {_TEXT_2};
-            background: transparent;
-            border: none;
-            font-family: 'JetBrains Mono', 'Fira Code', monospace;
-        """)
+        self.cursor_label.setStyleSheet(
+            f"color: {_TEXT_4}; background: transparent; border: none; font-size: {fs(13)}px;"
+        )
         layout.addWidget(self.cursor_label)
         layout.addStretch(1)
 

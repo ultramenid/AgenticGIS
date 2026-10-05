@@ -15,9 +15,28 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
+import subprocess  # nosec B404 - fixed argv to the user's own agy binary
 import tempfile
 from typing import Callable, ClassVar, List, Optional, Sequence
+
+
+def _raw_decode_lenient(decoder, text, start, max_repairs=3):
+    """``raw_decode`` that drops stray non-ASCII tokens between JSON tokens.
+
+    Models occasionally leak a junk token (e.g. a lone CJK character) next to
+    a closing brace. A decode error can only land on such a character when it
+    sits outside a string, so deleting it never alters string contents.
+    """
+    for _ in range(max_repairs):
+        try:
+            return decoder.raw_decode(text, start)
+        except json.JSONDecodeError as exc:
+            if exc.pos >= len(text) or ord(text[exc.pos]) < 128:
+                raise
+            text = text[:exc.pos] + text[exc.pos + 1:]
+    return decoder.raw_decode(text, start)
 
 
 class NormalizedEvent:
@@ -61,6 +80,13 @@ class CliAdapter:
     models_parser: ClassVar[Optional[Callable[[str], List[str]]]] = None
     supports_continuation: ClassVar[bool] = False
     supports_mcp: ClassVar[bool] = False
+
+    def local_models(self) -> List[str]:
+        """Models read from the CLI's own config/cache files (no subprocess).
+
+        Tried before ``models_args``; return ``[]`` when unavailable.
+        """
+        return []
 
     def stdin_prompt(self, prompt: str) -> Optional[str]:
         """Return the prompt to write to stdin, or None to pass on command line.
@@ -171,7 +197,7 @@ class CliAdapter:
                 search_start = idx + 1
                 continue
             try:
-                payload, end = decoder.raw_decode(stripped, brace_idx)
+                payload, end = _raw_decode_lenient(decoder, stripped, brace_idx)
             except (json.JSONDecodeError, ValueError):
                 search_start = idx + 1
                 continue
@@ -274,14 +300,17 @@ def normalize_tool_name(name):
 
     Claude Code uses ``mcp__agenticgis__list_layers``; Codex/OpenCode use
     ``agenticgis__list_layers``, ``agenticgis.list_layers`` or
-    ``agenticgis_list_layers``. Anything else (plain names, the text
+    ``agenticgis_list_layers``; Antigravity may report ``agenticgis/list_layers``
+    or ``mcp(agenticgis/list_layers)``. Anything else (plain names, the text
     protocol, shell commands) passes through.
     """
     if not isinstance(name, str):
         return name
+    if name.lower().startswith("mcp(") and name.endswith(")"):
+        name = name[4:-1]
     lowered = name.lower()
     for prefix in (
-        "mcp__agenticgis__", "agenticgis__", "agenticgis.", "agenticgis_",
+        "mcp__agenticgis__", "agenticgis__", "agenticgis.", "agenticgis_", "agenticgis/",
     ):
         if lowered.startswith(prefix):
             return name[len(prefix):]
@@ -306,6 +335,22 @@ def _mcp_proxy_command(mcp_url):
     return ["python3", script, "--url", mcp_url]
 
 
+_ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
+
+
+def _clean_lines(output):
+    """Non-empty output lines with ANSI colour codes stripped."""
+    return [ln.strip() for ln in _ANSI_RE.sub("", output or "").splitlines() if ln.strip()]
+
+
+def _read_text(path):
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            return fh.read()
+    except OSError:
+        return ""
+
+
 class ClaudeAdapter(CliAdapter):
     """Claude Code — ``stream-json`` over ``-p``."""
 
@@ -319,11 +364,15 @@ class ClaudeAdapter(CliAdapter):
 
     auth_status_args = ("auth", "status")
     login_args = ("auth", "login")
+    # No list command; aliases always resolve to the latest release.
     default_models = (
-        "claude-3-7-sonnet",
-        "claude-3-5-sonnet",
-        "claude-3-5-haiku",
-        "claude-opus-4-8",
+        "opus",
+        "sonnet",
+        "haiku",
+        "claude-opus-5-5",
+        "claude-sonnet-5-5",
+        "claude-fable-5-1",
+        "claude-haiku-4-5",
     )
 
     @staticmethod
@@ -497,13 +546,22 @@ class CodexAdapter(CliAdapter):
 
     auth_status_args = ("login", "status")
     login_args = ("login",)
-    default_models = (
-        "o3-mini",
-        "o1",
-        "gpt-4o",
-        "gpt-4.5-preview",
-        "gpt-4o-mini",
-    )
+
+    def local_models(self):
+        """Codex's own picker list: ``models_cache.json`` (visible entries), configured model first."""
+        home = os.environ.get("CODEX_HOME") or os.path.join(os.path.expanduser("~"), ".codex")
+        try:
+            cache = json.loads(_read_text(os.path.join(home, "models_cache.json")) or "{}")
+        except ValueError:
+            cache = {}
+        models = [
+            m["slug"] for m in cache.get("models") or []
+            if isinstance(m, dict) and m.get("slug") and m.get("visibility") != "hide"
+        ]
+        current = re.search(r'(?m)^model\s*=\s*"([^"]+)"', _read_text(os.path.join(home, "config.toml")))
+        if current and current.group(1) not in models:
+            models.insert(0, current.group(1))
+        return models
 
     def stdin_prompt(self, prompt):
         # `codex exec … -` forces the prompt to be read from stdin. Required:
@@ -607,9 +665,19 @@ class OpenCodeAdapter(CliAdapter):
     supports_continuation = True
     supports_mcp = True
 
-    auth_status_args = ("status",)
-    login_args = ("login",)
+    auth_status_args = ("auth", "list")
+    login_args = ("auth", "login")
     models_args = ("models",)
+
+    @staticmethod
+    def _auth_detail(output, default):
+        # `opencode auth list` prints one "<Provider>  <method>  stored" row per credential.
+        providers = [ln.split("  ")[0] for ln in _clean_lines(output) if ln.lower().endswith("stored")]
+        if not providers:
+            return "login_required", "No provider credentials — run `opencode auth login`"
+        return ", ".join(providers)
+
+    auth_detail_parser = _auth_detail
 
     def stdin_prompt(self, prompt):
         return prompt
@@ -617,13 +685,28 @@ class OpenCodeAdapter(CliAdapter):
     def build_command(self, *, binary, prompt, extra_args, runtime_dir, mcp_url=None, model=None, **kwargs):
         cmd = [
             binary, "run",
-            "--pure",
             "--format", "json",
             "--auto",
             *extra_args,
         ]
         if model:
             cmd.extend(["--model", model])
+        return cmd
+
+    def build_continuation_command(
+        self, *, binary, prompt, extra_args, runtime_dir, session_id, mcp_url=None, model=None, **kwargs,
+    ):
+        cmd = self.build_command(
+            binary=binary,
+            prompt=prompt,
+            extra_args=extra_args,
+            runtime_dir=runtime_dir,
+            mcp_url=mcp_url,
+            model=model,
+            **kwargs,
+        )
+        if session_id:
+            cmd.extend(["--session", session_id])
         return cmd
 
     def env(self, mcp_url=None):
@@ -731,12 +814,27 @@ class CursorAdapter(CliAdapter):
     label = "Cursor Agent"
     commands = ("cursor-agent", "cursor")
     credential_style = "Cursor account or configured provider keys"
-    default_models = (
-        "claude-3-7-sonnet",
-        "claude-3-5-sonnet",
-        "gpt-4o",
-        "o3-mini",
-    )
+    auth_status_args = ("status",)
+    login_args = ("login",)
+    models_args = ("models",)
+    default_models = ("auto",)
+
+    @staticmethod
+    def _auth_detail(output, default):
+        lines = _clean_lines(output)
+        text = " ".join(lines).lower()
+        if "not logged in" in text or "not authenticated" in text:
+            return "login_required", "Not logged in — run `cursor-agent login`"
+        line = next((ln for ln in lines if "logged in" in ln.lower()), default)
+        return line.lstrip("✓ ").strip()
+
+    @staticmethod
+    def _parse_models(output):
+        # "<id> - <Display name>" rows under an "Available models" header.
+        return [ln.split(" - ", 1)[0].strip() for ln in _clean_lines(output) if " - " in ln]
+
+    auth_detail_parser = _auth_detail
+    models_parser = _parse_models
 
     def build_command(self, *, binary, prompt, extra_args, runtime_dir, mcp_url=None, model=None, **kwargs):
         base = os.path.basename(binary or "")
@@ -794,6 +892,68 @@ class GeminiAdapter(CliAdapter):
         return cmd
 
 
+_AGY_SERVER_KEYS = ("servername", "server_name", "server", "mcp_server", "mcpserver")
+_AGY_TOOL_KEYS = ("toolname", "tool_name", "tool", "name")
+_AGY_ARG_KEYS = ("arguments", "args", "toolargs", "tool_args", "input", "parameters", "params")
+
+
+def _unwrap_agy_mcp_call(params):
+    """``call_mcp_tool {server, tool, arguments}`` → ``(tool, arguments)`` for our server.
+
+    agy routes every MCP call through one generic tool; unwrapping it lets the
+    UI show the real tool and attach its visuals. Key spelling isn't documented,
+    so match case-insensitively; anything unrecognised stays ``call_mcp_tool``.
+    """
+    if not isinstance(params, dict):
+        return "call_mcp_tool", params
+    lower = {str(k).lower(): v for k, v in params.items()}
+    server = next((lower[k] for k in _AGY_SERVER_KEYS if isinstance(lower.get(k), str)), "")
+    tool = next(
+        (lower[k] for k in _AGY_TOOL_KEYS
+         if isinstance(lower.get(k), str) and lower[k] and lower[k] != server),
+        "",
+    )
+    if not tool or (server and server.lower() != MCP_SERVER_NAME):
+        return "call_mcp_tool", params
+    args = next((lower[k] for k in _AGY_ARG_KEYS if k in lower), {})
+    if isinstance(args, str):
+        try:
+            args = json.loads(args) if args.strip() else {}
+        except ValueError:
+            pass
+    return normalize_tool_name(tool), args if isinstance(args, dict) else {}
+
+
+_AGY_MCP_REGISTERED = set()
+
+
+def _ensure_agy_mcp(binary, mcp_url):
+    """Register the AgenticGIS bridge in agy's user-level MCP config (once per URL).
+
+    agy has no per-run MCP flag, so this writes ``~/.gemini/config/mcp_config.json``
+    via ``agy mcp add`` (add-or-update). The bridge port is fixed, so the entry
+    stays valid between QGIS sessions. Best-effort: failure leaves the text protocol.
+    """
+    key = (binary, mcp_url)
+    if key in _AGY_MCP_REGISTERED:
+        return
+    try:
+        listing = subprocess.run(  # nosec B603
+            [binary, "mcp", "list"], capture_output=True, text=True, timeout=10, check=False,
+        ).stdout or ""
+        if not any(
+            line.split()[:1] == [MCP_SERVER_NAME] and mcp_url in line and "enabled" in line
+            for line in listing.splitlines()
+        ):
+            subprocess.run(  # nosec B603
+                [binary, "mcp", "add", MCP_SERVER_NAME, mcp_url],
+                capture_output=True, timeout=10, check=True,
+            )
+        _AGY_MCP_REGISTERED.add(key)
+    except Exception:  # nosec B110 - registration is optional
+        pass
+
+
 class AntigravityAdapter(CliAdapter):
     """Antigravity CLI — ``agy`` agent interface."""
 
@@ -802,7 +962,7 @@ class AntigravityAdapter(CliAdapter):
     commands = ("agy", "antigravity")
     credential_style = "Google account or Antigravity credentials"
     supports_continuation = True
-    supports_mcp = False
+    supports_mcp = True
 
     auth_status_args = ("models",)
     login_args = ()
@@ -812,7 +972,7 @@ class AntigravityAdapter(CliAdapter):
     def _auth_detail(output: str, default: str) -> str:
         lower = output.lower()
         if any(err in lower for err in ("not logged in", "login required", "unauthenticated", "unauthorized")):
-            return "Not logged in"
+            return "login_required", "Not logged in"
         lines = [line.strip() for line in output.splitlines() if line.strip()]
         models = [
             line for line in lines
@@ -845,10 +1005,15 @@ class AntigravityAdapter(CliAdapter):
     models_parser = _parse_models
 
     def build_command(self, *, binary, prompt, extra_args, runtime_dir, mcp_url=None, model=None, **kwargs):
+        if mcp_url:
+            _ensure_agy_mcp(binary, mcp_url)
+        # --sandbox: agy's built-in shell runs with terminal restrictions, since
+        # permissions are auto-approved and QGIS work should go through our tools.
         cmd = [
             binary, *extra_args,
             "--output-format", "stream-json",
             "--dangerously-skip-permissions",
+            "--sandbox",
         ]
         if model:
             cmd.extend(["--model", model])
@@ -858,10 +1023,15 @@ class AntigravityAdapter(CliAdapter):
     def build_continuation_command(
         self, *, binary, prompt, extra_args, runtime_dir, session_id, mcp_url=None, model=None, **kwargs,
     ):
+        if mcp_url:
+            _ensure_agy_mcp(binary, mcp_url)
+        # --sandbox: agy's built-in shell runs with terminal restrictions, since
+        # permissions are auto-approved and QGIS work should go through our tools.
         cmd = [
             binary, *extra_args,
             "--output-format", "stream-json",
             "--dangerously-skip-permissions",
+            "--sandbox",
         ]
         if model:
             cmd.extend(["--model", model])
@@ -890,6 +1060,8 @@ class AntigravityAdapter(CliAdapter):
                 tool_name = normalize_tool_name(su.get("tool_name") or tool_info.get("name") or "")
                 if tool_name:
                     params = tool_info.get("parameters") or tool_info.get("input") or {}
+                    if tool_name == "call_mcp_tool":
+                        tool_name, params = _unwrap_agy_mcp_call(params)
                     call = {"name": tool_name, "arguments": params}
                     if "output" in tool_info:
                         call["output"] = tool_info["output"]
@@ -987,11 +1159,26 @@ class KimiAdapter(CliAdapter):
     label = "Kimi CLI"
     commands = ("kimi",)
     credential_style = "Moonshot/Kimi API key"
-    default_models = (
-        "kimi-k2.5",
-        "kimi-k2",
-        "kimi-latest",
-    )
+    auth_status_args = ("provider", "list")
+    login_args = ("login",)
+
+    @staticmethod
+    def _auth_detail(output, default):
+        providers = [ln.split()[0] for ln in _clean_lines(output) if "type=" in ln]
+        if not providers:
+            return "login_required", "No providers configured — run `kimi login`"
+        return f"{len(providers)} provider{'s' if len(providers) != 1 else ''}: {', '.join(providers)}"
+
+    auth_detail_parser = _auth_detail
+
+    def local_models(self):
+        """Model aliases from ``~/.kimi-code/config.toml``, the default model first."""
+        text = _read_text(os.path.join(os.path.expanduser("~"), ".kimi-code", "config.toml"))
+        models = re.findall(r'(?m)^\[models\."([^"]+)"\]', text)
+        default = re.search(r'(?m)^default_model\s*=\s*"([^"]+)"', text)
+        if default:
+            models = [default.group(1)] + [m for m in models if m != default.group(1)]
+        return models
 
     def build_command(self, *, binary, prompt, extra_args, runtime_dir, mcp_url=None, model=None, **kwargs):
         cmd = [

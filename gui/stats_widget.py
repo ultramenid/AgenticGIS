@@ -13,15 +13,18 @@ from qgis.PyQt.QtWidgets import (
 )
 
 from .downloadable import HoverDownloadButton, save_csv, _safe_name
+from .theme import (
+    fs,
+    ui_font,
+    DOCK_SURFACE as _SURFACE,
+    DOCK_SURFACE as _INPUT_BG,
+    DOCK_BORDER as _BORDER,
+    DOCK_TEXT as _TEXT,
+    DOCK_TEXT_2 as _TEXT_2,
+    DOCK_TEXT_3 as _TEXT_3,
+)
 
 # Design tokens — darker, softer (match chat_dock.py)
-_SURFACE = "#161616"
-_INPUT_BG = "#1e1e1e"
-_BORDER = "#2e2e2e"
-_TEXT = "#ececec"
-_TEXT_2 = "#a0a0a0"
-_TEXT_3 = "#707070"
-_DANGER = "#e57373"
 
 
 class StatsWidget(QFrame):
@@ -42,7 +45,7 @@ class StatsWidget(QFrame):
             StatsWidget {{
                 background-color: {_INPUT_BG};
                 border: 1px solid {_BORDER};
-                border-radius: 10px;
+                border-radius: 12px;
             }}
         """)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum)
@@ -53,7 +56,7 @@ class StatsWidget(QFrame):
 
         layer_name = self.stats_data.get("layer_name", "Layer")
         title = QLabel(layer_name)
-        title.setFont(QFont("Inter", 11, QFont.Weight.Bold))
+        title.setFont(ui_font(13, QFont.Weight.DemiBold))
         title.setStyleSheet(f"color: {_TEXT}; background: transparent;")
         main_layout.addWidget(title)
 
@@ -134,13 +137,13 @@ class StatsWidget(QFrame):
 
         label_widget = QLabel(label)
         label_widget.setStyleSheet(
-            f"color: {_TEXT_3}; font-size: 9px; background: transparent; letter-spacing: 0.03em;"
+            f"color: {_TEXT_3}; font-size: {fs(9)}px; background: transparent; letter-spacing: 0.03em;"
         )
         layout.addWidget(label_widget)
 
         value_widget = QLabel(str(value))
         value_widget.setStyleSheet(
-            f"color: {_TEXT_2}; font-size: 14px; font-weight: 500; background: transparent;"
+            f"color: {_TEXT_2}; font-size: {fs(14)}px; font-weight: 500; background: transparent;"
         )
         value_widget.setWordWrap(True)
         layout.addWidget(value_widget)

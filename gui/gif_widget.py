@@ -12,12 +12,15 @@ from qgis.PyQt.QtWidgets import (
 )
 
 from .downloadable import HoverDownloadButton, save_file_copy, _safe_name
+from .theme import (
+    fs,
+    DOCK_SURFACE as _SURFACE,
+    DOCK_BORDER as _BORDER,
+    DOCK_TEXT as _TEXT,
+    DOCK_TEXT_2 as _TEXT_2,
+)
 
 # Design tokens — match ChartWidget
-_SURFACE = "#161616"
-_BORDER = "#2e2e2e"
-_TEXT = "#ececec"
-_TEXT_2 = "#a0a0a0"
 
 
 class GifWidget(QFrame):
@@ -35,7 +38,7 @@ class GifWidget(QFrame):
             GifWidget {{
                 background-color: {_SURFACE};
                 border: 1px solid {_BORDER};
-                border-radius: 8px;
+                border-radius: 12px;
             }}
         """)
         self.setMaximumWidth(600)
@@ -57,7 +60,7 @@ class GifWidget(QFrame):
 
         # Title label (muted)
         title_label = QLabel(name)
-        title_label.setStyleSheet(f"color: {_TEXT_2}; font-size: 12px;")
+        title_label.setStyleSheet(f"color: {_TEXT_2}; font-size: {fs(12)}px;")
 
         # Animation label
         animation_label = QLabel()

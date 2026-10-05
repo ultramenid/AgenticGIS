@@ -56,6 +56,8 @@ DEFAULTS = {
     # Latency: use a cheaper/faster model for hidden context-compaction summaries.
     # Empty string (default) means "same model as the chat model".
     "compaction_model": "",
+    # UI: multiplier for every font size in the chat dock and settings dialog.
+    "font_scale": 1.0,
 }
 
 

@@ -61,6 +61,7 @@ from .base import (
     EventType,
     _dispatch_one_tool,
     agent_iteration_steps,
+    emit_result_visuals,
 )
 from .openai_backend import build_system_prompt as _build_system_prompt
 
@@ -954,6 +955,21 @@ def scan_cli_agents(path_overrides=None):
     return rows
 
 
+_MALFORMED_CALL_MARKERS = ("malformed function call", "improperly formatted function call")
+
+
+def _hold_malformed_call_errors(emit, held):
+    """Wrap ``emit`` so Gemini's malformed-tool-call errors land in ``held`` instead of the UI."""
+    def wrapped(event):
+        if event.type == EventType.ERROR:
+            text = str((event.data or {}).get("error", "")).lower()
+            if any(marker in text for marker in _MALFORMED_CALL_MARKERS):
+                held.append(event)
+                return
+        emit(event)
+    return wrapped
+
+
 class NormalizingStream:
     """Reads raw JSONL lines from a CLI subprocess and emits AgentEvents.
 
@@ -1004,8 +1020,20 @@ class NormalizingStream:
         # fails parse_protocol_text, so without buffering the raw partial
         # JSON would leak into the chat bubble as TEXT. Fragments are held
         # here until the object is complete; if it never resolves the buffer
-        # is flushed as text on the final/error event.
+        # is flushed on the final/error event.
         self._pending_protocol = ""
+        # A tool_calls object that never parsed. Held back from the chat (API
+        # mode never shows protocol JSON) so the turn loop can ask for a resend.
+        self.malformed_protocol = ""
+
+    def _divert_malformed_protocol(self, text):
+        """Swallow *text* if it is a broken tool_calls attempt; True if swallowed."""
+        t = (text or "").lstrip()
+        if not (t.startswith(("{", "```")) and '"tool_calls"' in t):
+            return False
+        self.malformed_protocol = text
+        log_event("cli.protocol.malformed", chars=len(text))
+        return True
 
     def _log_first_event(self, event_type):
         if self._first_event_logged:
@@ -1109,8 +1137,27 @@ class NormalizingStream:
             key = (call.get("name"),
                    json.dumps(call.get("arguments", {}), sort_keys=True))
             if key in self._emitted_tool_call_keys:
+                # Gemini-style CLIs announce a call first and send its output in
+                # a later event; attach that output instead of dropping it so
+                # the UI row resolves and the call is not re-run by us.
+                if "output" in call:
+                    for prev in self.pending_tool_calls:
+                        prev_key = (prev.get("name"), json.dumps(prev.get("arguments", {}), sort_keys=True))
+                        if prev_key == key and "output" not in prev:
+                            prev["output"] = call["output"]
+                            self.emit(AgentEvent(EventType.TOOL_RESULT, {
+                                "name": call["name"],
+                                "result": str(call["output"])[:4000],
+                                "is_error": bool(call.get("is_error", False)),
+                            }))
+                            emit_result_visuals(call["name"], call["output"], self.emit)
+                            break
                 continue
             self._emitted_tool_call_keys.add(key)
+            if call.get("name") == "call_mcp_tool":
+                args = call.get("arguments")
+                log_event("cli.mcp_call.unrecognized", tool=self.adapter.id,
+                          keys=sorted(args) if isinstance(args, dict) else str(type(args)))
             call["_tool_use_id"] = f"cli_call_{self._tool_call_counter}"
             self._tool_call_counter += 1
             self.pending_tool_calls.append(call)
@@ -1127,6 +1174,7 @@ class NormalizingStream:
                         "is_error": bool(call.get("is_error", False)),
                     },
                 ))
+                emit_result_visuals(call["name"], call["output"], self.emit)
 
     def _looks_like_protocol_start(self, text):
         """True if *text* could be the opening of a
@@ -1156,7 +1204,7 @@ class NormalizingStream:
         text (e.g. it never closed, or the turn ended before it resolved)."""
         buf = self._pending_protocol
         self._pending_protocol = ""
-        if not buf or buf == self._last_text_value:
+        if not buf or buf == self._last_text_value or self._divert_malformed_protocol(buf):
             return
         self._log_first_event("text")
         self._log_first_text()
@@ -1244,6 +1292,8 @@ class NormalizingStream:
             raw = json.loads(decoded)
         except (json.JSONDecodeError, UnicodeDecodeError):
             text = stripped
+            if self._divert_malformed_protocol(text):
+                return
             if text and not self._is_startup_noise(raw_bytes, {}) and text != self._last_text_value:
                 self._log_first_event("text")
                 self._log_first_text()
@@ -1330,6 +1380,14 @@ class NormalizingStream:
             # into a complete object before the turn ended.
             self._flush_pending_protocol_as_text()
             self.final_text = norm.text or self.final_text
+
+
+_MAX_PROTOCOL_RETRIES = 2
+_PROTOCOL_RETRY_PROMPT = (
+    "Your last tool call was not valid JSON, so it did not run. Resend it as "
+    "exactly one valid JSON object with no extra characters before, inside the "
+    "braces, or after it."
+)
 
 
 class CliToolBackend(AgentBackend):
@@ -1460,6 +1518,9 @@ class CliToolBackend(AgentBackend):
         parser = get_adapter(self.tool).auth_detail_parser
         if callable(parser):
             detail = parser(output, detail)
+            # A parser may return (state, detail) when exit codes don't tell the truth.
+            if isinstance(detail, tuple):
+                return detail
         if result.returncode == 0:
             return "ready", detail or "Logged in"
         if result.returncode in (1, 2) and detail:
@@ -1469,8 +1530,11 @@ class CliToolBackend(AgentBackend):
     def list_models(self):
         """Return a list of available models for the selected CLI agent."""
         adapter = get_adapter(self.tool)
-        models = []
-        if adapter.models_args and self.binary:
+        try:
+            models = list(adapter.local_models())
+        except Exception:  # noqa: BLE001 — a model list is optional
+            models = []
+        if not models and adapter.models_args and self.binary:
             output = None
             if (
                 adapter.models_args == adapter.auth_status_args
@@ -1740,6 +1804,7 @@ class CliToolBackend(AgentBackend):
         adapter = get_adapter(self.tool)
         with self._lock:
             generation = self._state_generation
+        protocol_retries = 0
 
         for _ in agent_iteration_steps(max_iters):
             if should_stop():
@@ -1747,14 +1812,34 @@ class CliToolBackend(AgentBackend):
                 emit(AgentEvent(EventType.DONE))
                 return messages
 
-            if self._continuation_session_id(adapter):
-                prompt = self._continuation_prompt(new_messages)
-            else:
-                prompt = self._conversation_prompt(messages)
-            stream = self._run_stream(adapter, prompt, emit, should_stop, generation)
-            self._remember_session_id(
-                adapter, getattr(stream, "session_id", ""), generation
-            )
+            # Gemini sometimes returns an empty/garbled tool call (MALFORMED_FUNCTION_CALL)
+            # and the CLI gives up on the run. Hide that error on the first try and
+            # quietly re-run once; a second failure is shown as usual.
+            for attempt in range(2):
+                if self._continuation_session_id(adapter):
+                    prompt = self._continuation_prompt(new_messages)
+                else:
+                    prompt = self._conversation_prompt(messages)
+                held = []
+                stream = self._run_stream(
+                    adapter, prompt, _hold_malformed_call_errors(emit, held) if attempt == 0 else emit,
+                    should_stop, generation,
+                )
+                self._remember_session_id(
+                    adapter, getattr(stream, "session_id", ""), generation
+                )
+                produced = (
+                    getattr(stream, "pending_tool_calls", None)
+                    or getattr(stream, "pending_tool_call", None)
+                    or stream.final_text
+                    or getattr(stream, "_emitted_text_chunks", None)
+                )
+                if not held or produced or should_stop():
+                    for event in held:
+                        emit(event)
+                    break
+                log_event("cli.malformed_call.retry", tool=adapter.id)
+                emit(AgentEvent(EventType.THINKING, {"text": "Model sent a malformed tool call, retrying..."}))
 
             # Support both the new list-based field and legacy single field (for tests).
             pending = getattr(stream, "pending_tool_calls", None) or []
@@ -1806,6 +1891,23 @@ class CliToolBackend(AgentBackend):
                     new_messages = tool_messages
                     continue
                 # All calls were non-AgenticGIS tools or already executed — fall through to text handling.
+            elif getattr(stream, "malformed_protocol", "") and protocol_retries < _MAX_PROTOCOL_RETRIES:
+                # The model tried to call a tool but its JSON didn't parse. API
+                # mode would never show that JSON, so ask for a clean resend.
+                protocol_retries += 1
+                log_event("cli.protocol.retry", tool=adapter.id, attempt=protocol_retries)
+                emit(AgentEvent(EventType.THINKING, {"text": "Model sent a malformed tool call, retrying..."}))
+                nudge = {"role": "user", "content": _PROTOCOL_RETRY_PROMPT}
+                messages.extend([{"role": "assistant", "content": stream.malformed_protocol}, nudge])
+                new_messages = [nudge]
+                continue
+            elif getattr(stream, "malformed_protocol", "") and not stream.final_text:
+                emit(AgentEvent(EventType.ERROR, {
+                    "error": "The CLI model kept sending tool calls that weren't valid JSON. "
+                             "Try again, or switch to a stronger model.",
+                }))
+                emit(AgentEvent(EventType.DONE))
+                return messages
 
             if stream.final_text is not None:
                 messages.append({"role": "assistant", "content": stream.final_text})
@@ -1971,9 +2073,20 @@ class CliToolBackend(AgentBackend):
                 self._proc.stdin.write(stdin_data.encode("utf-8"))
                 self._proc.stdin.close()
         except Exception as exc:
+            err_detail = str(exc)
+            if self._proc is not None:
+                try:
+                    stderr_bytes = self._proc.stderr.read()
+                    if stderr_bytes:
+                        err_text = stderr_bytes.decode("utf-8", "replace").strip()
+                        if err_text:
+                            err_detail = f"{err_text} ({exc})"
+                except (AttributeError, OSError, ValueError):
+                    pass  # stderr missing/unreadable/closed: keep the launch error as-is
+                self._finalize_process(self._proc)
             emit(
                 AgentEvent(
-                    EventType.ERROR, {"error": f"Failed to launch {self.tool}: {exc}"}
+                    EventType.ERROR, {"error": f"Failed to launch {self.tool}: {err_detail}"}
                 )
             )
             stream = NormalizingStream(adapter, emit)

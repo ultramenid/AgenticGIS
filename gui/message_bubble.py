@@ -23,7 +23,11 @@ from qgis.PyQt.QtWidgets import (
 )
 
 from .downloadable import HoverDownloadButton, save_text, _safe_name
+from .formatting import TABLE_RE, md_table_rows
 from .theme import (
+    fs,
+    MONO_STACK,
+    sans_family,
     DOCK_SURFACE as _SURFACE,
     DOCK_SURFACE_2 as _SURFACE_2,
     DOCK_BORDER as _BORDER,
@@ -37,9 +41,9 @@ from .theme import (
 # ── One Dark palette (carbon.sh default theme) ─────────────────────────
 
 # ── One Dark palette (carbon.sh default theme) ─────────────────────────
-_SYN_BG = "#282c34"
-_SYN_CHROME = "#21252b"
-_SYN_BORDER = "#3e4451"
+_SYN_BG = "#151515"
+_SYN_CHROME = "#191919"
+_SYN_BORDER = "#2c2c2c"
 _SYN_TEXT = "#abb2bf"
 _SYN_CMT = "#5c6370"   # comments — italic gray
 _SYN_STR = "#98c379"   # strings  — green
@@ -154,23 +158,6 @@ def _show_code_context_menu(parent, label, pos, text: str):
     menu.exec(label.mapToGlobal(pos))
 
 
-def _table_cells(line: str) -> list:
-    """Parse one escaped markdown table row into plain text cells."""
-    cells = [c.strip() for c in line.split("|")]
-    cells = [c for j, c in enumerate(cells) if c or (0 < j < len(cells) - 1)]
-
-    def clean_cell(cell: str) -> str:
-        cell = html.unescape(cell)
-        # Tables render as preformatted text, so keep common inline markdown
-        # readable instead of leaking literal formatting markers.
-        cell = re.sub(r"`([^`]+)`", r"\1", cell)
-        cell = re.sub(r"\*\*(.+?)\*\*", r"\1", cell)
-        cell = re.sub(r"\*(.+?)\*", r"\1", cell)
-        return cell
-
-    return [clean_cell(c) for c in cells]
-
-
 def _highlight_code(body: str, lang: str) -> str:
     """Apply One Dark syntax coloring to an html-escaped code body.
 
@@ -274,14 +261,7 @@ def _render_md_table(match) -> str:
     of asking Qt to solve column layout.
     """
     raw = match.group(0)
-    lines = [ln for ln in raw.strip().splitlines() if ln.strip()]
-    # Skip separator lines: rows whose non-pipe content is only -, :, space
-    data_lines = [ln for ln in lines if not re.match(r'^[\s|:\-]+$', ln)]
-    if not data_lines:
-        return raw
-
-    rows = [_table_cells(ln) for ln in data_lines]
-    rows = [row for row in rows if row]
+    rows = md_table_rows(html.unescape(raw))
     if not rows:
         return raw
 
@@ -302,20 +282,15 @@ def _render_md_table(match) -> str:
     rendered_lines.extend(fmt_row(row) for row in rows[1:])
     table_text = "\n".join(rendered_lines)
 
-    block_style = (
-        f"background:{_SURFACE_2}; border:1px solid {_BORDER}; border-radius:6px; "
-        f"margin:8px 0 12px 0; padding:8px 10px; overflow-x:auto; overflow-y:hidden;"
-    )
     pre_style = (
-        f"margin:0; padding:0; color:{_TEXT_2}; background:transparent; "
-        f"font-size:12px; line-height:1.45; "
-        f"font-family:'JetBrains Mono','Fira Code',monospace; white-space:pre;"
+        f"margin:0; color:{_TEXT_2}; font-size:{fs(12)}px; line-height:1.45; "
+        f"font-family:{MONO_STACK}; white-space:pre;"
     )
-    spacer = '<br><span style="font-size:4px; line-height:4px;">&nbsp;</span><br>'
     return (
-        f'<div style="{block_style}">'
-        f'<pre style="{pre_style}">{html.escape(table_text)}</pre>'
-        f'</div>{spacer}'
+        f'<table width="100%" cellspacing="0" cellpadding="0" '
+        f'style="background:{_SURFACE_2}; margin:8px 0; border:1px solid {_BORDER};">'
+        f'<tr><td style="padding:8px 10px;"><pre style="{pre_style}">{html.escape(table_text)}</pre></td></tr>'
+        f'</table>'
     )
 
 
@@ -340,38 +315,19 @@ def _md_to_html(text: str) -> str:
 
         highlighted = _highlight_code(body, lang)
 
-        # Window chrome — traffic lights left, language badge right
-        dots = (
-            '<span style="color:#ff5f56;font-size:10px;">&#9679;</span>'
-            '<span style="color:#ffbd2e;font-size:10px;margin-left:5px;">&#9679;</span>'
-            '<span style="color:#27c93f;font-size:10px;margin-left:5px;">&#9679;</span>'
+        header = (
+            f'<tr><td style="background:{_SYN_CHROME}; padding:5px 12px;">'
+            f'<span style="color:{_SYN_CMT}; font-family:{MONO_STACK}; font-size:{fs(10)}px;">'
+            f'{lang.upper() or "CODE"}</span></td></tr>'
         )
-        lang_badge = (
-            f'<span style="color:{_SYN_CMT};font-family:\'JetBrains Mono\',monospace;'
-            f'font-size:9px;letter-spacing:0.08em;">{lang.upper()}</span>'
-            if lang else ""
-        )
-        chrome = (
-            f'<div style="background:{_SYN_CHROME};padding:9px 14px 8px 14px;'
-            f'border-bottom:1px solid {_SYN_BORDER};border-radius:14px 14px 0 0;">'
-            f'<table width="100%" cellspacing="0" cellpadding="0" border="0"><tr>'
-            f'<td style="vertical-align:middle;">{dots}</td>'
-            f'<td align="right" style="vertical-align:middle;">{lang_badge}</td>'
-            f'</tr></table>'
-            f'</div>'
-        )
-
         rendered = (
-            f'<div style="background:{_SYN_BG};border:1px solid {_SYN_BORDER};'
-            f'border-radius:14px;margin:8px 0;">'
-            f'{chrome}'
-            f'<div style="padding:16px 18px;border-radius:0 0 14px 14px;">'
-            f'<pre style="margin:0;padding:0;background:transparent;border:none;'
-            f'font-family:\'JetBrains Mono\',\'Fira Code\',monospace;'
-            f'font-size:12.5px;line-height:1.6;color:{_SYN_TEXT};'
-            f'white-space:pre-wrap;">{highlighted}</pre>'
-            f'</div>'
-            f'</div>'
+            f'<table width="100%" cellspacing="0" cellpadding="0" '
+            f'style="background:{_SYN_BG}; margin:8px 0; border:1px solid {_SYN_BORDER};">'
+            f'{header}'
+            f'<tr><td style="padding:10px 12px;">'
+            f'<pre style="margin:0; font-family:{MONO_STACK}; font-size:{fs(12)}px; '
+            f'line-height:1.5; color:{_SYN_TEXT}; white-space:pre-wrap;">{highlighted}</pre>'
+            f'</td></tr></table>'
         )
         placeholder = f"\x00CODE{len(code_blocks)}\x00"
         code_blocks.append(rendered)
@@ -390,22 +346,25 @@ def _md_to_html(text: str) -> str:
     # Markdown tables must be protected before inline-code conversion. Otherwise
     # a table cell containing `code` becomes literal <code style=...> text inside
     # the preformatted table block.
-    safe = re.sub(r"(?m)(?:^\|[^\n]*\n){2,}(?:^\|[^\n]*)?", _save_table_block, safe)
+    safe = TABLE_RE.sub(_save_table_block, safe)
 
     # Headings — inline bold, not block dividers; keeps prose flow natural
     safe = re.sub(
         r"(?m)^### (.+)$",
-        lambda m: f'<b style="color:{_TEXT_2}; font-size:12px;">{m.group(1)}</b>',
+        lambda m: (f'<div style="color:{_TEXT}; font-size:{fs(13)}px; font-weight:600; '
+                   f'margin:10px 0 2px 0;">{m.group(1)}</div>'),
         safe,
     )
     safe = re.sub(
         r"(?m)^## (.+)$",
-        lambda m: f'<b style="color:{_TEXT}; font-size:12px;">{m.group(1)}</b>',
+        lambda m: (f'<div style="color:{_TEXT}; font-size:{fs(14.5)}px; font-weight:600; '
+                   f'margin:12px 0 4px 0;">{m.group(1)}</div>'),
         safe,
     )
     safe = re.sub(
         r"(?m)^# (.+)$",
-        lambda m: f'<b style="color:{_TEXT}; font-size:13px;">{m.group(1)}</b>',
+        lambda m: (f'<div style="color:{_TEXT}; font-size:{fs(16)}px; font-weight:600; '
+                   f'margin:12px 0 4px 0;">{m.group(1)}</div>'),
         safe,
     )
 
@@ -413,8 +372,8 @@ def _md_to_html(text: str) -> str:
     safe = re.sub(
         r"(?m)^- (.+)$",
         lambda m: (
-            f'<div style="padding-left:10px; color:{_TEXT}; line-height:1.5; margin:0;">'
-            f'<span style="color:{_TEXT_3}; margin-right:5px;">·</span>{m.group(1)}</div>'
+            f'<div style="margin:2px 0 2px 14px; color:{_TEXT};">'
+            f'<span style="color:{_TEXT_3};">•&nbsp;&nbsp;</span>{m.group(1)}</div>'
         ),
         safe,
     )
@@ -423,8 +382,8 @@ def _md_to_html(text: str) -> str:
     safe = re.sub(
         r"(?m)^(\d+)\. (.+)$",
         lambda m: (
-            f'<div style="padding-left:10px; color:{_TEXT}; line-height:1.5; margin:0;">'
-            f'<span style="color:{_TEXT_3}; margin-right:5px;">{m.group(1)}.</span>{m.group(2)}</div>'
+            f'<div style="margin:2px 0 2px 14px; color:{_TEXT};">'
+            f'<span style="color:{_TEXT_3};">{m.group(1)}.&nbsp;&nbsp;</span>{m.group(2)}</div>'
         ),
         safe,
     )
@@ -434,8 +393,8 @@ def _md_to_html(text: str) -> str:
         lambda m: (
             f'<code style="background:{_SURFACE_2}; color:{_TEXT}; '
             f'border:1px solid {_BORDER}; '
-            f'border-radius:3px; padding:1px 4px; font-family:monospace; '
-            f'font-size:11.5px;">{m.group(1)}</code>'
+            f'border-radius:3px; padding:1px 4px; font-family:{MONO_STACK}; '
+            f'font-size:{fs(11.5)}px;">{m.group(1)}</code>'
         ),
         safe,
     )
@@ -443,13 +402,7 @@ def _md_to_html(text: str) -> str:
     safe = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", safe)
     safe = re.sub(r"\*(.+?)\*", r"<i>\1</i>", safe)
 
-    # Strip newlines adjacent to block <div>s before converting \n → <br>
-    # Otherwise </div>\n becomes </div><br> — a blank line after every bullet.
-    safe = re.sub(r'</div>\n', '</div>', safe)
-    safe = re.sub(r'\n<div', '<div', safe)
-    # Collapse 3+ consecutive <br> down to 2 (paragraph break, not page break)
-    safe = re.sub(r'(<br\s*/?>\s*){3,}', '<br><br>', safe)
-    safe = safe.replace("\n", "<br>")
+    safe = _wrap_loose_text(safe)
 
     for i, block in enumerate(code_blocks):
         safe = safe.replace(f"\x00CODE{i}\x00", block)
@@ -458,10 +411,36 @@ def _md_to_html(text: str) -> str:
 
     # Wrap in prose container for consistent line-height and font
     return (
-        f'<div style="line-height:1.5; font-size:12px; color:{_TEXT};'
-        f" font-family:'JetBrains Mono','Fira Code',monospace;\">"
+        f'<div style="line-height:1.6; font-size:{fs(13)}px; color:{_TEXT};'
+        f' font-family:{sans_family()};">'
         f'{safe}</div>'
     )
+
+
+_BLOCK_RE = re.compile(r"(<div[^>]*>.*?</div>|\x00(?:CODE|TABLE)\d+\x00)", re.DOTALL)
+
+
+def _wrap_loose_text(safe: str) -> str:
+    """Put every run of text between blocks into its own ``<p>``.
+
+    Qt rich text glues loose text onto the preceding block ("HeadingText"),
+    and a ``<br>`` beside a block renders as a full blank line — so blocks
+    keep their own margins and the text between them becomes paragraphs.
+    The divs produced above are never nested, so a lazy match is enough.
+    """
+    out = []
+    for i, seg in enumerate(_BLOCK_RE.split(safe)):
+        if i % 2:
+            out.append(seg)
+            continue
+        # A blank line starts a new paragraph; "<br><br>" would leave a full empty line.
+        for para in re.split(r"\n\s*\n", seg.strip("\n")):
+            if para.strip():
+                out.append(f'<p style="margin:0 0 8px 0;">{para.strip(chr(10)).replace(chr(10), "<br>")}</p>')
+    # The last paragraph's bottom margin would only pad the end of the message.
+    if out and out[-1].startswith('<p style="margin:0 0 8px 0;">'):
+        out[-1] = out[-1].replace("margin:0 0 8px 0;", "margin:0;", 1)
+    return "".join(out)
 
 
 def _md_inline(text: str) -> str:
@@ -477,8 +456,8 @@ def _md_inline(text: str) -> str:
     safe = re.sub(
         r"(?m)^- (.+)$",
         lambda m: (
-            f'<div style="padding-left:10px; color:{_TEXT}; line-height:1.5; margin:0;">'
-            f'<span style="color:{_TEXT_3}; margin-right:5px;">·</span>{m.group(1)}</div>'
+            f'<div style="margin:2px 0 2px 14px; color:{_TEXT};">'
+            f'<span style="color:{_TEXT_3};">•&nbsp;&nbsp;</span>{m.group(1)}</div>'
         ),
         safe,
     )
@@ -489,8 +468,8 @@ def _md_inline(text: str) -> str:
         lambda m: (
             f'<code style="background:{_SURFACE_2}; color:{_TEXT}; '
             f'border:1px solid {_BORDER}; '
-            f'border-radius:3px; padding:1px 4px; font-family:monospace; '
-            f'font-size:11.5px;">{m.group(1)}</code>'
+            f'border-radius:3px; padding:1px 4px; font-family:{MONO_STACK}; '
+            f'font-size:{fs(11.5)}px;">{m.group(1)}</code>'
         ),
         safe,
     )
@@ -550,25 +529,25 @@ class MessageBubble(QFrame):
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
 
         if self.is_error:
-            bg_color = _SURFACE
+            bg_color = "#2a1c1f"
             text_color = _DANGER
-            border_color = _DANGER
-            border_radius = "4px"
+            border_color = "#4a2a30"
+            border_radius = "10px"
         elif self.is_tool:
             bg_color = _SURFACE
             text_color = _TEXT_2
             border_color = _BORDER_SOFT
-            border_radius = "4px"
+            border_radius = "10px"
         elif self.is_user:
             bg_color = _SURFACE_2
             text_color = _TEXT
-            border_color = _BORDER
-            border_radius = "10px"
+            border_color = _SURFACE_2
+            border_radius = "14px"
         else:
-            bg_color = _SURFACE
+            bg_color = "transparent"
             text_color = _TEXT
-            border_color = _BORDER
-            border_radius = "4px"
+            border_color = "transparent"
+            border_radius = "0px"
 
         self.setStyleSheet(f"""
             MessageBubble {{
@@ -580,7 +559,7 @@ class MessageBubble(QFrame):
         """)
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(10, 7, 10, 7)
+        layout.setContentsMargins(14, 9, 14, 9)
         layout.setSpacing(0)
 
         initial_html = html.escape(self.text).replace("\n", "<br>") if self.text else ""
@@ -597,14 +576,19 @@ class MessageBubble(QFrame):
         self.text_label.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.text_label.customContextMenuRequested.connect(self._show_context_menu)
 
-        font = QFont("JetBrains Mono", 12)
-        font.setStyleHint(QFont.StyleHint.Monospace)
+        font = QFont()
+        font.setPixelSize(fs(13))
+        if self.is_tool:
+            font = QFont("JetBrains Mono", fs(12))
+            font.setStyleHint(QFont.StyleHint.Monospace)
         self.text_label.setFont(font)
+        family = MONO_STACK if self.is_tool else sans_family()
         self.text_label.setStyleSheet(f"""
             color: {text_color};
             background: transparent;
             border: none;
-            font-family: 'JetBrains Mono', 'Fira Code', monospace;
+            font-family: {family};
+            font-size: {fs(12 if self.is_tool else 13)}px;
         """)
 
         layout.addWidget(self.text_label)
@@ -704,9 +688,8 @@ class MessageBubble(QFrame):
             chunk = re.sub(
                 r"(?m)^- (.+)$",
                 lambda m: (
-                    f'<div style="padding-left:10px; color:{_TEXT}; '
-                    f'font-size:12px; line-height:1.5; margin:0;">'
-                    f'<span style="color:{_TEXT_3};margin-right:5px;">·</span>{m.group(1)}</div>'
+                    f'<div style="margin:2px 0 2px 14px; color:{_TEXT};">'
+                    f'<span style="color:{_TEXT_3};">•&nbsp;&nbsp;</span>{m.group(1)}</div>'
                 ),
                 chunk,
             )
@@ -716,8 +699,8 @@ class MessageBubble(QFrame):
                 lambda m: (
                     f'<code style="background:{_SURFACE_2}; color:{_TEXT}; '
                     f'border:1px solid {_BORDER}; '
-                    f'border-radius:3px; padding:1px 4px; font-family:monospace; '
-                    f'font-size:11.5px;">{m.group(1)}</code>'
+                    f'border-radius:3px; padding:1px 4px; font-family:{MONO_STACK}; '
+                    f'font-size:{fs(11.5)}px;">{m.group(1)}</code>'
                 ),
                 chunk,
             )
@@ -765,17 +748,8 @@ class MessageContainer(QWidget):
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Maximum)
 
         outer = QVBoxLayout(self)
-        outer.setContentsMargins(12, 0, 12, 0)
+        outer.setContentsMargins(16, 0, 16, 0)
         outer.setSpacing(2)
-
-        if sender_name and not is_tool:
-            name_label = QLabel(sender_name)
-            name_label.setStyleSheet(
-                f"color: {_TEXT_3}; font-size: 10px; background: transparent; border: none;"
-            )
-            name_label.setTextFormat(Qt.TextFormat.PlainText)
-            name_label.setAlignment(Qt.AlignmentFlag.AlignRight if is_user else Qt.AlignmentFlag.AlignLeft)
-            outer.addWidget(name_label)
 
         row = QHBoxLayout()
         row.setContentsMargins(0, 0, 0, 0)
@@ -784,7 +758,7 @@ class MessageContainer(QWidget):
         self.bubble = MessageBubble(text, sender_name, is_user, is_error, is_tool)
 
         if is_user:
-            self.bubble.setMaximumWidth(420)
+            self.bubble.setMaximumWidth(440)
             self.bubble.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Minimum)
             row.addStretch(1)
             row.addWidget(self.bubble)
