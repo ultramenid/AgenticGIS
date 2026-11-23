@@ -10,6 +10,7 @@ prompt and tool list are prompt-cached to keep multi-turn sessions cheap.
 
 import os
 
+from .feedback import BackendFeedback, QT_TRANSLATE_NOOP, exception_feedback
 from ..core import tools as tools_mod
 from .anthropic_http import AnthropicHttpClient, AnthropicHttpError
 from .base import (
@@ -206,7 +207,7 @@ class ApiBackend(AgentBackend):
         is_unlimited = unlimited_iterations(max_iters)
         for _ in agent_iteration_steps(max_iters):
             if should_stop():
-                emit(AgentEvent(EventType.THINKING, {"text": "Stopped."}))
+                emit(AgentEvent(EventType.THINKING, {"text": BackendFeedback(QT_TRANSLATE_NOOP("BackendFeedback", "Stopped."))}))
                 emit(AgentEvent(EventType.DONE))
                 return self._finalize_cancelled_messages(messages)
 
@@ -218,7 +219,7 @@ class ApiBackend(AgentBackend):
                     messages, model, emit, should_stop
                 )
             except Exception as exc:  # noqa: BLE001
-                emit(AgentEvent(EventType.ERROR, {"error": str(exc)}))
+                emit(AgentEvent(EventType.ERROR, {"error": exception_feedback(exc)}))
                 return messages
 
             try:
@@ -239,12 +240,12 @@ class ApiBackend(AgentBackend):
                     on_connecting=lambda: emit(AgentEvent(EventType.CONNECTING)),
                 )
             except AnthropicHttpError as exc:
-                emit(AgentEvent(EventType.ERROR, {"error": str(exc)}))
+                emit(AgentEvent(EventType.ERROR, {"error": exception_feedback(exc)}))
                 return self._finalize_cancelled_messages(messages)
             except Exception as exc:  # noqa: BLE001
                 emit(
                     AgentEvent(
-                        EventType.ERROR, {"error": f"{type(exc).__name__}: {exc}"}
+                        EventType.ERROR, {"error": exception_feedback(exc, include_type=True)}
                     )
                 )
                 return self._finalize_cancelled_messages(messages)
@@ -257,8 +258,13 @@ class ApiBackend(AgentBackend):
             # Mirror the OpenAI backend's finish_reason=="length" guard.
             if stop_reason == "max_tokens" and tool_uses:
                 emit(AgentEvent(EventType.THINKING, {
-                    "text": "Response truncated mid-tool-call (max_tokens reached). "
+                    "text": BackendFeedback(
+                        QT_TRANSLATE_NOOP(
+                            "BackendFeedback",
+                            "Response truncated mid-tool-call (max_tokens reached). "
                             "Asking model to retry with complete arguments."
+                        )
+                    )
                 }))
                 messages.append({
                     "role": "user",
@@ -301,7 +307,7 @@ class ApiBackend(AgentBackend):
                 return messages
             emit(
                 AgentEvent(
-                    EventType.THINKING, {"text": f"Reached max {max_iters} iterations."}
+                    EventType.THINKING, {"text": BackendFeedback(QT_TRANSLATE_NOOP("BackendFeedback", "Reached max {count} iterations."), count=max_iters)}
                 )
             )
             emit(AgentEvent(EventType.DONE))

@@ -428,3 +428,37 @@ authenticate the **Google Earth Engine** QGIS plugin separately (see
   [External agent access (MCP)](#external-agent-access-mcp).)
 - **And more** — ongoing improvements to performance, stability, and
   you decide.
+
+### Contributing translations
+
+AgenticGIS uses the QGIS interface language override when set and valid, then
+the system locale. Missing translations fall back to English. Restart QGIS
+after changing its language. Saved session names keep their original text.
+
+Use literal English messages in `QCoreApplication.translate("Context", "Message")`
+through `qgis.PyQt`. Use the owning widget or feature as the context, and
+substitute named placeholders after translation. Add each new source module to
+`i18n/AgenticGIS.pro`.
+
+From the repository root, regenerate the Brazilian Portuguese catalog with
+Qt Linguist development tools:
+
+```sh
+cd i18n
+pylupdate5 AgenticGIS.pro
+# Edit AgenticGIS_pt_BR.ts in Qt Linguist, then compile it:
+lrelease AgenticGIS_pt_BR.ts
+```
+
+For PyQt 6, run `pylupdate6` with the Python paths listed under `SOURCES`
+in `AgenticGIS.pro`, followed by `-ts AgenticGIS_pt_BR.ts`, then run Qt 6's
+`lrelease`. Commit both the editable TS and the generated QM. To add a
+language, list its `AgenticGIS_<locale>.ts` under `TRANSLATIONS`, then extract,
+translate, and compile it. A language-only catalog such as `AgenticGIS_pt.qm`
+is shared by variants that lack their own catalog.
+
+Run the local tests from a checkout named `AgenticGIS` with QGIS's Python:
+
+```sh
+QT_QPA_PLATFORM=offscreen PYTHONPATH=.. /usr/bin/python3 -m unittest discover -s tests
+```

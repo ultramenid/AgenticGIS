@@ -9,7 +9,7 @@ descriptions. This prompt is used for permission and clarification moments, so
 readability matters more than compactness.
 """
 
-from qgis.PyQt.QtCore import Qt, QSize, QEvent, pyqtSignal
+from qgis.PyQt.QtCore import QCoreApplication, Qt, QSize, QEvent, pyqtSignal
 from qgis.PyQt.QtGui import QFont
 from qgis.PyQt.QtWidgets import (
     QFrame,
@@ -47,7 +47,7 @@ def _mono(size, weight=QFont.Weight.Normal):
 class _OptionRow(QFrame):
     clicked = pyqtSignal(str)
 
-    def __init__(self, label, description="", parent=None):
+    def __init__(self, label, display_label, description="", parent=None):
         super().__init__(parent)
         self._label = label or ""
         self.setObjectName("AskUserOptionRow")
@@ -64,7 +64,8 @@ class _OptionRow(QFrame):
         layout.setSpacing(4)
         self._layout = layout
 
-        title = QLabel(self._label)
+        title = QLabel(display_label)
+        title.setTextFormat(Qt.TextFormat.PlainText)
         self._title = title
         title.setObjectName("AskUserOptionTitle")
         title.setFont(_mono(11, QFont.Weight.DemiBold))
@@ -77,6 +78,7 @@ class _OptionRow(QFrame):
 
         if description:
             desc = QLabel(description)
+            desc.setTextFormat(Qt.TextFormat.PlainText)
             self._description = desc
             desc.setObjectName("AskUserOptionDescription")
             desc.setFont(_mono(10))
@@ -185,10 +187,9 @@ class _OptionRow(QFrame):
 class AskUserCard(QFrame):
     submitted = pyqtSignal(object)
 
-    def __init__(self, question, options, allow_free_text=True, parent=None):
+    def __init__(self, question, options, allow_free_text=True, parent=None, *, trusted_presentation=False):
         super().__init__(parent)
         self.setObjectName("AskUserCard")
-        self.setMinimumWidth(280)
         self.setMaximumWidth(560)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         self.setStyleSheet(f"""
@@ -199,6 +200,8 @@ class AskUserCard(QFrame):
             }}
         """)
         self._options = list(options)
+        self._trusted_presentation = trusted_presentation
+        self._selected_display_label = None
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(18, 16, 18, 16)
@@ -212,7 +215,7 @@ class AskUserCard(QFrame):
         marker.setStyleSheet(f"color:{_WARN}; background:transparent; border:none; font-size:{fs(10)}px;")
         header_row.addWidget(marker, 0, Qt.AlignmentFlag.AlignVCenter)
 
-        header = QLabel("Action required")
+        header = QLabel(QCoreApplication.translate("AskUserCard", "Action required"))
         header.setFont(_mono(10, QFont.Weight.DemiBold))
         header.setStyleSheet(
             f"color:{_TEXT_2}; font-size:{fs(11)}px;"
@@ -223,6 +226,7 @@ class AskUserCard(QFrame):
         outer.addLayout(header_row)
 
         q = QLabel(question)
+        q.setTextFormat(Qt.TextFormat.PlainText)
         q.setObjectName("AskUserQuestion")
         q.setFont(_mono(12, QFont.Weight.DemiBold))
         q.setWordWrap(True)
@@ -239,8 +243,9 @@ class AskUserCard(QFrame):
         opt_col.setSpacing(8)
         for opt in self._options:
             label = opt.get("label", "")
-            row = _OptionRow(label, opt.get("description", ""), self)
-            row.clicked.connect(self._on_option)
+            display_label = self._display_text(opt, "label")
+            row = _OptionRow(label, display_label, self._display_text(opt, "description"), self)
+            row.clicked.connect(lambda choice, visible=display_label: self._on_option(choice, visible))
             opt_col.addWidget(row)
         outer.addLayout(opt_col)
 
@@ -249,7 +254,9 @@ class AskUserCard(QFrame):
             ft_row.setContentsMargins(0, 0, 0, 0)
             ft_row.setSpacing(8)
             self._free_text = QLineEdit()
-            self._free_text.setPlaceholderText("Or type your own answer\u2026")
+            self._free_text.setPlaceholderText(
+                QCoreApplication.translate("AskUserCard", "Or type your own answer…")
+            )
             self._free_text.setMinimumHeight(36)
             self._free_text.setFont(_mono(10))
             self._free_text.setStyleSheet(f"""
@@ -269,7 +276,7 @@ class AskUserCard(QFrame):
             self._free_text.returnPressed.connect(self._on_free_text)
             ft_row.addWidget(self._free_text, 1)
 
-            send = QPushButton("Send")
+            send = QPushButton(QCoreApplication.translate("AskUserCard", "Send"))
             send.setCursor(Qt.CursorShape.PointingHandCursor)
             send.setMinimumHeight(36)
             send.setMinimumWidth(72)
@@ -305,7 +312,7 @@ class AskUserCard(QFrame):
         cancel_row = QHBoxLayout()
         cancel_row.setContentsMargins(0, 0, 0, 0)
         cancel_row.addStretch(1)
-        cancel = QPushButton("Cancel")
+        cancel = QPushButton(QCoreApplication.translate("AskUserCard", "Cancel"))
         cancel.setCursor(Qt.CursorShape.PointingHandCursor)
         cancel.setMinimumHeight(30)
         cancel.setFont(_mono(10))
@@ -358,7 +365,19 @@ class AskUserCard(QFrame):
             return True
         return super().eventFilter(obj, event)
 
-    def _on_option(self, label):
+    def _display_text(self, option, field):
+        if self._trusted_presentation and f"display_{field}" in option:
+            return option[f"display_{field}"]
+        return option.get(field, "")
+
+    def display_choice(self, choice):
+        """Return the text of the selected row for the live transcript."""
+        if self._selected_display_label is None:
+            return choice
+        return self._selected_display_label
+
+    def _on_option(self, label, display_label):
+        self._selected_display_label = display_label
         self.submitted.emit({"choice": label, "free_text": None})
 
     def _on_free_text(self):

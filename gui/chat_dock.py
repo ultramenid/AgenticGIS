@@ -13,9 +13,10 @@ import time
 from collections import deque
 
 from qgis.gui import QgsDockWidget
-from qgis.PyQt.QtCore import Qt, QEvent, QThread, pyqtSignal, QTimer
-from qgis.PyQt.QtGui import QFont, QTextCursor
+from qgis.PyQt.QtCore import QCoreApplication, QLocale, Qt, QEvent, QThread, pyqtSignal, QTimer
+from qgis.PyQt.QtGui import QFont, QTextCursor, QTextDocument
 from qgis.PyQt.QtWidgets import (
+    QBoxLayout,
     QDialog,
     QFrame,
     QHBoxLayout,
@@ -31,6 +32,9 @@ from qgis.PyQt.QtWidgets import (
 
 from .. import config as config_mod
 from ..backends import providers
+from ..backends.feedback import BackendFeedback
+from ..i18n import resolve_qgis_locale
+from .backend_feedback import display_backend_feedback
 from ..backends.base import AgentEvent, EventType, should_compact
 from ..core.dev_logging import log_ttft_event, new_trace_id
 from ..core.input_metrics import input_box_metrics
@@ -181,6 +185,11 @@ class ChatWorker(QThread):
                         started_at=self._trace_started_at,
                     )
                     return
+                if isinstance(delta, BackendFeedback):
+                    self._flush_coalesced_event()
+                    self._event_buffer.append(ev)
+                    self._flush_event_buffer()
+                    return
                 if self._coalesce_type is not None and self._coalesce_type != ev.type:
                     self._flush_coalesced_event()
                 self._coalesce_type = ev.type
@@ -239,7 +248,9 @@ class ChatDock(QgsDockWidget):
         self._open_settings = open_settings
         self._request_cancel = request_cancel
         self._toolkit = toolkit
-        self._session_store = session_store or SessionStore()
+        self._display_locale = QLocale(resolve_qgis_locale())
+        self._default_session_title = QCoreApplication.translate("ChatDock", "New session")
+        self._session_store = session_store or SessionStore(default_name=self._default_session_title)
         self._active_session_id = self._session_store.active_session()["id"]
         self._show_startup_picker = bool(show_startup_picker)
         self._startup_picker_shown = False
@@ -259,6 +270,7 @@ class ChatDock(QgsDockWidget):
         self._typing_widget = None
         self._current_agent_turn = None   # AgentTurnBubble for the active turn
         self._current_tool_row = None      # ToolRowWidget awaiting its result
+        self._current_feedback = None
         self._current_text = ""            # accumulated final-answer text
         self._tool_progress_text = ""      # temporary visible text while a tool runs
         self._showing_tool_progress = False
@@ -270,6 +282,7 @@ class ChatDock(QgsDockWidget):
         self._ttft_started_at = None
         self._turn_started_at = None
         self._ttft_first_ui_render_logged = False
+        self._thinking_display = ""
         self._thinking_text = ""           # accumulated thinking/progress text
         self._thinking_started = False     # whether add_thinking_block was called this turn
         self._current_text_truncated = False
@@ -278,7 +291,8 @@ class ChatDock(QgsDockWidget):
         self._scroll_locked = False
         self._programmatic_scroll = False
         self._status_phase = 0
-        self._status_text = "Ready"
+        self._status_text = QCoreApplication.translate("ChatDock", "Ready")
+        self._status_cancelled = False
         self._status_color = _TEXT_3
         self._status_icon = "✓"
         self._status_spinning = False
@@ -292,8 +306,8 @@ class ChatDock(QgsDockWidget):
         self._stream_render_timer = QTimer(self)
         self._stream_render_timer.setSingleShot(True)
         self._stream_render_timer.timeout.connect(self._flush_stream_render)
-        self._set_status("Ready", _SUCCESS, icon="●")
-        self._ask_user_signal.connect(self._show_ask_user, QUEUED_CONNECTION)
+        self._set_status(QCoreApplication.translate("ChatDock", "Ready"), _SUCCESS, icon="●")
+        self._ask_user_signal.connect(self._show_toolkit_ask_user, QUEUED_CONNECTION)
         if self._toolkit is not None:
             self._toolkit.set_ask_user_emitter(
                 self._emit_ask_user_threadsafe
@@ -317,27 +331,30 @@ class ChatDock(QgsDockWidget):
         layout.setSpacing(0)
 
         # -- Top bar (slim, no chrome) ----------------------------------- #
-        top = QHBoxLayout()
+        top = QBoxLayout(QBoxLayout.Direction.LeftToRight)
+        self._top_bar_layout = top
         top.setContentsMargins(16, 10, 10, 10)
         top.setSpacing(4)
 
-        self.status = QLabel(
-            f"<span style='color:{_TEXT_3}; font-size:{fs(12)}px;'>Ready</span>"
-        )
+        self.status = QLabel()
         self.status.setTextFormat(Qt.TextFormat.RichText)
         self.status.setStyleSheet("background: transparent; padding-right: 4px;")
         self.status.setFont(ui_font(13))
-        top.addWidget(self.status)
+        self.status.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        self.status.setMinimumHeight(fs(16))
+        top.addWidget(self.status, 1)
 
-        top.addStretch(1)
-
+        controls = QBoxLayout(QBoxLayout.Direction.LeftToRight)
+        self._top_bar_controls = controls
+        controls.setSpacing(4)
+        settings_label = QCoreApplication.translate("ChatDock", "Settings")
         for label, tip in (
-            ("Settings", "Settings"),
-            ("Sessions ⌄", "Chat sessions"),
+            (settings_label, settings_label),
+            (QCoreApplication.translate("ChatDock", "Sessions ⌄"), QCoreApplication.translate("ChatDock", "Chat sessions")),
         ):
             btn = QPushButton(label)
             btn.setToolTip(tip)
-            btn.setFixedHeight(28)
+            btn.setMinimumSize(80, max(28, fs(12) + 12))
             btn.setCursor(Qt.CursorShape.PointingHandCursor)
             btn.setFont(ui_font(12))
             btn.setStyleSheet(f"""
@@ -354,10 +371,11 @@ class ChatDock(QgsDockWidget):
                     color: {_TEXT};
                 }}
             """)
-            top.addWidget(btn)
+            controls.addWidget(btn)
 
-        self._settings_btn = top.itemAt(top.count() - 2).widget()
-        self._session_btn = top.itemAt(top.count() - 1).widget()
+        self._settings_btn = controls.itemAt(0).widget()
+        self._session_btn = controls.itemAt(1).widget()
+        top.addLayout(controls)
         self._settings_btn.clicked.connect(self._open_settings)
         self._session_btn.clicked.connect(self._show_session_popup)
         layout.addLayout(top)
@@ -448,7 +466,7 @@ class ChatDock(QgsDockWidget):
         field_row.setSpacing(0)
 
         self.input = QTextEdit()
-        self.input.setPlaceholderText("Ask AgenticGIS…  (↑ for history)")
+        self.input.setPlaceholderText(QCoreApplication.translate("ChatDock", "Ask AgenticGIS…  (↑ for history)"))
         self.input.setAcceptRichText(False)
         self.input.setTabChangesFocus(True)
         self.input.setLineWrapMode(QTextEdit.LineWrapMode.WidgetWidth)
@@ -496,7 +514,8 @@ class ChatDock(QgsDockWidget):
 
         # Send / Stop — round button at the right of the chip row
         self.send_btn = QPushButton("↑")
-        self.send_btn.setToolTip("Send (Enter) · New line (Shift+Enter)")
+        self.send_btn.setToolTip(QCoreApplication.translate("ChatDock", "Send (Enter) · New line (Shift+Enter)"))
+        self.send_btn.setAccessibleName(self.send_btn.toolTip())
         self.send_btn.setFixedSize(28, 28)
         self.send_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.send_btn.setStyleSheet(f"""
@@ -513,7 +532,8 @@ class ChatDock(QgsDockWidget):
         chip_row.addWidget(self.send_btn, 0, Qt.AlignmentFlag.AlignVCenter)
 
         self.stop_btn = QPushButton("■")
-        self.stop_btn.setToolTip("Stop (Esc)")
+        self.stop_btn.setToolTip(QCoreApplication.translate("ChatDock", "Stop (Esc)"))
+        self.stop_btn.setAccessibleName(self.stop_btn.toolTip())
         self.stop_btn.setFixedSize(28, 28)
         self.stop_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.stop_btn.setStyleSheet(f"""
@@ -538,13 +558,15 @@ class ChatDock(QgsDockWidget):
 
         # Install event filter on the input widget so Enter-to-send works
         self.input.installEventFilter(self)
+        self.input.viewport().installEventFilter(self)
 
     def _make_chip(self):
         chip = QPushButton("")
         chip.setCursor(Qt.CursorShape.PointingHandCursor)
         # Qt ignores border-radius entirely if it exceeds half the height, so pin both.
         h = fs(11) + 10
-        chip.setFixedHeight(h)
+        chip.setMinimumSize(24, h)
+        chip.setMaximumHeight(h)
         chip.setStyleSheet(f"""
             QPushButton {{
                 color: {_TEXT_2}; background: {_SURFACE_2};
@@ -557,7 +579,7 @@ class ChatDock(QgsDockWidget):
         return chip
 
     @staticmethod
-    def _connection_labels():
+    def _connection_labels(*, display=True):
         """``(connection, model)`` from the saved settings, for chips and footers."""
         try:
             cfg = config_mod.Config()
@@ -565,18 +587,28 @@ class ChatDock(QgsDockWidget):
             if mode in (config_mod.MODE_CLI_TOOL, config_mod.MODE_SUBSCRIPTION):
                 return f"CLI · {cfg.get('cli_tool') or 'claude'}", cfg.get("cli_model") or ""
             if mode == config_mod.MODE_CUSTOM:
-                return "Custom endpoint", cfg.get("custom_model") or cfg.get("model") or ""
+                return (QCoreApplication.translate("ChatDock", "Custom endpoint") if display else "Custom endpoint"), cfg.get("custom_model") or cfg.get("model") or ""
             provider = providers.get_provider(cfg.get("provider")) or {}
             return provider.get("label") or "API", cfg.get("model") or ""
         except Exception:
-            return "Not configured", ""
+            return (QCoreApplication.translate("ChatDock", "Not configured") if display else "Not configured"), ""
 
     def refresh_composer(self):
         """Re-read the connection settings into the composer chips."""
         conn, model = self._connection_labels()
-        for chip, text in ((self._conn_chip, conn), (self._model_chip, model or "Default model")):
-            chip.setToolTip(f"{text} — click to change in Settings")
-            chip.setText(chip.fontMetrics().elidedText(text, Qt.TextElideMode.ElideRight, 150))
+        self._composer_labels = (conn, model or QCoreApplication.translate("ChatDock", "Default model"))
+        for chip, text in zip((self._conn_chip, self._model_chip), self._composer_labels):
+            chip.setToolTip(
+                QCoreApplication.translate("ChatDock", "{label} — click to change in Settings").format(label=text)
+            )
+            chip.setAccessibleName(text)
+        self._fit_composer_labels()
+
+    def _fit_composer_labels(self):
+        # Reserve the composer margins, both action buttons and chip padding.
+        width = max(12, min(150, (self.width() - 120) // 2))
+        for chip, text in zip((self._conn_chip, self._model_chip), self._composer_labels):
+            chip.setText(chip.fontMetrics().elidedText(text, Qt.TextElideMode.ElideRight, width))
 
     def _maybe_prewarm(self):
         """Fire prewarm in a daemon thread if the connection may have gone stale.
@@ -630,6 +662,9 @@ class ChatDock(QgsDockWidget):
             if self.transcript_widget.maximumWidth() != new_w or self.transcript_widget.minimumWidth() != new_w:
                 self.transcript_widget.setFixedWidth(new_w)
             return False
+        if (obj is self.input.viewport() and event.type() == QEvent.Type.Resize
+                and event.size().width() != event.oldSize().width()):
+            self._resize_input()
         if obj is self.input and event.type() == QEvent.Type.KeyPress:
             self._maybe_prewarm()
             if event.key() == Qt.Key.Key_Escape:
@@ -649,10 +684,8 @@ class ChatDock(QgsDockWidget):
                 if len(clip_text) > _MAX_PASTE_CHARS:
                     reply = QMessageBox.question(
                         self,
-                        "Large paste",
-                        f"You are pasting {len(clip_text):,} characters.\n\n"
-                        f"This may exceed the model's context window and could "
-                        f"cause errors. Paste anyway?",
+                        QCoreApplication.translate("ChatDock", "Large paste"),
+                        QCoreApplication.translate("ChatDock", "You are pasting {count:,} characters.\n\nThis may exceed the model's context window and could cause errors. Paste anyway?").format(count=len(clip_text)),
                         QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
                         QMessageBox.StandardButton.No,
                     )
@@ -669,7 +702,7 @@ class ChatDock(QgsDockWidget):
                     # of silently swallowing the keystroke. Keep the typed text
                     # so the user doesn't lose what they wrote; the status will
                     # be overwritten when the current turn finishes.
-                    self._set_status("Wait for the current turn to finish", _DANGER)
+                    self._set_status(QCoreApplication.translate("ChatDock", "Wait for the current turn to finish"), _DANGER)
                     return True
                 self._on_send()
                 return True
@@ -752,8 +785,15 @@ class ChatDock(QgsDockWidget):
     def _resize_input(self):
         if not hasattr(self, "input") or not hasattr(self, "_input_frame"):
             return
+        document = self.input.document()
+        if document.isEmpty():
+            document = QTextDocument()
+            document.setDefaultFont(self.input.font())
+            document.setDocumentMargin(0)
+            document.setPlainText(self.input.placeholderText())
+            document.setTextWidth(self.input.viewport().width())
         input_h, frame_h, top = input_box_metrics(
-            self.input.document().size().height(),
+            document.size().height(),
             self.input.fontMetrics().lineSpacing(),
             min_h=self._input_min_h, max_h=self._input_max_h,
             frame_min_h=self._input_frame_min_h,
@@ -853,8 +893,8 @@ class ChatDock(QgsDockWidget):
         self._current_turn_event = None
 
     # -- High-level adders ---------------------------------------------- #
-    def _add_user_message(self, text: str):
-        self._add_widget(MessageContainer(text, sender_name="You", is_user=True))
+    def _add_user_message(self, text: str, *, display=None):
+        self._add_widget(MessageContainer(text if display is None else display, sender_name="You", is_user=True))
         self._record_transcript_event({"type": "user", "text": text})
 
     def _get_or_create_agent_turn(self) -> AgentTurnBubble:
@@ -927,7 +967,7 @@ class ChatDock(QgsDockWidget):
             turn_event.setdefault("files", []).append(dict(data or {}))
 
     def _add_compaction_notice(self):
-        w = QLabel("Earlier messages were summarised to save context")
+        w = QLabel(QCoreApplication.translate("ChatDock", "Earlier messages were summarised to save context"))
         w.setAlignment(Qt.AlignmentFlag.AlignCenter)
         w.setFont(ui_font(11))
         w.setStyleSheet(
@@ -936,8 +976,8 @@ class ChatDock(QgsDockWidget):
         self._add_widget(w)
         self._record_transcript_event({"type": "compaction"})
 
-    def _add_error_message(self, text):
-        msg = html.escape(str(text or ""))
+    def _add_error_message(self, text, *, display=None):
+        msg = html.escape(str((text if display is None else display) or ""))
         self._add_widget(MessageContainer(msg, is_user=False, is_error=True))
         self._record_transcript_event({"type": "error", "text": str(text or "")})
 
@@ -1042,11 +1082,12 @@ class ChatDock(QgsDockWidget):
             self._typing_widget.deleteLater()
             self._typing_widget = None
 
-    def _set_status(self, text: str, color: str = _TEXT_3, *, spinning: bool = False, icon: str = ""):
+    def _set_status(self, text: str, color: str = _TEXT_3, *, spinning: bool = False, icon: str = "", cancelled: bool = False):
         """Render top-left status with the same CLI spinner language as the turn."""
         if (text or "") != self._status_text:
             self._status_started_at = time.monotonic()
         self._status_text = text or ""
+        self._status_cancelled = cancelled
         self._status_color = color
         self._status_icon = icon
         self._status_spinning = spinning
@@ -1090,7 +1131,10 @@ class ChatDock(QgsDockWidget):
         """Called by the toolkit from worker threads to surface a question."""
         self._ask_user_signal.emit(question, options, allow_free_text)
 
-    def _show_ask_user(self, question, options, allow_free_text):
+    def _show_toolkit_ask_user(self, question, options, allow_free_text):
+        self._show_ask_user(question, options, allow_free_text, trusted_presentation=True)
+
+    def _show_ask_user(self, question, options, allow_free_text, *, trusted_presentation=False):
         """Build and show the AskUserCard as a modal-style popover.
 
         Renders a translucent backdrop over the entire chat body, with
@@ -1150,7 +1194,10 @@ class ChatDock(QgsDockWidget):
             card_layout.addWidget(scroll)
             self._ask_scroll = scroll
         # Build the actual interactive card
-        card = AskUserCard(question, options, allow_free_text=allow_free_text, parent=self._ask_card_frame)
+        card = AskUserCard(
+            question, options, allow_free_text=allow_free_text, parent=self._ask_card_frame,
+            trusted_presentation=trusted_presentation,
+        )
         card.submitted.connect(self._resolve_ask_user)
         self._ask_scroll.setWidget(card)
         self._ask_card = card
@@ -1171,11 +1218,14 @@ class ChatDock(QgsDockWidget):
         except Exception:  # nosec B110
             pass
         self._ask_user_card = card
-        self._set_status("Awaiting input", _WARN, spinning=True)
+        self._set_status(QCoreApplication.translate("ChatDock", "Awaiting input"), _WARN, spinning=True)
 
     def _resolve_ask_user(self, payload):
         """User picked an option or typed a reply; close the card and unblock."""
         self._ask_user_payload = payload
+        label = payload.get("choice")
+        if self._ask_user_card is not None:
+            label = self._ask_user_card.display_choice(label)
         # Tear down the overlay + card so the chat becomes interactive
         # again. We keep the overlay widget itself (cheap) but hide it
         # and clear the inner card so the next question rebuilds clean.
@@ -1190,7 +1240,6 @@ class ChatDock(QgsDockWidget):
         self._ask_card = None
         if hasattr(self, "_ask_overlay") and self._ask_overlay is not None:
             self._ask_overlay.hide()
-        label = payload.get("choice")
         text = payload.get("free_text")
         cancelled = bool(payload.get("cancelled", False))
         chosen_text = label or text
@@ -1201,13 +1250,13 @@ class ChatDock(QgsDockWidget):
                 pass
         elif cancelled:
             try:
-                self._get_or_create_agent_turn().set_user_decision("— Cancelled —")
+                self._get_or_create_agent_turn().set_user_decision(cancelled=True)
             except Exception:  # nosec B110
                 pass
         if cancelled:
-            self._set_status("Cancelled", _DANGER, icon="!")
+            self._set_status(QCoreApplication.translate("ChatDock", "Cancelled"), _DANGER, icon="!", cancelled=True)
         else:
-            self._set_status("Ready", _SUCCESS, icon="●")
+            self._set_status(QCoreApplication.translate("ChatDock", "Ready"), _SUCCESS, icon="●")
         if self._toolkit is not None:
             self._toolkit._resolve_ask_user({
                 "choice": payload.get("choice"),
@@ -1261,6 +1310,17 @@ class ChatDock(QgsDockWidget):
         self._ask_card_frame.setGeometry(cx, cy, card_w, card_h)
 
     def resizeEvent(self, event):
+        if hasattr(self, "_top_bar_layout"):
+            controls_width = self._settings_btn.sizeHint().width() + self._session_btn.sizeHint().width()
+            stacked = self.width() < controls_width + fs(115) + 34
+            direction = QBoxLayout.Direction.TopToBottom if stacked else QBoxLayout.Direction.LeftToRight
+            self._top_bar_layout.setDirection(direction)
+            self._top_bar_controls.setDirection(
+                QBoxLayout.Direction.TopToBottom
+                if self.width() < controls_width + 34 else QBoxLayout.Direction.LeftToRight
+            )
+        if hasattr(self, "_composer_labels"):
+            self._fit_composer_labels()
         # Keep the ask_user overlay sized to the dock if it's visible.
         if hasattr(self, "_ask_overlay") and self._ask_overlay is not None and self._ask_overlay.isVisible():
             self._ask_overlay.setGeometry(self._overlay_rect())
@@ -1284,7 +1344,7 @@ class ChatDock(QgsDockWidget):
 
     def _show_startup_session_picker(self):
         dialog = QDialog(self)
-        dialog.setWindowTitle("Chat sessions")
+        dialog.setWindowTitle(QCoreApplication.translate("ChatDock", "Chat sessions"))
         dialog.setModal(True)
         dialog.setMinimumWidth(420)
         dialog.setStyleSheet(self._session_dialog_style())
@@ -1292,12 +1352,12 @@ class ChatDock(QgsDockWidget):
         layout.setContentsMargins(14, 14, 14, 14)
         layout.setSpacing(0)
 
-        card, card_layout = self._session_dialog_card("Choose a chat session", "Continue or start fresh")
+        card, card_layout = self._session_dialog_card(QCoreApplication.translate("ChatDock", "Choose a chat session"), QCoreApplication.translate("ChatDock", "Continue or start fresh"))
         layout.addWidget(card)
 
-        previous = QPushButton("Continue previous")
-        sessions = QPushButton("Session list")
-        new_session = QPushButton("New session")
+        previous = QPushButton(QCoreApplication.translate("ChatDock", "Continue previous"))
+        sessions = QPushButton(QCoreApplication.translate("ChatDock", "Session list"))
+        new_session = QPushButton(QCoreApplication.translate("ChatDock", "New session"))
         for button, role in ((previous, "wide"), (sessions, "secondary"), (new_session, "secondary")):
             button.setMinimumHeight(34)
             button.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -1366,14 +1426,14 @@ class ChatDock(QgsDockWidget):
         layout.setContentsMargins(14, 14, 14, 14)
         layout.setSpacing(0)
 
-        card, card_layout = self._session_dialog_card(title, "Name this chat session")
+        card, card_layout = self._session_dialog_card(title, QCoreApplication.translate("ChatDock", "Name this chat session"))
         layout.addWidget(card)
 
         field = QLineEdit(current or "")
         field.setObjectName("SessionNameField")
         field.setMinimumHeight(36)
         field.setFont(ui_font(13))
-        field.setPlaceholderText(DEFAULT_SESSION_NAME)
+        field.setPlaceholderText(self._default_session_title)
         field.setStyleSheet(f"""
             QLineEdit {{
                 background-color: {_SURFACE_2};
@@ -1394,12 +1454,12 @@ class ChatDock(QgsDockWidget):
         actions.setContentsMargins(0, 0, 0, 0)
         actions.setSpacing(8)
         actions.addStretch(1)
-        cancel = QPushButton("Cancel")
+        cancel = QPushButton(QCoreApplication.translate("ChatDock", "Cancel"))
         cancel.setCursor(Qt.CursorShape.PointingHandCursor)
         cancel.setFixedHeight(32)
         cancel.setMinimumWidth(72)
         cancel.setStyleSheet(self._session_dialog_button_style("secondary"))
-        confirm = QPushButton("Save")
+        confirm = QPushButton(QCoreApplication.translate("ChatDock", "Save"))
         confirm.setCursor(Qt.CursorShape.PointingHandCursor)
         confirm.setFixedHeight(32)
         confirm.setMinimumWidth(72)
@@ -1418,7 +1478,7 @@ class ChatDock(QgsDockWidget):
         name = (session or {}).get("name") or DEFAULT_SESSION_NAME
         dialog = QDialog(self)
         dialog.setObjectName("SessionDeleteDialog")
-        dialog.setWindowTitle("Delete session")
+        dialog.setWindowTitle(QCoreApplication.translate("ChatDock", "Delete session"))
         dialog.setModal(True)
         dialog.setMinimumWidth(420)
         dialog.setStyleSheet(self._session_dialog_style())
@@ -1428,8 +1488,8 @@ class ChatDock(QgsDockWidget):
         layout.setSpacing(0)
 
         card, card_layout = self._session_dialog_card(
-            "Delete session",
-            "This removes the saved transcript and backend continuation for this chat.",
+            QCoreApplication.translate("ChatDock", "Delete session"),
+            QCoreApplication.translate("ChatDock", "This removes the saved transcript and backend continuation for this chat."),
         )
         layout.addWidget(card)
 
@@ -1440,10 +1500,11 @@ class ChatDock(QgsDockWidget):
         row_layout.setContentsMargins(12, 9, 12, 9)
         row_layout.setSpacing(3)
         title = QLabel(name)
+        title.setTextFormat(Qt.TextFormat.PlainText)
         title.setWordWrap(True)
         title.setFont(ui_font(13, QFont.Weight.DemiBold))
         title.setStyleSheet(f"color:{_TEXT}; font-size:{fs(13)}px;")
-        meta = QLabel("Deletion cannot be undone")
+        meta = QLabel(QCoreApplication.translate("ChatDock", "Deletion cannot be undone"))
         meta.setFont(ui_font(12))
         meta.setStyleSheet(f"color:{_DANGER}; font-size:{fs(12)}px;")
         row_layout.addWidget(title)
@@ -1454,12 +1515,12 @@ class ChatDock(QgsDockWidget):
         actions.setContentsMargins(0, 0, 0, 0)
         actions.setSpacing(8)
         actions.addStretch(1)
-        cancel = QPushButton("Cancel")
+        cancel = QPushButton(QCoreApplication.translate("ChatDock", "Cancel"))
         cancel.setCursor(Qt.CursorShape.PointingHandCursor)
         cancel.setFixedHeight(32)
         cancel.setMinimumWidth(72)
         cancel.setStyleSheet(self._session_dialog_button_style("secondary"))
-        delete = QPushButton("Delete")
+        delete = QPushButton(QCoreApplication.translate("ChatDock", "Delete"))
         delete.setCursor(Qt.CursorShape.PointingHandCursor)
         delete.setFixedHeight(32)
         delete.setMinimumWidth(72)
@@ -1526,18 +1587,18 @@ class ChatDock(QgsDockWidget):
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return None
         text = field.text()
-        return (text or DEFAULT_SESSION_NAME).strip() or DEFAULT_SESSION_NAME
+        return text.strip() or self._default_session_title
 
     def _update_session_name_label(self):
         session = self._session_store.get_session(self._active_session_id)
         name = (session or {}).get("name") or DEFAULT_SESSION_NAME
         self._status_session_name = name
         if hasattr(self, "status"):
-            self.status.setToolTip(f"Active session: {name}")
+            self.status.setToolTip(QCoreApplication.translate("ChatDock", "Active session: {name}").format(name=name))
             self._render_status()
 
     def _new_session_from_menu(self):
-        name = self._prompt_session_name("New session", "")
+        name = self._prompt_session_name(QCoreApplication.translate("ChatDock", "New session"), "")
         if name is None:
             return
         self._save_current_session(immediate=True)
@@ -1550,7 +1611,7 @@ class ChatDock(QgsDockWidget):
         session = self._session_store.get_session(session_id)
         if session is None:
             return
-        name = self._prompt_session_name("Rename session", session.get("name", ""))
+        name = self._prompt_session_name(QCoreApplication.translate("ChatDock", "Rename session"), session.get("name", ""))
         if name is None:
             return
         self._session_store.rename_session(session_id, name)
@@ -1565,13 +1626,12 @@ class ChatDock(QgsDockWidget):
             return False
         if session_id == self._active_session_id:
             self._stop_active_worker()
-        fallback = self._session_store.delete_session(session_id)
+        fallback = self._session_store.delete_session(session_id, default_name=self._default_session_title)
         if session_id == self._active_session_id and fallback is not None:
             self._switch_to_session(fallback["id"], save_current=False)
         return True
 
-    @staticmethod
-    def _format_session_size(size_bytes):
+    def _format_session_size(self, size_bytes):
         try:
             size = max(0, int(size_bytes or 0))
         except (TypeError, ValueError):
@@ -1583,13 +1643,8 @@ class ChatDock(QgsDockWidget):
             if value < 1024.0 or unit == units[-1]:
                 break
             value /= 1024.0
-        if unit == "B":
-            return f"{int(value)} {unit}"
-        if value >= 100:
-            return f"{value:.0f} {unit}"
-        if value >= 10:
-            return f"{value:.1f} {unit}"
-        return f"{value:.2f} {unit}"
+        precision = 0 if unit == "B" or value >= 100 else 1 if value >= 10 else 2
+        return f"{self._display_locale.toString(value, 'f', precision)} {unit}"
 
     def _stop_active_worker(self):
         if self._worker is None:
@@ -1610,6 +1665,7 @@ class ChatDock(QgsDockWidget):
             self._current_agent_turn = None
         self._stream_render_timer.stop()
         self._pending_stream_render = False
+        self._current_feedback = None
         self._current_text = ""
         self._tool_progress_text = ""
         self._showing_tool_progress = False
@@ -1698,6 +1754,8 @@ class ChatDock(QgsDockWidget):
         session = self._session_store.get_session(session_id)
         if session is None:
             return False
+        if self._toolkit is not None and session_id != self._active_session_id:
+            self._toolkit.clear_session_approvals()
         self._active_session_id = session_id
         self._history = list(session.get("backend_history") or [])
         self._history_generation += 1  # invalidate any pending pre-compaction
@@ -1705,7 +1763,7 @@ class ChatDock(QgsDockWidget):
         self._import_backend_state(session.get("backend_state") or {})
         self._restore_transcript(self._transcript_events)
         self._update_session_name_label()
-        self._set_status("Ready", _SUCCESS, icon="●")
+        self._set_status(QCoreApplication.translate("ChatDock", "Ready"), _SUCCESS, icon="●")
         if self._toolkit is not None:
             self._toolkit.reset_agent_state()
         return True
@@ -1741,10 +1799,11 @@ class ChatDock(QgsDockWidget):
         if hasattr(self, "_ask_overlay") and self._ask_overlay is not None:
             self._ask_overlay.hide()
         self._clear_transcript_widgets()
-        self._set_status("Ready", _SUCCESS, icon="●")
+        self._set_status(QCoreApplication.translate("ChatDock", "Ready"), _SUCCESS, icon="●")
         self._typing_widget = None
         self._current_agent_turn = None
         self._current_tool_row = None
+        self._current_feedback = None
         self._current_text = ""
         self._tool_progress_text = ""
         self._showing_tool_progress = False
@@ -1753,6 +1812,7 @@ class ChatDock(QgsDockWidget):
         self._pending_stream_scroll = False
         self._stream_render_timer.stop()
         self._last_stream_render_at = 0.0
+        self._thinking_display = ""
         self._thinking_text = ""
         self._thinking_started = False
         self._current_text_truncated = False
@@ -1772,11 +1832,14 @@ class ChatDock(QgsDockWidget):
         trace_started_at = time.monotonic()
         backend = self._get_backend()
         if backend is None:
-            self._add_user_message("No backend configured. Open Settings.")
+            self._add_user_message(
+                "No backend configured. Open Settings.",
+                display=QCoreApplication.translate("ChatDock", "No backend configured. Open Settings."),
+            )
             return
         err = backend.validate()
         if err:
-            self._add_user_message(err)
+            self._add_user_message(err, display=display_backend_feedback(err))
             return
 
         self._ttft_trace_id = trace_id
@@ -1803,6 +1866,7 @@ class ChatDock(QgsDockWidget):
         self._stop_requested = False
         self._streaming = False
         self._pending_tool = None
+        self._current_feedback = None
         self._current_text = ""
         self._tool_progress_text = ""
         self._showing_tool_progress = False
@@ -1811,6 +1875,7 @@ class ChatDock(QgsDockWidget):
         self._pending_stream_scroll = False
         self._stream_render_timer.stop()
         self._last_stream_render_at = 0.0
+        self._thinking_display = ""
         self._thinking_text = ""
         self._current_agent_turn = None
         self._current_tool_row = None
@@ -1821,8 +1886,8 @@ class ChatDock(QgsDockWidget):
         self.send_btn.setVisible(False)
         self.stop_btn.setEnabled(True)
         self.stop_btn.setVisible(True)
-        self._set_status("Thinking", _TEXT_3, spinning=True)
-        self._set_tool_progress("Thinking...")
+        self._set_status(QCoreApplication.translate("ChatDock", "Thinking"), _TEXT_3, spinning=True)
+        self._set_tool_progress(QCoreApplication.translate("ChatDock", "Thinking..."))
 
         # Bump the generation counter so any in-flight background pre-compaction
         # detects that a new send has started and discards its stale result.
@@ -1870,6 +1935,7 @@ class ChatDock(QgsDockWidget):
                 self._current_agent_turn = None
             self._current_tool_row = None
             self._pending_tool = None
+            self._current_feedback = None
             self._current_text = ""
             self._tool_progress_text = ""
             self._showing_tool_progress = False
@@ -1891,7 +1957,7 @@ class ChatDock(QgsDockWidget):
                     "choice": None, "free_text": None, "cancelled": True,
                 })
             self.stop_btn.setEnabled(False)
-            self._set_status("Stopping", _DANGER, spinning=True)
+            self._set_status(QCoreApplication.translate("ChatDock", "Stopping"), _DANGER, spinning=True)
 
     # ------------------------------------------------------------------ #
     def _on_event(self, ev, worker=None):
@@ -1939,7 +2005,11 @@ class ChatDock(QgsDockWidget):
 
                 if not self._streaming:
                     self._streaming = True
-                    self._set_status("Answering", _TEXT_3, spinning=True)
+                    self._set_status(QCoreApplication.translate("ChatDock", "Answering"), _TEXT_3, spinning=True)
+                if not self._current_text and isinstance(delta, BackendFeedback):
+                    self._current_feedback = delta
+                else:
+                    self._current_feedback = None
                 self._current_text += delta
                 if len(self._current_text) > _MAX_TURN_TEXT_CHARS:
                     if not self._current_text_truncated:
@@ -1961,6 +2031,7 @@ class ChatDock(QgsDockWidget):
                 if self._current_text.strip():
                     self._append_thinking_text(self._current_text)
                 turn.clear_streaming_text()
+                self._current_feedback = None
                 self._current_text = ""
                 self._streaming = False
             self._finish_streaming()
@@ -1984,13 +2055,13 @@ class ChatDock(QgsDockWidget):
                     detail = str(alg_id)
             elif tool_name == "run_pyqgis":
                 code = (tool_input or {}).get("code", "")
-                detail = "Python code"
+                detail = QCoreApplication.translate("ChatDock", "Python code")
                 if code:
                     first_line = code.strip().split("\n")[0]
                     if first_line:
                         detail = first_line[:60]
-            self._set_tool_progress(f"Processing `{detail}`...\n")
-            self._set_status(f"Running {detail}", _TEXT_3, spinning=True)
+            self._set_tool_progress(QCoreApplication.translate("ChatDock", "Processing `{detail}`...\n").format(detail=detail))
+            self._set_status(QCoreApplication.translate("ChatDock", "Running {detail}").format(detail=detail), _TEXT_3, spinning=True)
             self._maybe_scroll_to_bottom()
             # Main-thread tools (e.g. run_pyqgis) block the UI for their
             # whole duration, and the blocking call is already queued on
@@ -2033,7 +2104,7 @@ class ChatDock(QgsDockWidget):
                     self._current_agent_turn.clear_streaming_text()
                 self._tool_progress_text = ""
                 self._showing_tool_progress = False
-                self._set_status("Cancelled", _DANGER, icon="!")
+                self._set_status(QCoreApplication.translate("ChatDock", "Cancelled"), _DANGER, icon="!", cancelled=True)
             else:
                 elapsed = ""
                 if tool_name == "run_pyqgis" and not is_err:
@@ -2041,14 +2112,14 @@ class ChatDock(QgsDockWidget):
                         parsed = json.loads(str(result))
                         slow_ms = parsed.get("slow_ms")
                         if slow_ms is not None:
-                            elapsed = f" (took {slow_ms / 1000.0:.1f}s)"
+                            elapsed = QCoreApplication.translate("ChatDock", " (took {seconds:.1f}s)").format(seconds=slow_ms / 1000.0)
                     except (ValueError, TypeError):
                         pass
                 if is_err:
-                    self._set_tool_progress(f"`{tool_name}` failed — waiting for the model to adjust")
+                    self._set_tool_progress(QCoreApplication.translate("ChatDock", "`{tool}` failed — waiting for the model to adjust").format(tool=tool_name))
                 else:
-                    self._set_tool_progress(f"Finished `{tool_name}`{elapsed} — waiting for the model's next step")
-                self._set_status("Thinking", _TEXT_3, spinning=True)
+                    self._set_tool_progress(QCoreApplication.translate("ChatDock", "Finished `{tool}`{elapsed} — waiting for the model's next step").format(tool=tool_name, elapsed=elapsed))
+                self._set_status(QCoreApplication.translate("ChatDock", "Thinking"), _TEXT_3, spinning=True)
             self._maybe_scroll_to_bottom()
 
         elif ev.type == EventType.ASK_USER:
@@ -2076,7 +2147,7 @@ class ChatDock(QgsDockWidget):
             # HTTP transport is establishing a fresh TCP+TLS connection.
             # Shown briefly before THINKING so the user knows the delay is
             # network-level, not the model being slow.
-            self._set_status("Connecting", _TEXT_3, spinning=True)
+            self._set_status(QCoreApplication.translate("ChatDock", "Connecting"), _TEXT_3, spinning=True)
 
         elif ev.type == EventType.THINKING:
             self._flush_stream_render()
@@ -2087,7 +2158,7 @@ class ChatDock(QgsDockWidget):
                     self._append_thinking_text(thinking_text)
                 except Exception:  # nosec B110
                     pass
-            self._set_status("Thinking", _TEXT_3, spinning=True)
+            self._set_status(QCoreApplication.translate("ChatDock", "Thinking"), _TEXT_3, spinning=True)
 
         elif ev.type == EventType.COMPACTION:
             self._flush_stream_render()
@@ -2097,15 +2168,20 @@ class ChatDock(QgsDockWidget):
             self._flush_stream_render()
             self._hide_typing()
             self._finish_streaming()
-            short_error = str(ev.data.get("error", ""))
+            error = ev.data.get("error", "")
+            short_error = str(error)
+            display_error = str(display_backend_feedback(error))
             tb = str(ev.data.get("traceback", ""))
             if tb and tb.strip():
                 # Show the readable summary first, then the full traceback
                 # after a separator so debugging detail is still available.
                 full_text = f"{short_error}\n\n— Traceback —\n{tb}"
+                display_error = QCoreApplication.translate(
+                    "ChatDock", "{error}\n\n— Traceback —\n{traceback}"
+                ).format(error=display_error, traceback=tb)
             else:
                 full_text = short_error
-            self._add_error_message(full_text)
+            self._add_error_message(full_text, display=display_error)
             self._save_current_session()
 
         elif ev.type == EventType.DONE:
@@ -2117,14 +2193,24 @@ class ChatDock(QgsDockWidget):
             self._save_current_session()
             self._streaming = False
             self._thinking_started = False
+            self._thinking_display = ""
             self._thinking_text = ""
             self._tool_progress_text = ""
             self._showing_tool_progress = False
             self._current_agent_turn = None
-            if self._status_text != "Cancelled":
-                self._set_status("Ready", _SUCCESS, icon="●")
+            if not self._status_cancelled:
+                self._set_status(QCoreApplication.translate("ChatDock", "Ready"), _SUCCESS, icon="●")
             self._scroll_to_bottom()
             self._pending_tool = None
+
+    def _display_answer(self):
+        if self._current_feedback is not None:
+            return display_backend_feedback(self._current_feedback)
+        if self._current_text_truncated:
+            return self._current_text[:_MAX_TURN_TEXT_CHARS] + QCoreApplication.translate(
+                "ChatDock", "\n\n… (truncated)"
+            )
+        return self._current_text
 
     def _finish_streaming(self):
         """Finalize streaming text in current agent turn — applies full markdown.
@@ -2137,7 +2223,7 @@ class ChatDock(QgsDockWidget):
         self._flush_stream_render()
         if self._current_text:
             turn = self._get_or_create_agent_turn()
-            turn.finalize_text(self._current_text)
+            turn.finalize_text(self._display_answer())
             turn.finalize()
             turn_event = self._ensure_current_turn_event()
             if turn_event is not None:
@@ -2161,7 +2247,8 @@ class ChatDock(QgsDockWidget):
         turn.set_footer(model or conn, elapsed)
         turn_event = self._ensure_current_turn_event()
         if turn_event is not None:
-            turn_event["model"] = model or conn
+            raw_conn, _ = self._connection_labels(display=False)
+            turn_event["model"] = model or raw_conn
             turn_event["elapsed"] = elapsed
 
     def _remove_current_agent_turn(self):
@@ -2239,7 +2326,7 @@ class ChatDock(QgsDockWidget):
             # Progress while a tool runs — a plain status line, not the answer bubble.
             turn.set_progress_text(self._tool_progress_text)
         elif kind == "final":
-            turn.set_streaming_text(self._current_text)
+            turn.set_streaming_text(self._display_answer())
 
         is_emit_kind = kind in ("tool", "final")
         if is_emit_kind and not self._ttft_first_ui_render_logged:
@@ -2265,16 +2352,19 @@ class ChatDock(QgsDockWidget):
                 pass
             self._thinking_started = True
 
-        if self._thinking_text and not self._thinking_text.endswith((" ", "\n")):
-            if not text.startswith((" ", "\n", ".", ",", ":", ";", ")")):
-                self._thinking_text += " "
-        self._thinking_text += text
-        if len(self._thinking_text) > _MAX_THINKING_TEXT_CHARS:
-            self._thinking_text = self._thinking_text[:_MAX_THINKING_TEXT_CHARS]
-        turn.set_thinking_text(self._thinking_text)
+        self._thinking_text = self._join_thinking_text(self._thinking_text, str(text))
+        self._thinking_display = self._join_thinking_text(self._thinking_display, display_backend_feedback(text))
+        turn.set_thinking_text(self._thinking_display)
         turn_event = self._ensure_current_turn_event()
         if turn_event is not None:
             turn_event["thinking"] = self._thinking_text
+
+    @staticmethod
+    def _join_thinking_text(previous, text):
+        if previous and not previous.endswith((" ", "\n")):
+            if not text.startswith((" ", "\n", ".", ",", ":", ";", ")")):
+                previous += " "
+        return (previous + text)[:_MAX_THINKING_TEXT_CHARS]
 
     def _reset_run_ui(self):
         """Restore the Send/Stop buttons and status to the idle state.
@@ -2291,7 +2381,7 @@ class ChatDock(QgsDockWidget):
             self.send_btn.setVisible(True)
             self.stop_btn.setEnabled(False)
             self.stop_btn.setVisible(False)
-            self._set_status("Ready", _SUCCESS, icon="●")
+            self._set_status(QCoreApplication.translate("ChatDock", "Ready"), _SUCCESS, icon="●")
         except RuntimeError:
             pass
         self._stop_requested = False

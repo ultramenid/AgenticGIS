@@ -21,6 +21,8 @@ import subprocess  # nosec B404 - fixed argv to the user's own agy binary
 import tempfile
 from typing import Callable, ClassVar, List, Optional, Sequence
 
+from .feedback import BackendFeedback, QT_TRANSLATE_NOOP
+
 
 def _raw_decode_lenient(decoder, text, start, max_repairs=3):
     """``raw_decode`` that drops stray non-ASCII tokens between JSON tokens.
@@ -388,7 +390,7 @@ class ClaudeAdapter(CliAdapter):
             provider = payload.get("apiProvider") or ""
             return " · ".join(part for part in (auth_method, provider) if part)
         if payload.get("loggedIn") is False:
-            return "Not logged in"
+            return BackendFeedback(QT_TRANSLATE_NOOP("BackendFeedback", "Not logged in"))
         return default
 
     auth_detail_parser = _auth_detail
@@ -674,7 +676,7 @@ class OpenCodeAdapter(CliAdapter):
         # `opencode auth list` prints one "<Provider>  <method>  stored" row per credential.
         providers = [ln.split("  ")[0] for ln in _clean_lines(output) if ln.lower().endswith("stored")]
         if not providers:
-            return "login_required", "No provider credentials — run `opencode auth login`"
+            return "login_required", BackendFeedback(QT_TRANSLATE_NOOP("BackendFeedback", "No provider credentials — run `opencode auth login`"))
         return ", ".join(providers)
 
     auth_detail_parser = _auth_detail
@@ -824,7 +826,7 @@ class CursorAdapter(CliAdapter):
         lines = _clean_lines(output)
         text = " ".join(lines).lower()
         if "not logged in" in text or "not authenticated" in text:
-            return "login_required", "Not logged in — run `cursor-agent login`"
+            return "login_required", BackendFeedback(QT_TRANSLATE_NOOP("BackendFeedback", "Not logged in — run `cursor-agent login`"))
         line = next((ln for ln in lines if "logged in" in ln.lower()), default)
         return line.lstrip("✓ ").strip()
 
@@ -972,17 +974,17 @@ class AntigravityAdapter(CliAdapter):
     def _auth_detail(output: str, default: str) -> str:
         lower = output.lower()
         if any(err in lower for err in ("not logged in", "login required", "unauthenticated", "unauthorized")):
-            return "login_required", "Not logged in"
+            return "login_required", BackendFeedback(QT_TRANSLATE_NOOP("BackendFeedback", "Not logged in"))
         lines = [line.strip() for line in output.splitlines() if line.strip()]
         models = [
             line for line in lines
             if not line.lower().startswith("fetching") and not line.lower().startswith("error")
         ]
         if models:
-            return f"Logged in ({len(models)} models available)"
+            return BackendFeedback(QT_TRANSLATE_NOOP("BackendFeedback", "Logged in ({count} models available)"), count=len(models))
         if "error" in lower:
-            return default or "Login required"
-        return default or "Logged in"
+            return default or BackendFeedback(QT_TRANSLATE_NOOP("BackendFeedback", "Login required"))
+        return default or BackendFeedback(QT_TRANSLATE_NOOP("BackendFeedback", "Logged in"))
 
     auth_detail_parser = _auth_detail
 
@@ -1166,8 +1168,10 @@ class KimiAdapter(CliAdapter):
     def _auth_detail(output, default):
         providers = [ln.split()[0] for ln in _clean_lines(output) if "type=" in ln]
         if not providers:
-            return "login_required", "No providers configured — run `kimi login`"
-        return f"{len(providers)} provider{'s' if len(providers) != 1 else ''}: {', '.join(providers)}"
+            return "login_required", BackendFeedback(QT_TRANSLATE_NOOP("BackendFeedback", "No providers configured — run `kimi login`"))
+        if len(providers) == 1:
+            return BackendFeedback(QT_TRANSLATE_NOOP("BackendFeedback", "1 provider: {providers}"), providers=providers[0])
+        return BackendFeedback(QT_TRANSLATE_NOOP("BackendFeedback", "{count} providers: {providers}"), count=len(providers), providers=", ".join(providers))
 
     auth_detail_parser = _auth_detail
 
