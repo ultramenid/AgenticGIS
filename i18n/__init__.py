@@ -44,6 +44,6 @@ def load_plugin_translator(locale, directory=None):
         catalog = directory / f"AgenticGIS_{candidate}.qm"
         if catalog.is_file():
             translator = QTranslator()
-            if translator.load(str(catalog), searchDelimiters="\x1f") and not translator.isEmpty():
+            if translator.load(str(catalog), "", "\x1f") and not translator.isEmpty():
                 return translator
     return None

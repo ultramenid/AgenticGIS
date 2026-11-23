@@ -55,8 +55,8 @@ class PermissionTests(unittest.TestCase):
     def select(self, toolkit, dock, choice, displayed_choice, *, question, escape=False):
         emit = dock._emit_ask_user_threadsafe
 
-        def reply(prompt, options, allow_free_text):
-            emit(prompt, options, allow_free_text)
+        def reply(prompt, options, allow_free_text, request):
+            emit(prompt, options, allow_free_text, request)
             self.app.processEvents()
             card = dock._ask_user_card
             self.assertIsNotNone(card)
@@ -160,6 +160,43 @@ class PermissionTests(unittest.TestCase):
         self.assertFalse(toolkit.confirm_external_access("gee_add_layer", {})["ok"])
         toolkit.set_ask_user_emitter(None)
         self.assertFalse(toolkit.confirm_external_access("gee_animation", {})["ok"])
+
+    def test_cancelled_allow_payload_does_not_grant(self):
+        toolkit, _ = self.make_dock()
+        for choice in ("Allow once", "Always allow", "Allow all GEE tools for this session"):
+            with self.subTest(choice=choice):
+                toolkit.set_ask_user_emitter(
+                    lambda *args: toolkit._resolve_ask_user({"choice": choice, "cancelled": True})
+                )
+                self.assertFalse(toolkit.confirm_external_access("gee_add_layer", {})["ok"])
+                self.assertFalse(self.config.get("external_access_always_allowed"))
+
+    def test_queued_prompt_cannot_cross_session_or_answer_next_prompt(self):
+        toolkit, dock = self.make_dock()
+        old_requests = []
+
+        def switch_with_queued_prompt(question, options, allow_free_text, request):
+            old_requests.append(request)
+            dock._emit_ask_user_threadsafe(question, options, allow_free_text, request)
+            new = dock._session_store.create_session()["id"]
+            self.assertTrue(dock._switch_to_session(new))
+            self.app.processEvents()
+            self.assertIsNone(dock._ask_user_card)
+
+        toolkit.set_ask_user_emitter(switch_with_queued_prompt)
+        self.assertFalse(toolkit.confirm_external_access("web_fetch", {"url": URL})["ok"])
+
+        def answer_second_prompt(question, options, allow_free_text, request):
+            dock._emit_ask_user_threadsafe(question, options, allow_free_text, request)
+            self.app.processEvents()
+            self.assertIsNotNone(dock._ask_user_card)
+            toolkit._resolve_ask_user({"choice": "Always allow"}, request=old_requests[0])
+            self.assertTrue(toolkit.is_pending_ask_user(request))
+            toolkit._resolve_ask_user({"choice": "Deny"}, request=request)
+
+        toolkit.set_ask_user_emitter(answer_second_prompt)
+        self.assertFalse(toolkit.confirm_external_access("web_fetch", {"url": URL})["ok"])
+        self.assertFalse(self.config.get("external_access_always_allowed"))
 
     def test_agent_text_and_synthesized_cancel(self):
         self.language(True)

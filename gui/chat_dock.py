@@ -33,7 +33,6 @@ from qgis.PyQt.QtWidgets import (
 from .. import config as config_mod
 from ..backends import providers
 from ..backends.feedback import BackendFeedback
-from ..i18n import resolve_qgis_locale
 from .backend_feedback import display_backend_feedback
 from ..backends.base import AgentEvent, EventType, should_compact
 from ..core.dev_logging import log_ttft_event, new_trace_id
@@ -230,7 +229,7 @@ class ChatWorker(QThread):
 
 
 class ChatDock(QgsDockWidget):
-    _ask_user_signal = pyqtSignal(str, object, bool)
+    _ask_user_signal = pyqtSignal(str, object, bool, object)
 
     def __init__(
         self,
@@ -248,7 +247,6 @@ class ChatDock(QgsDockWidget):
         self._open_settings = open_settings
         self._request_cancel = request_cancel
         self._toolkit = toolkit
-        self._display_locale = QLocale(resolve_qgis_locale())
         self._default_session_title = QCoreApplication.translate("ChatDock", "New session")
         self._session_store = session_store or SessionStore(default_name=self._default_session_title)
         self._active_session_id = self._session_store.active_session()["id"]
@@ -685,7 +683,7 @@ class ChatDock(QgsDockWidget):
                     reply = QMessageBox.question(
                         self,
                         QCoreApplication.translate("ChatDock", "Large paste"),
-                        QCoreApplication.translate("ChatDock", "You are pasting {count:,} characters.\n\nThis may exceed the model's context window and could cause errors. Paste anyway?").format(count=len(clip_text)),
+                        QCoreApplication.translate("ChatDock", "You are pasting {count} characters.\n\nThis may exceed the model's context window and could cause errors. Paste anyway?").format(count=QLocale().toString(len(clip_text))),
                         QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
                         QMessageBox.StandardButton.No,
                     )
@@ -1127,14 +1125,16 @@ class ChatDock(QgsDockWidget):
             pass
 
     # ------------------------------------------------------------------ #
-    def _emit_ask_user_threadsafe(self, question, options, allow_free_text):
+    def _emit_ask_user_threadsafe(self, question, options, allow_free_text, request):
         """Called by the toolkit from worker threads to surface a question."""
-        self._ask_user_signal.emit(question, options, allow_free_text)
+        self._ask_user_signal.emit(question, options, allow_free_text, request)
 
-    def _show_toolkit_ask_user(self, question, options, allow_free_text):
-        self._show_ask_user(question, options, allow_free_text, trusted_presentation=True)
+    def _show_toolkit_ask_user(self, question, options, allow_free_text, request):
+        if self._toolkit.is_pending_ask_user(request):
+            self._dismiss_ask_user_card()
+            self._show_ask_user(question, options, allow_free_text, request=request)
 
-    def _show_ask_user(self, question, options, allow_free_text, *, trusted_presentation=False):
+    def _show_ask_user(self, question, options, allow_free_text, *, request=None):
         """Build and show the AskUserCard as a modal-style popover.
 
         Renders a translucent backdrop over the entire chat body, with
@@ -1196,9 +1196,12 @@ class ChatDock(QgsDockWidget):
         # Build the actual interactive card
         card = AskUserCard(
             question, options, allow_free_text=allow_free_text, parent=self._ask_card_frame,
-            trusted_presentation=trusted_presentation,
+            trusted_presentation=request is not None,
         )
-        card.submitted.connect(self._resolve_ask_user)
+        card.submitted.connect(
+            lambda payload: self._resolve_ask_user(payload, request=request)
+            if self._ask_user_card is card else None
+        )
         self._ask_scroll.setWidget(card)
         self._ask_card = card
 
@@ -1220,26 +1223,13 @@ class ChatDock(QgsDockWidget):
         self._ask_user_card = card
         self._set_status(QCoreApplication.translate("ChatDock", "Awaiting input"), _WARN, spinning=True)
 
-    def _resolve_ask_user(self, payload):
+    def _resolve_ask_user(self, payload, *, request=None):
         """User picked an option or typed a reply; close the card and unblock."""
         self._ask_user_payload = payload
         label = payload.get("choice")
         if self._ask_user_card is not None:
             label = self._ask_user_card.display_choice(label)
-        # Tear down the overlay + card so the chat becomes interactive
-        # again. We keep the overlay widget itself (cheap) but hide it
-        # and clear the inner card so the next question rebuilds clean.
-        # Detach the card from the scroll area first so the next ask starts
-        # fresh, but keep the reusable scroll area in the layout.
-        if hasattr(self, "_ask_scroll") and self._ask_scroll is not None:
-            old = self._ask_scroll.takeWidget()
-            if old is not None:
-                old.deleteLater()
-        if self._ask_user_card is not None:
-            self._ask_user_card = None
-        self._ask_card = None
-        if hasattr(self, "_ask_overlay") and self._ask_overlay is not None:
-            self._ask_overlay.hide()
+        self._dismiss_ask_user_card()
         text = payload.get("free_text")
         cancelled = bool(payload.get("cancelled", False))
         chosen_text = label or text
@@ -1257,12 +1247,24 @@ class ChatDock(QgsDockWidget):
             self._set_status(QCoreApplication.translate("ChatDock", "Cancelled"), _DANGER, icon="!", cancelled=True)
         else:
             self._set_status(QCoreApplication.translate("ChatDock", "Ready"), _SUCCESS, icon="●")
-        if self._toolkit is not None:
-            self._toolkit._resolve_ask_user({
-                "choice": payload.get("choice"),
-                "free_text": payload.get("free_text"),
-                "cancelled": cancelled,
-            })
+        if request is not None:
+            self._toolkit._resolve_ask_user(payload, request=request)
+
+    def _dismiss_ask_user_card(self):
+        # Tear down the overlay + card so the chat becomes interactive
+        # again. We keep the overlay widget itself (cheap) but hide it
+        # and clear the inner card so the next question rebuilds clean.
+        # Detach the card from the scroll area first so the next ask starts
+        # fresh, but keep the reusable scroll area in the layout.
+        if hasattr(self, "_ask_scroll") and self._ask_scroll is not None:
+            old = self._ask_scroll.takeWidget()
+            if old is not None:
+                old.deleteLater()
+        if self._ask_user_card is not None:
+            self._ask_user_card = None
+        self._ask_card = None
+        if hasattr(self, "_ask_overlay") and self._ask_overlay is not None:
+            self._ask_overlay.hide()
 
     def _overlay_rect(self):
         """Return the rect for the ask_user overlay.
@@ -1644,7 +1646,7 @@ class ChatDock(QgsDockWidget):
                 break
             value /= 1024.0
         precision = 0 if unit == "B" or value >= 100 else 1 if value >= 10 else 2
-        return f"{self._display_locale.toString(value, 'f', precision)} {unit}"
+        return f"{QLocale().toString(value, 'f', precision)} {unit}"
 
     def _stop_active_worker(self):
         if self._worker is None:
@@ -1681,10 +1683,8 @@ class ChatDock(QgsDockWidget):
                 self._request_cancel()
             except Exception:  # nosec B110
                 pass
-        if self._ask_user_card is not None and self._toolkit is not None:
-            self._toolkit._resolve_ask_user({
-                "choice": None, "free_text": None, "cancelled": True,
-            })
+        if self._toolkit is not None:
+            self._toolkit.cancel_pending_ask_user()
         self._reset_run_ui()
         return True
 
@@ -1788,16 +1788,9 @@ class ChatDock(QgsDockWidget):
         # Stop any active worker BEFORE clearing widgets to prevent crashes
         if worker_was_active:
             self._stop_active_worker()
-        if self._ask_user_card is not None:
-            if self._toolkit is not None:
-                self._toolkit._resolve_ask_user({
-                    "choice": None, "free_text": None, "cancelled": True,
-                })
-            self._ask_user_card.deleteLater()
-            self._ask_user_card = None
-        # Hide the overlay (modal dialog state) on clear
-        if hasattr(self, "_ask_overlay") and self._ask_overlay is not None:
-            self._ask_overlay.hide()
+        if self._toolkit is not None:
+            self._toolkit.cancel_pending_ask_user()
+        self._dismiss_ask_user_card()
         self._clear_transcript_widgets()
         self._set_status(QCoreApplication.translate("ChatDock", "Ready"), _SUCCESS, icon="●")
         self._typing_widget = None
@@ -1952,10 +1945,8 @@ class ChatDock(QgsDockWidget):
                     self._request_cancel()
                 except Exception:  # nosec B110
                     pass
-            if self._ask_user_card is not None and self._toolkit is not None:
-                self._toolkit._resolve_ask_user({
-                    "choice": None, "free_text": None, "cancelled": True,
-                })
+            if self._toolkit is not None:
+                self._toolkit.cancel_pending_ask_user()
             self.stop_btn.setEnabled(False)
             self._set_status(QCoreApplication.translate("ChatDock", "Stopping"), _DANGER, spinning=True)
 
@@ -2112,7 +2103,9 @@ class ChatDock(QgsDockWidget):
                         parsed = json.loads(str(result))
                         slow_ms = parsed.get("slow_ms")
                         if slow_ms is not None:
-                            elapsed = QCoreApplication.translate("ChatDock", " (took {seconds:.1f}s)").format(seconds=slow_ms / 1000.0)
+                            elapsed = QCoreApplication.translate("ChatDock", " (took {seconds}s)").format(
+                                seconds=QLocale().toString(slow_ms / 1000.0, "f", 1)
+                            )
                     except (ValueError, TypeError):
                         pass
                 if is_err:

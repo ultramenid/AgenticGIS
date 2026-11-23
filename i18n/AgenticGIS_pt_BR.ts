@@ -474,228 +474,214 @@
     <context>
         <name>ChatDock</name>
         <message>
-            <location filename="../gui/chat_dock.py" line="1601" />
+            <location filename="../gui/chat_dock.py" line="1603" />
             <source>New session</source>
             <translation>Nova sessão</translation>
         </message>
         <message>
-            <location filename="../gui/chat_dock.py" line="2384" />
+            <location filename="../gui/chat_dock.py" line="2377" />
             <source>Ready</source>
             <translation>Pronto</translation>
         </message>
         <message>
-            <location filename="../gui/chat_dock.py" line="350" />
+            <location filename="../gui/chat_dock.py" line="348" />
             <source>Settings</source>
             <translation>Configurações</translation>
         </message>
         <message>
-            <location filename="../gui/chat_dock.py" line="351" />
+            <location filename="../gui/chat_dock.py" line="349" />
             <source>Sessions ⌄</source>
             <translation>Sessões ⌄</translation>
         </message>
         <message>
-            <location filename="../gui/chat_dock.py" line="1347" />
+            <location filename="../gui/chat_dock.py" line="1349" />
             <source>Chat sessions</source>
             <translation>Sessões de conversa</translation>
         </message>
         <message>
-            <location filename="../gui/chat_dock.py" line="469" />
+            <location filename="../gui/chat_dock.py" line="467" />
             <source>Ask AgenticGIS…  (↑ for history)</source>
             <translation>Pergunte ao AgenticGIS…  (↑ para ver o histórico)</translation>
         </message>
         <message>
-            <location filename="../gui/chat_dock.py" line="517" />
+            <location filename="../gui/chat_dock.py" line="515" />
             <source>Send (Enter) · New line (Shift+Enter)</source>
             <translation>Enviar (Enter) · Nova linha (Shift+Enter)</translation>
         </message>
         <message>
-            <location filename="../gui/chat_dock.py" line="535" />
+            <location filename="../gui/chat_dock.py" line="533" />
             <source>Stop (Esc)</source>
             <translation>Parar (Esc)</translation>
         </message>
         <message>
-            <location filename="../gui/chat_dock.py" line="590" />
+            <location filename="../gui/chat_dock.py" line="588" />
             <source>Custom endpoint</source>
             <translation>Endpoint personalizado</translation>
         </message>
         <message>
-            <location filename="../gui/chat_dock.py" line="594" />
+            <location filename="../gui/chat_dock.py" line="592" />
             <source>Not configured</source>
             <translation>Sem configuração</translation>
         </message>
         <message>
-            <location filename="../gui/chat_dock.py" line="599" />
+            <location filename="../gui/chat_dock.py" line="597" />
             <source>Default model</source>
             <translation>Modelo padrão</translation>
         </message>
         <message>
-            <location filename="../gui/chat_dock.py" line="601" />
+            <location filename="../gui/chat_dock.py" line="599" />
             <source>{label} — click to change in Settings</source>
             <translation>{label} — clique para alterar nas Configurações</translation>
         </message>
         <message>
-            <location filename="../gui/chat_dock.py" line="685" />
+            <location filename="../gui/chat_dock.py" line="683" />
             <source>Large paste</source>
             <translation>Colagem de texto longo</translation>
         </message>
         <message>
-            <location filename="../gui/chat_dock.py" line="685" />
-            <source>You are pasting {count:,} characters.
-
-This may exceed the model's context window and could cause errors. Paste anyway?</source>
-            <translation>Você está colando {count:,} caracteres.
-
-Isso pode exceder a janela de contexto do modelo e causar erros. Colar mesmo assim?</translation>
-        </message>
-        <message>
-            <location filename="../gui/chat_dock.py" line="705" />
+            <location filename="../gui/chat_dock.py" line="703" />
             <source>Wait for the current turn to finish</source>
             <translation>Aguarde o fim do turno atual</translation>
         </message>
         <message>
-            <location filename="../gui/chat_dock.py" line="970" />
+            <location filename="../gui/chat_dock.py" line="968" />
             <source>Earlier messages were summarised to save context</source>
             <translation>As mensagens anteriores foram resumidas para economizar espaço no contexto</translation>
         </message>
         <message>
-            <location filename="../gui/chat_dock.py" line="1221" />
+            <location filename="../gui/chat_dock.py" line="1224" />
             <source>Awaiting input</source>
             <translation>Aguardando resposta</translation>
         </message>
         <message>
-            <location filename="../gui/chat_dock.py" line="2107" />
+            <location filename="../gui/chat_dock.py" line="2098" />
             <source>Cancelled</source>
             <translation>Cancelado</translation>
         </message>
         <message>
-            <location filename="../gui/chat_dock.py" line="1355" />
+            <location filename="../gui/chat_dock.py" line="1357" />
             <source>Choose a chat session</source>
             <translation>Escolha uma sessão de conversa</translation>
         </message>
         <message>
-            <location filename="../gui/chat_dock.py" line="1355" />
+            <location filename="../gui/chat_dock.py" line="1357" />
             <source>Continue or start fresh</source>
             <translation>Continue ou comece uma nova sessão</translation>
         </message>
         <message>
-            <location filename="../gui/chat_dock.py" line="1358" />
+            <location filename="../gui/chat_dock.py" line="1360" />
             <source>Continue previous</source>
             <translation>Continuar sessão anterior</translation>
         </message>
         <message>
-            <location filename="../gui/chat_dock.py" line="1359" />
+            <location filename="../gui/chat_dock.py" line="1361" />
             <source>Session list</source>
             <translation>Lista de sessões</translation>
         </message>
         <message>
-            <location filename="../gui/chat_dock.py" line="1429" />
+            <location filename="../gui/chat_dock.py" line="1431" />
             <source>Name this chat session</source>
             <translation>Dê um nome à sessão</translation>
         </message>
         <message>
-            <location filename="../gui/chat_dock.py" line="1518" />
+            <location filename="../gui/chat_dock.py" line="1520" />
             <source>Cancel</source>
             <translation>Cancelar</translation>
         </message>
         <message>
-            <location filename="../gui/chat_dock.py" line="1462" />
+            <location filename="../gui/chat_dock.py" line="1464" />
             <source>Save</source>
             <translation>Salvar</translation>
         </message>
         <message>
-            <location filename="../gui/chat_dock.py" line="1490" />
+            <location filename="../gui/chat_dock.py" line="1492" />
             <source>Delete session</source>
             <translation>Excluir sessão</translation>
         </message>
         <message>
-            <location filename="../gui/chat_dock.py" line="1490" />
+            <location filename="../gui/chat_dock.py" line="1492" />
             <source>This removes the saved transcript and backend continuation for this chat.</source>
             <translation>Isso exclui o histórico salvo e os dados necessários para continuar esta conversa.</translation>
         </message>
         <message>
-            <location filename="../gui/chat_dock.py" line="1507" />
+            <location filename="../gui/chat_dock.py" line="1509" />
             <source>Deletion cannot be undone</source>
             <translation>A exclusão é irreversível</translation>
         </message>
         <message>
-            <location filename="../gui/chat_dock.py" line="1523" />
+            <location filename="../gui/chat_dock.py" line="1525" />
             <source>Delete</source>
             <translation>Excluir</translation>
         </message>
         <message>
-            <location filename="../gui/chat_dock.py" line="1597" />
+            <location filename="../gui/chat_dock.py" line="1599" />
             <source>Active session: {name}</source>
             <translation>Sessão ativa: {name}</translation>
         </message>
         <message>
-            <location filename="../gui/chat_dock.py" line="1614" />
+            <location filename="../gui/chat_dock.py" line="1616" />
             <source>Rename session</source>
             <translation>Renomear sessão</translation>
         </message>
         <message>
-            <location filename="../gui/chat_dock.py" line="1835" />
+            <location filename="../gui/chat_dock.py" line="1828" />
             <source>No backend configured. Open Settings.</source>
             <translation>Nenhuma conexão configurada. Abra as Configurações.</translation>
         </message>
         <message>
-            <location filename="../gui/chat_dock.py" line="2161" />
+            <location filename="../gui/chat_dock.py" line="2154" />
             <source>Thinking</source>
             <translation>Pensando</translation>
         </message>
         <message>
-            <location filename="../gui/chat_dock.py" line="1890" />
+            <location filename="../gui/chat_dock.py" line="1883" />
             <source>Thinking...</source>
             <translation>Pensando…</translation>
         </message>
         <message>
-            <location filename="../gui/chat_dock.py" line="1960" />
+            <location filename="../gui/chat_dock.py" line="1951" />
             <source>Stopping</source>
             <translation>Parando</translation>
         </message>
         <message>
-            <location filename="../gui/chat_dock.py" line="2008" />
+            <location filename="../gui/chat_dock.py" line="1999" />
             <source>Answering</source>
             <translation>Respondendo</translation>
         </message>
         <message>
-            <location filename="../gui/chat_dock.py" line="2058" />
+            <location filename="../gui/chat_dock.py" line="2049" />
             <source>Python code</source>
             <translation>Código Python</translation>
         </message>
         <message>
-            <location filename="../gui/chat_dock.py" line="2063" />
+            <location filename="../gui/chat_dock.py" line="2054" />
             <source>Processing `{detail}`...
 </source>
             <translation>Processando `{detail}`...
 </translation>
         </message>
         <message>
-            <location filename="../gui/chat_dock.py" line="2064" />
+            <location filename="../gui/chat_dock.py" line="2055" />
             <source>Running {detail}</source>
             <translation>Executando {detail}</translation>
         </message>
         <message>
-            <location filename="../gui/chat_dock.py" line="2115" />
-            <source> (took {seconds:.1f}s)</source>
-            <translation> (levou {seconds:.1f} s)</translation>
-        </message>
-        <message>
-            <location filename="../gui/chat_dock.py" line="2119" />
+            <location filename="../gui/chat_dock.py" line="2112" />
             <source>`{tool}` failed — waiting for the model to adjust</source>
             <translation>`{tool}` falhou — aguardando o modelo ajustar a operação</translation>
         </message>
         <message>
-            <location filename="../gui/chat_dock.py" line="2121" />
+            <location filename="../gui/chat_dock.py" line="2114" />
             <source>Finished `{tool}`{elapsed} — waiting for the model's next step</source>
             <translation>`{tool}` concluído{elapsed} — aguardando a próxima etapa do modelo</translation>
         </message>
         <message>
-            <location filename="../gui/chat_dock.py" line="2150" />
+            <location filename="../gui/chat_dock.py" line="2143" />
             <source>Connecting</source>
             <translation>Conectando</translation>
         </message>
         <message>
-            <location filename="../gui/chat_dock.py" line="2179" />
+            <location filename="../gui/chat_dock.py" line="2172" />
             <source>{error}
 
 — Traceback —
@@ -706,13 +692,27 @@ Isso pode exceder a janela de contexto do modelo e causar erros. Colar mesmo ass
 {traceback}</translation>
         </message>
         <message>
-            <location filename="../gui/chat_dock.py" line="2210" />
+            <location filename="../gui/chat_dock.py" line="2203" />
             <source>
 
 … (truncated)</source>
             <translation>
 
 … (texto truncado)</translation>
+        </message>
+        <message>
+            <location filename="../gui/chat_dock.py" line="683" />
+            <source>You are pasting {count} characters.
+
+This may exceed the model's context window and could cause errors. Paste anyway?</source>
+            <translation>Você está colando {count} caracteres.
+
+Isso pode exceder a janela de contexto do modelo e causar erros. Colar mesmo assim?</translation>
+        </message>
+        <message>
+            <location filename="../gui/chat_dock.py" line="2106" />
+            <source> (took {seconds}s)</source>
+            <translation> (levou {seconds} s)</translation>
         </message>
     </context>
     <context>
@@ -784,87 +784,87 @@ Isso pode exceder a janela de contexto do modelo e causar erros. Colar mesmo ass
     <context>
         <name>ExternalAccess</name>
         <message>
-            <location filename="../core/toolkit.py" line="1124" />
+            <location filename="../core/toolkit.py" line="1131" />
             <source>load external layer source: {uri}</source>
             <translation>carregar uma fonte de camada externa: {uri}</translation>
         </message>
         <message>
-            <location filename="../core/toolkit.py" line="1132" />
+            <location filename="../core/toolkit.py" line="1139" />
             <source>use external processing path or URI: {path}</source>
             <translation>usar um caminho ou URI externo no processamento: {path}</translation>
         </message>
         <message>
-            <location filename="../core/toolkit.py" line="1145" />
+            <location filename="../core/toolkit.py" line="1152" />
             <source>run PyQGIS code that references external path or URI: {path}</source>
             <translation>executar código PyQGIS que faz referência a um caminho ou URI externo: {path}</translation>
         </message>
         <message>
-            <location filename="../core/toolkit.py" line="1160" />
+            <location filename="../core/toolkit.py" line="1167" />
             <source>fetch external URL: {url}</source>
             <translation>acessar uma URL externa: {url}</translation>
         </message>
         <message>
-            <location filename="../core/toolkit.py" line="1168" />
+            <location filename="../core/toolkit.py" line="1175" />
             <source>fetch Earth Engine dataset metadata from the public STAC catalog for '{dataset}'</source>
             <translation>buscar os metadados do conjunto de dados do Earth Engine '{dataset}' no catálogo STAC público</translation>
         </message>
         <message>
-            <location filename="../core/toolkit.py" line="1176" />
+            <location filename="../core/toolkit.py" line="1183" />
             <source>run an Earth Engine expression and add the result to the canvas</source>
             <translation>executar uma expressão do Earth Engine e adicionar o resultado ao mapa</translation>
         </message>
         <message>
-            <location filename="../core/toolkit.py" line="1184" />
+            <location filename="../core/toolkit.py" line="1191" />
             <source>run an Earth Engine expression and build an animated GIF timelapse</source>
             <translation>executar uma expressão do Earth Engine e gerar um GIF animado da sequência temporal</translation>
         </message>
         <message>
-            <location filename="../core/toolkit.py" line="1219" />
+            <location filename="../core/toolkit.py" line="1226" />
             <source>Allow once</source>
             <translation>Permitir uma vez</translation>
         </message>
         <message>
-            <location filename="../core/toolkit.py" line="1220" />
+            <location filename="../core/toolkit.py" line="1227" />
             <source>Permit this operation, then ask again next time.</source>
             <translation>Permite esta operação e pede autorização novamente na próxima vez.</translation>
         </message>
         <message>
-            <location filename="../core/toolkit.py" line="1226" />
+            <location filename="../core/toolkit.py" line="1233" />
             <source>Always allow</source>
             <translation>Permitir sempre</translation>
         </message>
         <message>
-            <location filename="../core/toolkit.py" line="1227" />
+            <location filename="../core/toolkit.py" line="1234" />
             <source>Permit external access now and remember this choice.</source>
             <translation>Permite o acesso externo agora e salva esta escolha.</translation>
         </message>
         <message>
-            <location filename="../core/toolkit.py" line="1233" />
+            <location filename="../core/toolkit.py" line="1240" />
             <source>Deny</source>
             <translation>Negar</translation>
         </message>
         <message>
-            <location filename="../core/toolkit.py" line="1234" />
+            <location filename="../core/toolkit.py" line="1241" />
             <source>Block this operation and keep analysis inside loaded layers.</source>
             <translation>Bloqueia esta operação e restringe a análise às camadas carregadas.</translation>
         </message>
         <message>
-            <location filename="../core/toolkit.py" line="1241" />
+            <location filename="../core/toolkit.py" line="1248" />
             <source>Allow all GEE tools for this session</source>
             <translation>Permitir todas as ferramentas do GEE nesta sessão</translation>
         </message>
         <message>
-            <location filename="../core/toolkit.py" line="1241" />
+            <location filename="../core/toolkit.py" line="1248" />
             <source>Permit all Earth Engine operations during this chat session.</source>
             <translation>Permite todas as operações do Earth Engine durante esta sessão de conversa.</translation>
         </message>
         <message>
-            <location filename="../core/toolkit.py" line="1249" />
+            <location filename="../core/toolkit.py" line="1256" />
             <source>Allow AgenticGIS to {reason}?</source>
             <translation>Autorizar o AgenticGIS a {reason}?</translation>
         </message>
         <message>
-            <location filename="../core/toolkit.py" line="1150" />
+            <location filename="../core/toolkit.py" line="1157" />
             <source>run PyQGIS code that may access files, URLs, or sources outside loaded layers ({marker})</source>
             <translation>executar código PyQGIS que pode acessar arquivos, URLs ou fontes fora das camadas carregadas ({marker})</translation>
         </message>

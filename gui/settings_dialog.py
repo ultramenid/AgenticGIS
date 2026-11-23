@@ -1465,7 +1465,7 @@ class SettingsDialog(QDialog):
         def done(rows, err):
             self._cli_scanning = False
             if err:
-                self._set_status(self.cli_scan_status, QCoreApplication.translate("SettingsDialog", "Scan failed · {error}").format(error=err), _DANGER)
+                self._set_status(self.cli_scan_status, QCoreApplication.translate("SettingsDialog", "Scan failed · {error}").format(error=display_backend_feedback(err)), _DANGER)
                 return
             self._cli_scan_rows = rows
             self._cli_scan_performed = True

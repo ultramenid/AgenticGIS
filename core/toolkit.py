@@ -899,7 +899,7 @@ class QgisToolkit:
     def set_ask_user_emitter(self, emitter):
         """Register a callback that asks the user a clarifying question.
 
-        The emitter signature is ``emitter(question, options, allow_free_text)``.
+        The emitter signature is ``emitter(question, options, allow_free_text, request)``.
         It is expected to be non-blocking; it fires ``self._resolve_ask_user(payload)``
         from the main thread when the user replies (or the dock is cleared).
         """
@@ -951,7 +951,7 @@ class QgisToolkit:
 
         try:
             if self._ask_emitter is not None:
-                self._ask_emitter(display_question, list(options), bool(allow_free_text))
+                self._ask_emitter(display_question, list(options), bool(allow_free_text), wait)
 
             # Wait for the dock (or a test) to fire _resolve_ask_user.
             # Bound the wait so a forgotten card doesn't wedge the worker
@@ -1027,16 +1027,23 @@ class QgisToolkit:
             })
         return normalized[:4]
 
-    def _resolve_ask_user(self, payload):
-        """Called by the dock (or a test) to unblock ask_user.
-
-        ``payload`` is a dict with keys ``choice``, ``free_text``, ``cancelled``.
-        Missing keys default to None / False.
-        """
+    def is_pending_ask_user(self, request):
         with self._ask_user_lock:
-            if self._ask_user_pending is None:
-                return  # nothing to resolve (stale fire, e.g. after Clear)
-            wait_evt, slot = self._ask_user_pending
+            pending = self._ask_user_pending
+            return pending is not None and pending[0] is request and not request.is_set()
+
+    def cancel_pending_ask_user(self):
+        self._resolve_ask_user({"cancelled": True})
+
+    def _resolve_ask_user(self, payload, *, request=None):
+        """Resolve the matching toolkit prompt, or cancel the current slot."""
+        with self._ask_user_lock:
+            pending = self._ask_user_pending
+            if pending is None:
+                return
+            wait_evt, slot = pending
+            if wait_evt.is_set() or (request is not None and request is not wait_evt):
+                return
             slot["choice"] = payload.get("choice")
             slot["free_text"] = payload.get("free_text")
             slot["cancelled"] = bool(payload.get("cancelled", False))
@@ -1257,7 +1264,7 @@ class QgisToolkit:
         if isinstance(answer, str):
             log_event("external_access.permission_error", tool=tool_name, error=answer)
             return {"ok": False, "error": answer, "cancelled": True}
-        choice = (answer or {}).get("choice")
+        choice = None if answer.get("cancelled") else answer.get("choice")
         if choice == "Allow once":
             log_event("external_access.allowed", tool=tool_name, reason=reason)
             return None

@@ -82,6 +82,22 @@ class LocaleTests(unittest.TestCase):
             self.assertIsNone(plugin._translator)
             self.assert_ready("Ready")
 
+    def test_translator_removed_when_gui_teardown_raises(self):
+        iface = Mock()
+        iface.mainWindow.return_value = QMainWindow()
+        plugin = AgenticGisPlugin(iface)
+        with patch("AgenticGIS.plugin.resolve_qgis_locale", return_value="pt_BR"), \
+             patch.object(plugin, "_apply_mcp_state"), \
+             patch("AgenticGIS.core.network_cache.sweep_stale_cache_on_startup"), \
+             patch("AgenticGIS.core.network_cache.maybe_enable_default_cache"), \
+             patch.object(plugin, "_unload_gui", side_effect=RuntimeError("teardown")):
+            plugin.initGui()
+            self.assert_ready("Pronto")
+            with self.assertRaisesRegex(RuntimeError, "teardown"):
+                plugin.unload()
+        self.assertIsNone(plugin._translator)
+        self.assert_ready("Ready")
+
     def assert_ready(self, expected):
         self.assertEqual(QCoreApplication.translate("ChatDock", "Ready"), expected)
 

@@ -66,6 +66,16 @@ class AgenticGisPlugin:
         self._apply_mcp_state()
 
     def unload(self):
+        self.toolkit.set_ask_user_emitter(None)
+        self.toolkit.cancel_pending_ask_user()
+        try:
+            self._unload_gui()
+        finally:
+            if self._translator is not None:
+                QCoreApplication.removeTranslator(self._translator)
+                self._translator = None
+
+    def _unload_gui(self):
         try:
             from .core.network_cache import clear_cache_on_unload
             clear_cache_on_unload()
@@ -90,9 +100,6 @@ class AgenticGisPlugin:
             self.iface.removeToolBarIcon(self._action)
             self.iface.removePluginMenu("AgenticGIS", self._action)
             self._action = None
-        if self._translator is not None:
-            QCoreApplication.removeTranslator(self._translator)
-            self._translator = None
 
     # ------------------------------------------------------------------ #
     # Dock                                                               #
