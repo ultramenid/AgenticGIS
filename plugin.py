@@ -9,12 +9,18 @@ import hashlib
 import json
 import threading
 
-from qgis.PyQt.QtWidgets import QAction
+from qgis.PyQt.QtCore import QCoreApplication
+
+try:
+    from qgis.PyQt.QtGui import QAction  # Qt 6
+except ImportError:
+    from qgis.PyQt.QtWidgets import QAction  # Qt 5
 
 from . import config as config_mod
 from .backends import build_backend
 from .core.executor import MainThreadExecutor
 from .core.toolkit import QgisToolkit
+from .i18n import load_plugin_translator, resolve_qgis_locale
 
 
 class AgenticGisPlugin:
@@ -24,6 +30,7 @@ class AgenticGisPlugin:
         self.executor = MainThreadExecutor(config=self.config)       # created on the main thread
         self.toolkit = QgisToolkit(iface, config=self.config)
         self._action = None
+        self._translator = None
         self._dock = None
         self._server = None
         self._cached_backend = None
@@ -33,6 +40,11 @@ class AgenticGisPlugin:
     # QGIS plugin lifecycle                                              #
     # ------------------------------------------------------------------ #
     def initGui(self):
+        if self._action is not None:
+            return
+        translator = load_plugin_translator(resolve_qgis_locale())
+        if translator is not None and QCoreApplication.installTranslator(translator):
+            self._translator = translator
         self._action = QAction("AgenticGIS", self.iface.mainWindow())
         self._action.setCheckable(True)
         self._action.triggered.connect(self._toggle_dock)
@@ -54,6 +66,16 @@ class AgenticGisPlugin:
         self._apply_mcp_state()
 
     def unload(self):
+        self.toolkit.set_ask_user_emitter(None)
+        self.toolkit.cancel_pending_ask_user()
+        try:
+            self._unload_gui()
+        finally:
+            if self._translator is not None:
+                QCoreApplication.removeTranslator(self._translator)
+                self._translator = None
+
+    def _unload_gui(self):
         try:
             from .core.network_cache import clear_cache_on_unload
             clear_cache_on_unload()

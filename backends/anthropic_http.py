@@ -25,6 +25,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
+from .feedback import BackendFeedback, QT_TRANSLATE_NOOP
 from ..core.dev_logging import log_event
 
 
@@ -116,7 +117,7 @@ class AnthropicHttpClient:
                 detail = ""
             return [], (f"HTTP {exc.code}: {detail[:300]}" if detail else f"HTTP {exc.code}")
         except urllib.error.URLError as exc:
-            return [], f"Connection error: {exc.reason}"
+            return [], BackendFeedback(QT_TRANSLATE_NOOP("BackendFeedback", "Connection error: {detail}"), detail=exc.reason)
         except Exception as exc:  # noqa: BLE001
             return [], f"{type(exc).__name__}: {exc}"
         items = data.get("data") if isinstance(data, dict) else data
@@ -258,7 +259,7 @@ class AnthropicHttpClient:
                     # First connect-error: single retry with backoff.
                     time.sleep(1)
                     continue
-                raise AnthropicHttpError(f"Connection error: {exc}") from exc
+                raise AnthropicHttpError(BackendFeedback(QT_TRANSLATE_NOOP("BackendFeedback", "Connection error: {detail}"), detail=exc)) from exc
 
             log_event(
                 "transport.headers",
@@ -313,7 +314,7 @@ class AnthropicHttpClient:
 
         if response is None:
             # All attempts exhausted on transient errors / connection errors.
-            raise AnthropicHttpError(f"HTTP retry failed: {last_exc}")
+            raise AnthropicHttpError(BackendFeedback(QT_TRANSLATE_NOOP("BackendFeedback", "HTTP retry failed: {detail}"), detail=last_exc))
 
         # Fix 1: re-bind the socket timeout after getresponse() so the
         # inactivity guard's ``readline()`` cannot block longer than
@@ -503,9 +504,15 @@ class AnthropicHttpClient:
             and not blocks
         ):
             raise AnthropicHttpError(
-                "The model stopped sending data mid-stream (no response for "
-                f"~{int(inactivity_timeout)}s). The endpoint may be slow or "
-                "overloaded — try again, or switch model in Settings."
+                BackendFeedback(
+                    QT_TRANSLATE_NOOP(
+                        "BackendFeedback",
+                        "The model stopped sending data mid-stream (no response for "
+                        "~{seconds}s). The endpoint may be slow or "
+                        "overloaded — try again, or switch model in Settings."
+                    ),
+                    seconds=int(inactivity_timeout),
+                )
             )
 
         if self._cancel_event.is_set():

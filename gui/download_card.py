@@ -6,6 +6,7 @@ Displays filename, file type, and a download button.
 
 import os
 
+from qgis.PyQt.QtCore import QCoreApplication, Qt
 from qgis.PyQt.QtGui import QFont
 from qgis.PyQt.QtWidgets import (
     QFrame,
@@ -15,6 +16,7 @@ from qgis.PyQt.QtWidgets import (
 )
 
 from .downloadable import HoverDownloadButton, save_file_copy
+from .formatting import localize_decimal
 from .theme import (
     fs,
     ui_font,
@@ -46,9 +48,9 @@ def _human_size(path):
         return ""
     for unit in ("B", "KB", "MB", "GB"):
         if size < 1024:
-            return f"{size:.1f} {unit}" if unit != "B" else f"{size} B"
+            return f"{localize_decimal(f'{size:.1f}')} {unit}" if unit != "B" else f"{size} B"
         size /= 1024
-    return f"{size:.1f} TB"
+    return f"{localize_decimal(f'{size:.1f}')} TB"
 
 
 class DownloadWidget(QFrame):
@@ -82,7 +84,9 @@ class DownloadWidget(QFrame):
         icon_label.setStyleSheet("font-size: 20px;")
         info_row.addWidget(icon_label)
 
-        name_label = QLabel(os.path.basename(file_path) or "Download")
+        name = os.path.basename(file_path) or QCoreApplication.translate("DownloadCard", "Download")
+        name_label = QLabel(name)
+        name_label.setTextFormat(Qt.TextFormat.PlainText)
         name_label.setFont(ui_font(13, QFont.Weight.DemiBold))
         name_label.setStyleSheet(
             f"color: {_TEXT}; font-size: {fs(13)}px; background: transparent;"
@@ -102,6 +106,7 @@ class DownloadWidget(QFrame):
         desc = data.get("description") or data.get("name") or ""
         if desc:
             desc_label = QLabel(desc)
+            desc_label.setTextFormat(Qt.TextFormat.PlainText)
             desc_label.setStyleSheet(
                 f"color: {_TEXT_2}; font-size: {fs(11)}px; background: transparent;"
             )
@@ -111,7 +116,7 @@ class DownloadWidget(QFrame):
         # Download button
         HoverDownloadButton(
             self, self._save,
-            tooltip="Download file",
+            tooltip=QCoreApplication.translate("DownloadCard", "Download file"),
         )
 
     def _save(self):
@@ -125,7 +130,7 @@ class DownloadWidget(QFrame):
             ".gpkg": "GeoPackage (*.gpkg)", ".csv": "CSV (*.csv)",
             ".json": "JSON (*.json)", ".gif": "GIF (*.gif)",
             ".png": "PNG (*.png)", ".jpg": "JPEG (*.jpg)",
-            ".txt": "Text (*.txt)", ".md": "Markdown (*.md)",
+            ".txt": QCoreApplication.translate("DownloadCard", "Text (*.txt)"), ".md": "Markdown (*.md)",
         }
-        filt = filter_map.get(ext, f"File (*{ext})")
+        filt = filter_map.get(ext, QCoreApplication.translate("DownloadCard", "File (*{ext})").format(ext=ext))
         save_file_copy(self, self._file_path, name, filt)

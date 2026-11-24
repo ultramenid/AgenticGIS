@@ -16,3 +16,5 @@ experimental=False
 deprecated=False
 hasProcessingProvider=no
 icon=resources/icon.png
+description[pt_BR]=Assistente de conversa com agente que opera o QGIS via PyQGIS. Conecte-se com uma chave de API, um endpoint compatível ou um agente local de linha de comando.
+about[pt_BR]=O AgenticGIS adiciona um painel de conversa ao QGIS. Escreva um pedido em linguagem natural e um agente de LLM o executa gerando e rodando código PyQGIS, com acesso ao QGIS, ao Processamento, às camadas do projeto e aos complementos instalados. Requisitos: QGIS 3.22 ou mais recente (incluindo o QGIS 4) e uma conexão a um LLM por chave de API do provedor, endpoint personalizado compatível ou agente local de linha de comando instalado. O complemento não inclui dependências de pacotes Python. Os recursos do Google Earth Engine são opcionais e exigem que o complemento Google Earth Engine para QGIS seja instalado e autenticado separadamente.

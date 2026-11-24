@@ -1,8 +1,15 @@
-"""Small display formatters shared by the dock (pure Python, no Qt)."""
+"""Small display formatters shared by the dock."""
 
 import json
 import re
 from datetime import datetime, timezone
+
+from qgis.PyQt.QtCore import QCoreApplication, QLocale, QT_TRANSLATE_NOOP
+
+
+def localize_decimal(value):
+    """Apply Qt's decimal mark to a formatted UI value without changing precision."""
+    return value.replace(".", QLocale().decimalPoint())
 
 
 def format_elapsed(seconds):
@@ -31,14 +38,14 @@ def format_relative_time(value, now=None):
     now = now or datetime.now(timezone.utc)
     delta = int((now - dt).total_seconds())
     if delta < 60:
-        return "just now"
+        return QCoreApplication.translate("Formatting", "just now")
     if delta < 3600:
-        return f"{delta // 60}m ago"
+        return QCoreApplication.translate("Formatting", "%nm ago", None, delta // 60)
     if delta < 86400:
-        return f"{delta // 3600}h ago"
+        return QCoreApplication.translate("Formatting", "%nh ago", None, delta // 3600)
     if delta < 7 * 86400:
-        return f"{delta // 86400}d ago"
-    return dt.strftime("%Y-%m-%d")
+        return QCoreApplication.translate("Formatting", "%nd ago", None, delta // 86400)
+    return dt.strftime(QCoreApplication.translate("Formatting", "%Y-%m-%d"))
 
 
 # ── Tool call rows ───────────────────────────────────────────────────────────
@@ -54,10 +61,57 @@ def _clip(text, limit):
     return text if len(text) <= limit else text[:limit - 1] + "…"
 
 
+_TOOL_LABELS = {
+    "run_pyqgis": QT_TRANSLATE_NOOP("ToolNames", "Run pyqgis"),
+    "get_project_state": QT_TRANSLATE_NOOP("ToolNames", "Get project state"),
+    "list_layers": QT_TRANSLATE_NOOP("ToolNames", "List layers"),
+    "get_layer_fields": QT_TRANSLATE_NOOP("ToolNames", "Get layer fields"),
+    "get_layer_summary": QT_TRANSLATE_NOOP("ToolNames", "Get layer summary"),
+    "analyze_layer": QT_TRANSLATE_NOOP("ToolNames", "Analyze layer"),
+    "list_plugins": QT_TRANSLATE_NOOP("ToolNames", "List plugins"),
+    "list_processing_algorithms": QT_TRANSLATE_NOOP("ToolNames", "List processing algorithms"),
+    "run_processing": QT_TRANSLATE_NOOP("ToolNames", "Run processing"),
+    "add_layer": QT_TRANSLATE_NOOP("ToolNames", "Add layer"),
+    "zoom_to_layer": QT_TRANSLATE_NOOP("ToolNames", "Zoom to layer"),
+    "gee_status": QT_TRANSLATE_NOOP("ToolNames", "Gee status"),
+    "gee_dataset_info": QT_TRANSLATE_NOOP("ToolNames", "Gee dataset info"),
+    "gee_add_layer": QT_TRANSLATE_NOOP("ToolNames", "Gee add layer"),
+    "gee_animation": QT_TRANSLATE_NOOP("ToolNames", "Gee animation"),
+    "remove_layer": QT_TRANSLATE_NOOP("ToolNames", "Remove layer"),
+    "clear_layers": QT_TRANSLATE_NOOP("ToolNames", "Clear layers"),
+    "save_project": QT_TRANSLATE_NOOP("ToolNames", "Save project"),
+    "create_chart": QT_TRANSLATE_NOOP("ToolNames", "Create chart"),
+    "get_layer_statistics": QT_TRANSLATE_NOOP("ToolNames", "Get layer statistics"),
+    "configure_network_cache": QT_TRANSLATE_NOOP("ToolNames", "Configure network cache"),
+    "warm_cache": QT_TRANSLATE_NOOP("ToolNames", "Warm cache"),
+    "web_fetch": QT_TRANSLATE_NOOP("ToolNames", "Web fetch"),
+    "ask_user": QT_TRANSLATE_NOOP("ToolNames", "Ask user"),
+    "set_layer_style": QT_TRANSLATE_NOOP("ToolNames", "Set layer style"),
+    "select_by_attribute": QT_TRANSLATE_NOOP("ToolNames", "Select by attribute"),
+    "select_by_expression": QT_TRANSLATE_NOOP("ToolNames", "Select by expression"),
+    "select_within": QT_TRANSLATE_NOOP("ToolNames", "Select within"),
+    "clear_selection": QT_TRANSLATE_NOOP("ToolNames", "Clear selection"),
+    "invert_selection": QT_TRANSLATE_NOOP("ToolNames", "Invert selection"),
+    "reproject_layer": QT_TRANSLATE_NOOP("ToolNames", "Reproject layer"),
+    "set_project_crs": QT_TRANSLATE_NOOP("ToolNames", "Set project crs"),
+    "analyze_raster": QT_TRANSLATE_NOOP("ToolNames", "Analyze raster"),
+    "get_algorithm_parameters": QT_TRANSLATE_NOOP("ToolNames", "Get algorithm parameters"),
+    "field_calculator": QT_TRANSLATE_NOOP("ToolNames", "Field calculator"),
+    "save_project_as": QT_TRANSLATE_NOOP("ToolNames", "Save project as"),
+    "create_layout": QT_TRANSLATE_NOOP("ToolNames", "Create layout"),
+    "export_layout": QT_TRANSLATE_NOOP("ToolNames", "Export layout"),
+}
+
+
 def humanize_tool_name(name):
     """``"list_layers"`` → ``"List layers"``; MCP prefixes are dropped."""
-    name = str(name or "tool").rsplit("__", 1)[-1].replace("_", " ").strip()
-    return name[:1].upper() + name[1:] if name else "Tool"
+    raw_name = str(name or "")
+    if raw_name.startswith("mcp__agenticgis__"):
+        raw_name = raw_name.split("__", 2)[-1]
+    if raw_name in _TOOL_LABELS:
+        return QCoreApplication.translate("ToolNames", _TOOL_LABELS[raw_name])
+    label = raw_name.rsplit("__", 1)[-1].replace("_", " ").strip()
+    return label[:1].upper() + label[1:] if label else QCoreApplication.translate("ToolNames", "Tool")
 
 
 def summarize_tool_args(tool_input, limit=60):
@@ -79,8 +133,9 @@ def summarize_tool_args(tool_input, limit=60):
 def summarize_tool_result(result, is_error=False, limit=80):
     """One readable line for a tool result: an error, a message, or a count."""
     text = str(result or "").strip()
+    failed = QCoreApplication.translate("Formatting", "Failed")
     if not text:
-        return "Failed" if is_error else ""
+        return failed if is_error else ""
     try:
         data = json.loads(text)
     except ValueError:
@@ -91,19 +146,26 @@ def summarize_tool_result(result, is_error=False, limit=80):
         if parts and all(isinstance(p, str) for p in parts):
             return summarize_tool_result("\n".join(parts), is_error or bool(data.get("isError")), limit)
     if isinstance(data, list):
-        return f"{len(data)} item{'' if len(data) == 1 else 's'}"
+        count = len(data)
+        if count == 1:
+            return QCoreApplication.translate("Formatting", "1 item")
+        return QCoreApplication.translate("Formatting", "%n items", None, count)
     if not isinstance(data, dict):
         return _clip(data, limit)
     if is_error or data.get("ok") is False:
-        return _clip(data.get("error") or data.get("message") or "Failed", limit)
+        return _clip(data.get("error") or data.get("message") or failed, limit)
     for key in ("message", "summary", "status", "result", "output"):
         if isinstance(data.get(key), str) and data[key].strip():
             return _clip(data[key], limit)
     for key, value in data.items():
         if isinstance(value, list):
             label = key.replace("_", " ")
-            return f"No {label}" if not value else f"{len(value)} {label}"
-    return "Done"
+            if not value:
+                return QCoreApplication.translate("Formatting", "No {label}").format(label=label)
+            return QCoreApplication.translate("Formatting", "{count} {label}").format(
+                count=len(value), label=label
+            )
+    return QCoreApplication.translate("Formatting", "Done")
 
 
 # ── Markdown tables ────────────────────────────────────────────────────────

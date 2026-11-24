@@ -9,14 +9,16 @@ import html as _html
 import json
 import re
 
-from qgis.PyQt.QtCore import Qt, QElapsedTimer, QSize, QTimer
+from qgis.PyQt.QtCore import QCoreApplication, Qt, QElapsedTimer, QSize, QTimer
 from qgis.PyQt.QtGui import QFont, QKeySequence
 from qgis.PyQt.QtWidgets import (
     QAbstractItemView, QFrame, QHBoxLayout, QLabel, QMenu, QPushButton,
     QSizePolicy, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
 )
 
-from .formatting import humanize_tool_name, summarize_tool_args, summarize_tool_result, split_md_tables
+from .formatting import (
+    humanize_tool_name, localize_decimal, summarize_tool_args, summarize_tool_result, split_md_tables,
+)
 from .downloadable import HoverDownloadButton, save_text, _safe_name
 from .message_bubble import (
     _copy_to_clipboard,
@@ -142,8 +144,8 @@ class MarkdownTable(QTableWidget):
     def _show_menu(self, pos):
         menu = QMenu(self)
         if self.selectedItems():
-            menu.addAction("Copy selection", lambda: _copy_to_clipboard(self._as_tsv(selected_only=True)))
-        menu.addAction("Copy table", lambda: _copy_to_clipboard(self._as_tsv()))
+            menu.addAction(QCoreApplication.translate("AgentTurnBubble", "Copy selection"), lambda: _copy_to_clipboard(self._as_tsv(selected_only=True)))
+        menu.addAction(QCoreApplication.translate("AgentTurnBubble", "Copy table"), lambda: _copy_to_clipboard(self._as_tsv()))
         menu.exec(self.viewport().mapToGlobal(pos))
 
 
@@ -291,7 +293,7 @@ class ToolCallRow(QFrame):
         self._outer.addLayout(top)
 
         # Result summary line — indented under the name, filled on completion.
-        self._summary_lbl = QLabel("Running…")
+        self._summary_lbl = QLabel(QCoreApplication.translate("AgentTurnBubble", "Running…"))
         self._summary_lbl.setTextFormat(Qt.TextFormat.PlainText)
         self._summary_lbl.setFont(ui_font(11.5))
         self._summary_lbl.setStyleSheet(
@@ -313,9 +315,9 @@ class ToolCallRow(QFrame):
             return
         self._result = result_str
         if is_cancelled:
-            summary = "Cancelled"
+            summary = QCoreApplication.translate("AgentTurnBubble", "Cancelled")
         else:
-            summary = summarize_tool_result(result_str, is_error) or "Done"
+            summary = summarize_tool_result(result_str, is_error) or QCoreApplication.translate("AgentTurnBubble", "Done")
         self.mark_done("error" if is_error else "cancelled" if is_cancelled else "ok", summary)
 
     def mark_done(self, state: str = "ok", summary: str = "") -> None:
@@ -333,7 +335,7 @@ class ToolCallRow(QFrame):
             self._icon_lbl.setText(glyph)
             self._icon_lbl.setStyleSheet(f"color:{color}; background:transparent;")
             secs = self._elapsed.elapsed() / 1000.0
-            self._time_lbl.setText(f"{secs:.1f}s" if secs >= 0.1 else "")
+            self._time_lbl.setText(f"{localize_decimal(f'{secs:.1f}')}s" if secs >= 0.1 else "")
             self._summary_lbl.setText(summary)
             self._summary_lbl.setStyleSheet(
                 f"color:{_DANGER if state == 'error' else _TEXT_3}; background:transparent;"
@@ -355,7 +357,8 @@ class ToolCallRow(QFrame):
         self._pulse = (self._pulse + 1) % len(_SPINNER_FRAMES)
         try:
             self._icon_lbl.setText(_SPINNER_FRAMES[self._pulse])
-            self._time_lbl.setText(f"{self._elapsed.elapsed() / 1000.0:.1f}s")
+            seconds = self._elapsed.elapsed() / 1000.0
+            self._time_lbl.setText(f"{localize_decimal(f'{seconds:.1f}')}s")
         except RuntimeError:
             self._timer.stop()
 
@@ -415,7 +418,7 @@ class ToolCallRow(QFrame):
             head_row.addWidget(head)
             head_row.addStretch()
             if body_text:
-                btn = QPushButton("Copy")
+                btn = QPushButton(QCoreApplication.translate("AgentTurnBubble", "Copy"))
                 btn.setCursor(Qt.CursorShape.PointingHandCursor)
                 btn.setFlat(True)
                 btn.setStyleSheet(
@@ -426,7 +429,7 @@ class ToolCallRow(QFrame):
                 btn.clicked.connect(lambda _checked=False, t=body_text: _copy_to_clipboard(t))
                 head_row.addWidget(btn)
             col.addLayout(head_row)
-            body = QLabel(self._pretty(body_text) if body_text else "(none)")
+            body = QLabel(self._pretty(body_text) if body_text else QCoreApplication.translate("AgentTurnBubble", "(none)"))
             body.setFont(mono_font(11))
             body.setWordWrap(True)
             body.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
@@ -434,9 +437,9 @@ class ToolCallRow(QFrame):
             body.setStyleSheet(f"color:{_TEXT_2}; background:transparent; font-size:{fs(11)}px; border:none;")
             col.addWidget(body)
 
-        _section("Input", self._input_json if self._input else "")
+        _section(QCoreApplication.translate("AgentTurnBubble", "Input"), self._input_json if self._input else "")
         if self._done:
-            _section("Result", self._result)
+            _section(QCoreApplication.translate("AgentTurnBubble", "Result"), self._result)
         self._details = panel
         self._outer.addSpacing(4)
         self._outer.addWidget(panel)
@@ -544,7 +547,7 @@ class AgentTurnBubble(QFrame):
         self._progress_timer.timeout.connect(self._render_progress_text)
 
         # Hover-to-download: save the agent's answer text as Markdown.
-        HoverDownloadButton(self, self._save_text, tooltip="Save response (.md)")
+        HoverDownloadButton(self, self._save_text, tooltip=QCoreApplication.translate("AgentTurnBubble", "Save response (.md)"))
 
     # ── Core public API ───────────────────────────────────────────────────
 
@@ -829,7 +832,7 @@ class AgentTurnBubble(QFrame):
             self._set_text(self._stream_html)
         self._refresh_text_geometry()
         for row in self._tool_rows:
-            row.mark_done("unknown", "No result reported")
+            row.mark_done("unknown", QCoreApplication.translate("AgentTurnBubble", "No result reported"))
 
     def mark_stopped(self) -> None:
         """Mark this turn as stopped by the user, keeping any partial output.
@@ -852,12 +855,8 @@ class AgentTurnBubble(QFrame):
             self._set_final(self._stream_text)
         self._refresh_text_geometry()
         for row in self._tool_rows:
-            row.mark_done("cancelled", "Stopped")
-        # Append a visible "Stopped" note if not already present.
-        if self._user_decision_lbl is None or "Stopped" not in (
-            self._user_decision_lbl.text() if self._user_decision_lbl else ""
-        ):
-            self.set_user_decision("— Stopped —")
+            row.mark_done("cancelled", QCoreApplication.translate("AgentTurnBubble", "Stopped"))
+        self._show_user_decision(QCoreApplication.translate("AgentTurnBubble", "— Stopped —"))
 
     # ── Backward-compat shims for chat_dock.py ────────────────────────────
 
@@ -955,10 +954,10 @@ class AgentTurnBubble(QFrame):
         # One inline line (no markdown → no <p>), so the spinner sits beside the label.
         label = _html.escape(f"{self._progress_text}{tail}{self._progress_elapsed_suffix()}")
         label = re.sub(r"`([^`]+)`", rf'<span style="font-family:{MONO_STACK};">\1</span>', label)
-        hint = (
-            f'<span style="color:{_WARN};"> — taking longer than usual, press Esc to stop</span>'
-            if stalled else ""
-        )
+        hint = ""
+        if stalled:
+            warning = QCoreApplication.translate("AgentTurnBubble", " — taking longer than usual, press Esc to stop")
+            hint = f'<span style="color:{_WARN};">{_html.escape(warning)}</span>'
         body = (
             f'<span style="color:{spinner_color};">{frame}</span>&nbsp;&nbsp;'
             f'<span style="color:{_TEXT_2};">{label}</span>{hint}'
@@ -968,10 +967,15 @@ class AgentTurnBubble(QFrame):
         self._set_text(body, bubble=False)
         self._refresh_text_geometry()
 
-    def set_user_decision(self, text: str) -> None:
-        clean = (text or "").strip()
-        if not clean:
-            return
+    def set_user_decision(self, text: str = "", *, cancelled: bool = False) -> None:
+        if cancelled:
+            self._show_user_decision(QCoreApplication.translate("AgentTurnBubble", "— Cancelled —"))
+        elif text and text.strip():
+            self._show_user_decision(
+                QCoreApplication.translate("AgentTurnBubble", "User chose: {choice}").format(choice=text.strip())
+            )
+
+    def _show_user_decision(self, text: str) -> None:
         if self._user_decision_lbl is None:
             self._user_decision_lbl = QLabel("")
             self._user_decision_lbl.setWordWrap(True)
@@ -984,12 +988,7 @@ class AgentTurnBubble(QFrame):
                 f" font-size:{fs(12)}px;"
             )
             self._outer.addWidget(self._user_decision_lbl)
-        if clean.startswith("—") and clean.endswith("—"):
-            self._user_decision_lbl.setText(clean)
-        elif clean.lower() == "cancelled":
-            self._user_decision_lbl.setText("— Cancelled —")
-        else:
-            self._user_decision_lbl.setText(f"User chose: {clean}")
+        self._user_decision_lbl.setText(text)
         self.updateGeometry()
 
     def set_footer(self, model: str = "", elapsed: str = "") -> None:
@@ -1000,9 +999,9 @@ class AgentTurnBubble(QFrame):
             row = QHBoxLayout(self._footer)
             row.setContentsMargins(2, 8, 2, 0)
             row.setSpacing(8)
-            copy_btn = QPushButton("⧉ Copy")
+            copy_btn = QPushButton(QCoreApplication.translate("AgentTurnBubble", "⧉ Copy"))
             copy_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-            copy_btn.setToolTip("Copy response as Markdown")
+            copy_btn.setToolTip(QCoreApplication.translate("AgentTurnBubble", "Copy response as Markdown"))
             copy_btn.setStyleSheet(
                 f"QPushButton {{ color:{_TEXT_3}; background:transparent; border:none;"
                 f" padding:0; font-size:{fs(11)}px; }}"

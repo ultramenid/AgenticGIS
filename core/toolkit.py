@@ -48,6 +48,7 @@ try:
 except ImportError:
     QgsProcessingParameterDefinition = None
 
+from ..backends.feedback import BackendFeedback, QT_TRANSLATE_NOOP
 from .cancellation import CancellationRegistry as _CancellationRegistry
 from .cancellation import cancel_requested as _cancel_requested
 from .analysis_cache import AnalysisCache, layer_cache_token
@@ -413,7 +414,7 @@ def _chart_from_data(data, chart_type, colors, title):
     result = {
         "ok": True,
         "chart_type": chart_type,
-        "title": str(title) if title else "Chart",
+        "title": str(title) if title else BackendFeedback(QT_TRANSLATE_NOOP("ChartWidget", "Chart")),
         "data": rows[:limit],
         "truncated": len(rows) > limit,
     }
@@ -496,10 +497,23 @@ def _finalize_chart_data(groups, display_labels, aggregate):
     ]
 
 
+_CHART_AGGREGATE_LABELS = {
+    "sum": QT_TRANSLATE_NOOP("ChartWidget", "sum"),
+    "mean": QT_TRANSLATE_NOOP("ChartWidget", "mean"),
+    "max": QT_TRANSLATE_NOOP("ChartWidget", "max"),
+    "min": QT_TRANSLATE_NOOP("ChartWidget", "min"),
+}
+
+
 def _chart_title(field_name, layer_name, value_field, aggregate):
     if value_field and aggregate != "count":
-        return f"{aggregate} of {value_field} by {field_name} in {layer_name}"
-    return f"{field_name} in {layer_name}"
+        return BackendFeedback(
+            QT_TRANSLATE_NOOP("ChartWidget", "{aggregate} of {value} by {field} in {layer}"),
+            aggregate=BackendFeedback(_CHART_AGGREGATE_LABELS[aggregate]),
+            value=value_field, field=field_name, layer=layer_name,
+        )
+    return BackendFeedback(QT_TRANSLATE_NOOP("ChartWidget", "{field} in {layer}"),
+                           field=field_name, layer=layer_name)
 
 
 def _clean_chart_colors(colors):
@@ -797,6 +811,7 @@ class QgisToolkit:
         # Session-level approval for tool categories (e.g., "gee").
         # Reset when the user starts a new chat session.
         self._session_approved_tool_categories = set()
+        self._session_approval_generation = 0
         # hook QGIS's plugins-changed signal so the algorithm list
         # reflects newly-enabled providers (GRASS, SAGA, custom plugins)
         # without a plugin restart.
@@ -884,7 +899,7 @@ class QgisToolkit:
     def set_ask_user_emitter(self, emitter):
         """Register a callback that asks the user a clarifying question.
 
-        The emitter signature is ``emitter(question, options, allow_free_text)``.
+        The emitter signature is ``emitter(question, options, allow_free_text, request)``.
         It is expected to be non-blocking; it fires ``self._resolve_ask_user(payload)``
         from the main thread when the user replies (or the dock is cleared).
         """
@@ -902,11 +917,17 @@ class QgisToolkit:
           The backends do not set ``is_error`` on these — schema validation
           is a separate concern from operation outcome.
         """
+        return self._ask_user(question, options, allow_free_text)
+
+    def _ask_user(self, question, options, allow_free_text, *, display_question=None):
+        """Show a prompt. Only first-party callers supply prepared options."""
         if not isinstance(question, str) or not question.strip():
             log_event("ask_user.validation_error", reason="empty_question")
             return "ask_user: question must be a non-empty string"
 
-        options = self._normalize_ask_user_options(options)
+        if display_question is None:
+            options = self._normalize_ask_user_options(options)
+            display_question = question
         if len(options) < 2:
             log_event(
                 "ask_user.validation_error",
@@ -930,7 +951,7 @@ class QgisToolkit:
 
         try:
             if self._ask_emitter is not None:
-                self._ask_emitter(question, list(options), bool(allow_free_text))
+                self._ask_emitter(display_question, list(options), bool(allow_free_text), wait)
 
             # Wait for the dock (or a test) to fire _resolve_ask_user.
             # Bound the wait so a forgotten card doesn't wedge the worker
@@ -999,19 +1020,30 @@ class QgisToolkit:
             normalized.append({
                 "label": "Cancel",
                 "description": "Stop this question and do not continue with that operation.",
+                "display_label": QCoreApplication.translate("AskUserCard", "Cancel"),
+                "display_description": QCoreApplication.translate(
+                    "AskUserCard", "Stop this question and do not continue with that operation."
+                ),
             })
         return normalized[:4]
 
-    def _resolve_ask_user(self, payload):
-        """Called by the dock (or a test) to unblock ask_user.
-
-        ``payload`` is a dict with keys ``choice``, ``free_text``, ``cancelled``.
-        Missing keys default to None / False.
-        """
+    def is_pending_ask_user(self, request):
         with self._ask_user_lock:
-            if self._ask_user_pending is None:
-                return  # nothing to resolve (stale fire, e.g. after Clear)
-            wait_evt, slot = self._ask_user_pending
+            pending = self._ask_user_pending
+            return pending is not None and pending[0] is request and not request.is_set()
+
+    def cancel_pending_ask_user(self):
+        self._resolve_ask_user({"cancelled": True})
+
+    def _resolve_ask_user(self, payload, *, request=None):
+        """Resolve the matching toolkit prompt, or cancel the current slot."""
+        with self._ask_user_lock:
+            pending = self._ask_user_pending
+            if pending is None:
+                return
+            wait_evt, slot = pending
+            if wait_evt.is_set() or (request is not None and request is not wait_evt):
+                return
             slot["choice"] = payload.get("choice")
             slot["free_text"] = payload.get("free_text")
             slot["cancelled"] = bool(payload.get("cancelled", False))
@@ -1091,16 +1123,22 @@ class QgisToolkit:
             return "gee"
         return None
 
-    def _external_access_reason(self, tool_name, args):
+    def _external_access_reasons(self, tool_name, args):
+        """Return the diagnostic and presentation text for the same operation."""
         args = dict(args or {})
         if tool_name == "add_layer" and self._looks_external_reference(args.get("uri")):
-            return f"load external layer source: {args.get('uri')}"
+            uri = args["uri"]
+            return f"load external layer source: {uri}", QCoreApplication.translate(
+                "ExternalAccess", "load external layer source: {uri}"
+            ).format(uri=uri)
 
         if tool_name == "run_processing":
             params = args.get("params") or {}
             for text in self._iter_strings(params):
                 if self._looks_external_reference(text):
-                    return f"use external processing path or URI: {text}"
+                    return f"use external processing path or URI: {text}", QCoreApplication.translate(
+                        "ExternalAccess", "use external processing path or URI: {path}"
+                    ).format(path=text)
 
         if tool_name == "run_pyqgis":
             code = args.get("code") or ""
@@ -1111,29 +1149,51 @@ class QgisToolkit:
             for match in self._STRING_LITERAL_RE.finditer(code):
                 value = match.group("value")
                 if self._looks_external_reference(value):
-                    return f"run PyQGIS code that references external path or URI: {value}"
+                    return f"run PyQGIS code that references external path or URI: {value}", QCoreApplication.translate(
+                        "ExternalAccess", "run PyQGIS code that references external path or URI: {path}"
+                    ).format(path=value)
             for marker in self._EXTERNAL_CODE_MARKERS:
                 if marker in code:
-                    return f"run PyQGIS code that may access files, URLs, or sources outside loaded layers ({marker})"
+                    return (
+                        f"run PyQGIS code that may access files, URLs, or sources outside loaded layers ({marker})",
+                        QCoreApplication.translate("ExternalAccess",
+                            "run PyQGIS code that may access files, URLs, or sources outside loaded layers ({marker})"
+                        ).format(marker=marker),
+                    )
 
         if tool_name == "web_fetch":
             url = args.get("url") or ""
             if isinstance(url, str) and url.lower().startswith(("http://", "https://")):
-                return f"fetch external URL: {url}"
+                return f"fetch external URL: {url}", QCoreApplication.translate(
+                    "ExternalAccess", "fetch external URL: {url}"
+                ).format(url=url)
 
         if tool_name == "gee_dataset_info":
             ds = args.get("dataset_id") or ""
             if isinstance(ds, str) and ds.strip():
+                dataset = ds.strip()
                 return (
-                    "fetch Earth Engine dataset metadata from the public STAC "
-                    f"catalog for '{ds.strip()}'"
+                    f"fetch Earth Engine dataset metadata from the public STAC catalog for '{dataset}'",
+                    QCoreApplication.translate(
+                        "ExternalAccess", "fetch Earth Engine dataset metadata from the public STAC catalog for '{dataset}'"
+                    ).format(dataset=dataset),
                 )
 
         if tool_name == "gee_add_layer":
-            return "run an Earth Engine expression and add the result to the canvas"
+            return (
+                "run an Earth Engine expression and add the result to the canvas",
+                QCoreApplication.translate(
+                    "ExternalAccess", "run an Earth Engine expression and add the result to the canvas"
+                ),
+            )
 
         if tool_name == "gee_animation":
-            return "run an Earth Engine expression and build an animated GIF timelapse"
+            return (
+                "run an Earth Engine expression and build an animated GIF timelapse",
+                QCoreApplication.translate(
+                    "ExternalAccess", "run an Earth Engine expression and build an animated GIF timelapse"
+                ),
+            )
 
         return None
 
@@ -1144,56 +1204,78 @@ class QgisToolkit:
         through one controlled permission popup. Returning ``None`` means
         allowed; returning a dict blocks the original tool call.
         """
-        reason = self._external_access_reason(tool_name, args)
-        if not reason:
+        reasons = self._external_access_reasons(tool_name, args)
+        if reasons is None:
             return None
+        reason, display_reason = reasons
         if self.config and self.config.get("external_access_always_allowed", False):
             log_event("external_access.allowed", tool=tool_name, reason=reason, permanent=True)
             return None
 
         category = self._tool_category(tool_name)
-        if category and category in self._session_approved_tool_categories:
+        with self._ask_user_lock:
+            approval_generation = self._session_approval_generation
+            approved = category in self._session_approved_tool_categories
+        if approved:
             log_event("external_access.allowed", tool=tool_name, reason=reason, session_category=category)
             return None
 
         options = [
             {
                 "label": "Allow once",
-                "description": "Permit this operation, then ask again next time.",
+                "display_label": QCoreApplication.translate("ExternalAccess", "Allow once"),
+                "description": QCoreApplication.translate(
+                    "ExternalAccess", "Permit this operation, then ask again next time."
+                ),
             },
             {
                 "label": "Always allow",
-                "description": "Permit external access now and remember this choice.",
+                "display_label": QCoreApplication.translate("ExternalAccess", "Always allow"),
+                "description": QCoreApplication.translate(
+                    "ExternalAccess", "Permit external access now and remember this choice."
+                ),
             },
             {
                 "label": "Deny",
-                "description": "Block this operation and keep analysis inside loaded layers.",
+                "display_label": QCoreApplication.translate("ExternalAccess", "Deny"),
+                "description": QCoreApplication.translate(
+                    "ExternalAccess", "Block this operation and keep analysis inside loaded layers."
+                ),
             },
         ]
         if category == "gee":
             # Insert session-level approval for GEE tools before "Always allow"
             options.insert(1, {
                 "label": "Allow all GEE tools for this session",
-                "description": "Permit all Earth Engine operations during this chat session.",
+                "display_label": QCoreApplication.translate("ExternalAccess", "Allow all GEE tools for this session"),
+                "description": QCoreApplication.translate(
+                    "ExternalAccess", "Permit all Earth Engine operations during this chat session."
+                ),
             })
 
-        answer = self.ask_user(
+        answer = self._ask_user(
             f"Allow AgenticGIS to {reason}?",
             options,
             allow_free_text=False,
+            display_question=QCoreApplication.translate(
+                "ExternalAccess", "Allow AgenticGIS to {reason}?"
+            ).format(reason=display_reason),
         )
         if isinstance(answer, str):
             log_event("external_access.permission_error", tool=tool_name, error=answer)
             return {"ok": False, "error": answer, "cancelled": True}
-        choice = (answer or {}).get("choice")
+        choice = None if answer.get("cancelled") else answer.get("choice")
         if choice == "Allow once":
             log_event("external_access.allowed", tool=tool_name, reason=reason)
             return None
-        if choice == "Allow all GEE tools for this session":
-            if category:
-                self._session_approved_tool_categories.add(category)
-            log_event("external_access.allowed", tool=tool_name, reason=reason, session_category=category)
-            return None
+        if choice == "Allow all GEE tools for this session" and category == "gee":
+            with self._ask_user_lock:
+                granted = approval_generation == self._session_approval_generation
+                if granted:
+                    self._session_approved_tool_categories.add(category)
+            if granted:
+                log_event("external_access.allowed", tool=tool_name, reason=reason, session_category=category)
+                return None
         if choice == "Always allow":
             if self.config:
                 self.config.set("external_access_always_allowed", True)
@@ -1208,7 +1290,9 @@ class QgisToolkit:
 
     def clear_session_approvals(self):
         """Reset session-level tool-category approvals (e.g., when starting a new chat session)."""
-        self._session_approved_tool_categories.clear()
+        with self._ask_user_lock:
+            self._session_approval_generation += 1
+            self._session_approved_tool_categories.clear()
 
     def reset_agent_state(self):
         """Reset the agent's workspace-state registry for a new chat session.

@@ -13,7 +13,7 @@ import json as _json
 import os
 import shutil
 
-from qgis.PyQt.QtCore import QEvent, Qt
+from qgis.PyQt.QtCore import QCoreApplication, QEvent, Qt
 from qgis.PyQt.QtGui import QCursor
 from qgis.PyQt.QtWidgets import QFileDialog, QMessageBox, QToolButton
 
@@ -43,11 +43,14 @@ class HoverDownloadButton(QToolButton):
     it never affects the host's geometry.
     """
 
-    def __init__(self, host, on_click, tooltip="Download"):
+    def __init__(self, host, on_click, tooltip=None):
         super().__init__(host)
         self._host = host
         self.setText("⤓")  # ⤓ downwards arrow to bar
-        self.setToolTip(tooltip)
+        self.setToolTip(
+            QCoreApplication.translate("Downloadable", "Download")
+            if tooltip is None else tooltip
+        )
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setStyleSheet(_BTN_STYLE)
         self.setFixedSize(22, 22)
@@ -83,7 +86,7 @@ class HoverDownloadButton(QToolButton):
 # --------------------------------------------------------------------------- #
 
 def _ask_path(parent, default_name, file_filter):
-    path, _ = QFileDialog.getSaveFileName(parent, "Save", default_name, file_filter)
+    path, _ = QFileDialog.getSaveFileName(parent, QCoreApplication.translate("Downloadable", "Save"), default_name, file_filter)
     return path
 
 
@@ -118,19 +121,19 @@ def _looks_like_json(text):
 
 def save_text(parent, text, default_name="response.md"):
     """Save markdown/plain text to a .md (or .txt) file."""
-    path = _ask_path(parent, default_name, "Markdown (*.md);;Text (*.txt)")
+    path = _ask_path(parent, default_name, QCoreApplication.translate("Downloadable", "Markdown (*.md);;Text (*.txt)"))
     if not path:
         return
     try:
         with open(path, "w", encoding="utf-8") as fh:
             fh.write(text or "")
     except OSError as exc:
-        QMessageBox.warning(parent, "Save failed", str(exc))
+        QMessageBox.warning(parent, QCoreApplication.translate("Downloadable", "Save failed"), str(exc))
 
 
 def save_widget_png(parent, widget, default_name="chart.png"):
     """Snapshot a widget to a PNG image."""
-    path = _ask_path(parent, default_name, "PNG image (*.png)")
+    path = _ask_path(parent, default_name, QCoreApplication.translate("Downloadable", "PNG image (*.png)"))
     if not path:
         return
     if not path.lower().endswith(".png"):
@@ -145,12 +148,12 @@ def save_widget_png(parent, widget, default_name="chart.png"):
         for btn in overlays:
             btn.show()
     if not pixmap.save(path, "PNG"):
-        QMessageBox.warning(parent, "Save failed", "Could not write PNG image.")
+        QMessageBox.warning(parent, QCoreApplication.translate("Downloadable", "Save failed"), QCoreApplication.translate("Downloadable", "Could not write PNG image."))
 
 
 def save_csv(parent, rows, default_name="data.csv"):
     """Save an iterable of row-iterables as CSV."""
-    path = _ask_path(parent, default_name, "CSV (*.csv)")
+    path = _ask_path(parent, default_name, QCoreApplication.translate("Downloadable", "CSV (*.csv)"))
     if not path:
         return
     try:
@@ -159,14 +162,14 @@ def save_csv(parent, rows, default_name="data.csv"):
             for row in rows:
                 writer.writerow(row)
     except OSError as exc:
-        QMessageBox.warning(parent, "Save failed", str(exc))
+        QMessageBox.warning(parent, QCoreApplication.translate("Downloadable", "Save failed"), str(exc))
 
 
 def save_file_copy(parent, src_path, default_name, file_filter):
     """Copy an existing file (e.g. a temp GIF) to a user-chosen location."""
     if not src_path or not os.path.exists(src_path):
         QMessageBox.warning(
-            parent, "Save failed", "The source file is no longer available."
+            parent, QCoreApplication.translate("Downloadable", "Save failed"), QCoreApplication.translate("Downloadable", "The source file is no longer available.")
         )
         return
     path = _ask_path(parent, default_name, file_filter)
@@ -175,4 +178,4 @@ def save_file_copy(parent, src_path, default_name, file_filter):
     try:
         shutil.copyfile(src_path, path)
     except OSError as exc:
-        QMessageBox.warning(parent, "Save failed", str(exc))
+        QMessageBox.warning(parent, QCoreApplication.translate("Downloadable", "Save failed"), str(exc))

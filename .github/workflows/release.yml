@@ -1,0 +1,216 @@
+name: Release QGIS Plugin
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  preflight:
+    name: Release Preflight
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    outputs:
+      version: ${{ steps.meta.outputs.version }}
+      prerelease: ${{ steps.meta.outputs.prerelease }}
+      tag: ${{ steps.meta.outputs.tag }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.12"
+
+      - name: Validate release tag, metadata, branch ancestry, and uniqueness
+        id: meta
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ] && [ "${GITHUB_REF_TYPE}" != "tag" ]; then
+            echo "Dry-run release verification from branch $GITHUB_REF ($GITHUB_SHA); no release will be published."
+            python3 -c '
+          from pathlib import Path
+          from ci.check_plugin import _validate_metadata
+          errs, warns = _validate_metadata(Path("metadata.txt").read_bytes(), None)
+          assert not errs, errs
+          print("Dry-run metadata check passed; warnings:", warns)
+          '
+            exit 0
+          fi
+
+          if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
+            echo "Dry-run release verification for tag $GITHUB_REF_NAME ($GITHUB_SHA); publishing remains disabled."
+          fi
+
+          TAG="${GITHUB_REF_NAME}"
+          python3 ci/check_plugin.py release-meta metadata.txt --tag "$TAG" --github-output "$GITHUB_OUTPUT"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+          COMPARE_STATUS=$(gh api "repos/${GITHUB_REPOSITORY}/compare/main...${GITHUB_SHA}" --jq '.status')
+          if [ "$COMPARE_STATUS" != "identical" ] && [ "$COMPARE_STATUS" != "behind" ]; then
+            echo "::error::Tagged commit $GITHUB_SHA is not reachable from main (compare status: $COMPARE_STATUS)"
+            exit 1
+          fi
+
+          TAG_OBJ_TYPE=$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${TAG}" --jq '.object.type')
+          TAG_SHA=$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${TAG}" --jq '.object.sha')
+          if [ "$TAG_OBJ_TYPE" = "tag" ]; then
+            TAG_SHA=$(gh api "repos/${GITHUB_REPOSITORY}/git/tags/${TAG_SHA}" --jq '.object.sha')
+          fi
+          if [ "$TAG_SHA" != "$GITHUB_SHA" ]; then
+            echo "::error::Remote tag $TAG points to $TAG_SHA instead of tested commit $GITHUB_SHA"
+            exit 1
+          fi
+
+          RELEASE_STATE=$(gh release view "$TAG" --json isDraft --jq 'if .isDraft then "draft" else "published" end' 2>/dev/null || echo "missing")
+          if [ "$RELEASE_STATE" = "published" ]; then
+            echo "::error::Published GitHub Release for $TAG already exists"
+            exit 1
+          elif [ "$RELEASE_STATE" = "draft" ]; then
+            echo "Found existing unpublished draft release for $TAG; retry will refresh assets and publish it."
+          fi
+
+  ci:
+    name: Verify Release Package
+    needs: preflight
+    uses: ./.github/workflows/qgis-ci.yml # zizmor: ignore[self-repository] - actionlint 1.7.12 requires ./ syntax
+    permissions:
+      contents: read
+
+  publish:
+    name: Publish GitHub Release
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    needs: [preflight, ci]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: release
+    concurrency:
+      group: release-publish-${{ github.ref_name }}
+      cancel-in-progress: false
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - name: Checkout repository tools
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.12"
+
+      - name: Download verified plugin artifact
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: AgenticGIS-package
+          path: ${{ runner.temp }}/pkg
+
+      - name: Verify tested ZIP matches manifest and commit SHA
+        env:
+          EXPECTED_SHA256: ${{ needs.ci.outputs.zip_sha256 }}
+          VERSION: ${{ needs.preflight.outputs.version }}
+        run: |
+          if [ -z "$EXPECTED_SHA256" ] || [[ ! "$EXPECTED_SHA256" =~ ^[0-9a-f]{64}$ ]]; then
+            echo "::error::Missing or malformed ci.outputs.zip_sha256 digest"
+            exit 1
+          fi
+          python3 ci/check_plugin.py verify-manifest \
+            "$RUNNER_TEMP/pkg/AgenticGIS.zip" \
+            "$RUNNER_TEMP/pkg/package-manifest.json" \
+            --expected-commit "$GITHUB_SHA" \
+            --expected-sha256 "$EXPECTED_SHA256"
+          mv "$RUNNER_TEMP/pkg/AgenticGIS.zip" "$RUNNER_TEMP/pkg/AgenticGIS-${VERSION}.zip"
+          (cd "$RUNNER_TEMP/pkg" && sha256sum "AgenticGIS-${VERSION}.zip") > "$RUNNER_TEMP/pkg/SHA256SUMS.txt"
+
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: ${{ runner.temp }}/pkg/AgenticGIS-${{ needs.preflight.outputs.version }}.zip
+
+      - name: Create and publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.preflight.outputs.tag }}
+          VERSION: ${{ needs.preflight.outputs.version }}
+          PRERELEASE: ${{ needs.preflight.outputs.prerelease }}
+        run: |
+          # Note: Keep a repository tag ruleset blocking force-updates and deletions on `v*`
+          # so release tags cannot be retargeted while publishing.
+          verify_tag_sha() {
+            TAG_OBJ_TYPE=$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${TAG}" --jq '.object.type')
+            TAG_SHA=$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${TAG}" --jq '.object.sha')
+            if [ "$TAG_OBJ_TYPE" = "tag" ]; then
+              TAG_SHA=$(gh api "repos/${GITHUB_REPOSITORY}/git/tags/${TAG_SHA}" --jq '.object.sha')
+            fi
+            if [ "$TAG_SHA" != "$GITHUB_SHA" ]; then
+              echo "::error::Remote tag $TAG points to $TAG_SHA instead of tested commit $GITHUB_SHA"
+              exit 1
+            fi
+          }
+
+          verify_tag_sha
+
+          RELEASE_STATE=$(gh release view "$TAG" --json isDraft --jq 'if .isDraft then "draft" else "published" end' 2>/dev/null || echo "missing")
+          if [ "$RELEASE_STATE" = "published" ]; then
+            echo "::error::Published GitHub Release for $TAG already exists"
+            exit 1
+          elif [ "$RELEASE_STATE" = "draft" ]; then
+            EXISTING_ASSETS=$(gh release view "$TAG" --json assets --jq '.assets[].name' | LC_ALL=C sort)
+            while IFS= read -r asset; do
+              [ -z "$asset" ] && continue
+              case "$asset" in
+                "AgenticGIS-${VERSION}.zip"|"SHA256SUMS.txt"|"package-manifest.json") ;;
+                *)
+                  echo "::error::Existing draft release for $TAG contains unexpected asset: $asset"
+                  exit 1
+                  ;;
+              esac
+            done <<< "$EXISTING_ASSETS"
+
+            gh release upload "$TAG" \
+              --clobber \
+              "$RUNNER_TEMP/pkg/AgenticGIS-${VERSION}.zip" \
+              "$RUNNER_TEMP/pkg/SHA256SUMS.txt" \
+              "$RUNNER_TEMP/pkg/package-manifest.json"
+
+            EXPECTED_ASSETS=$(printf '%s\n' "AgenticGIS-${VERSION}.zip" "SHA256SUMS.txt" "package-manifest.json" | LC_ALL=C sort)
+            FINAL_ASSETS=$(gh release view "$TAG" --json assets --jq '.assets[].name' | LC_ALL=C sort)
+            if [ "$FINAL_ASSETS" != "$EXPECTED_ASSETS" ]; then
+              echo "::error::Draft release assets for $TAG do not match expected set"
+              exit 1
+            fi
+
+            verify_tag_sha
+            gh release edit "$TAG" \
+              --title "AgenticGIS $TAG" \
+              --prerelease="$PRERELEASE" \
+              --draft=false
+          else
+            EXTRA_FLAGS=()
+            if [ "$PRERELEASE" = "true" ]; then
+              EXTRA_FLAGS+=(--prerelease)
+            fi
+            gh release create "$TAG" \
+              --verify-tag \
+              --draft \
+              --title "AgenticGIS $TAG" \
+              --generate-notes \
+              "${EXTRA_FLAGS[@]}" \
+              "$RUNNER_TEMP/pkg/AgenticGIS-${VERSION}.zip" \
+              "$RUNNER_TEMP/pkg/SHA256SUMS.txt" \
+              "$RUNNER_TEMP/pkg/package-manifest.json"
+            verify_tag_sha
+            gh release edit "$TAG" --draft=false
+          fi

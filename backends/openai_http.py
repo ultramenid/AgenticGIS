@@ -22,6 +22,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
+from .feedback import BackendFeedback, QT_TRANSLATE_NOOP
 from ..core.dev_logging import log_event
 
 
@@ -125,9 +126,9 @@ class OpenAIHttpClient:
     def _parse_base_url(base_url):
         parsed = urllib.parse.urlparse(base_url)
         if parsed.scheme not in ("http", "https") or not parsed.hostname:
-            raise ValueError("OpenAI base URL must be an absolute HTTP(S) URL")
+            raise ValueError(BackendFeedback(QT_TRANSLATE_NOOP("BackendFeedback", "OpenAI base URL must be an absolute HTTP(S) URL")))
         if parsed.query or parsed.fragment:
-            raise ValueError("OpenAI base URL must not contain a query or fragment")
+            raise ValueError(BackendFeedback(QT_TRANSLATE_NOOP("BackendFeedback", "OpenAI base URL must not contain a query or fragment")))
         return parsed
 
     def _chat_path(self):
@@ -261,7 +262,7 @@ class OpenAIHttpClient:
             err = f"HTTP {exc.code}: {detail[:300]}" if detail else f"HTTP {exc.code}"
             return [], err
         except urllib.error.URLError as exc:
-            return [], f"Connection error: {exc.reason}"
+            return [], BackendFeedback(QT_TRANSLATE_NOOP("BackendFeedback", "Connection error: {detail}"), detail=exc.reason)
         except Exception as exc:  # noqa: BLE001
             return [], f"{type(exc).__name__}: {exc}"
 
@@ -448,9 +449,15 @@ class OpenAIHttpClient:
             and not tool_calls
         ):
             raise OpenAIHttpError(
-                "The model stopped sending data mid-stream (no response for "
-                f"~{int(effective_timeout)}s). The endpoint may be slow or "
-                "overloaded — try again, or switch model in Settings."
+                BackendFeedback(
+                    QT_TRANSLATE_NOOP(
+                        "BackendFeedback",
+                        "The model stopped sending data mid-stream (no response for "
+                        "~{seconds}s). The endpoint may be slow or "
+                        "overloaded — try again, or switch model in Settings."
+                    ),
+                    seconds=int(effective_timeout),
+                )
             )
 
         blocks = []
@@ -538,7 +545,7 @@ class OpenAIHttpClient:
                     )
                     time.sleep(1.0 * (2 ** attempt))
                     continue
-                raise OpenAIHttpError(f"Connection error: {exc}") from exc
+                raise OpenAIHttpError(BackendFeedback(QT_TRANSLATE_NOOP("BackendFeedback", "Connection error: {detail}"), detail=exc)) from exc
 
             with self._active_lock:
                 self._active_response = response
@@ -607,7 +614,7 @@ class OpenAIHttpClient:
             except OSError:  # nosec B110
                 pass
             return response
-        raise OpenAIHttpError(f"Connection error: {last_error}")
+        raise OpenAIHttpError(BackendFeedback(QT_TRANSLATE_NOOP("BackendFeedback", "Connection error: {detail}"), detail=last_error))
 
     @staticmethod
     def _log_cache_usage(event, last_logged=None):
