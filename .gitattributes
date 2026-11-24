@@ -1,6 +1,10 @@
-# Exclude internal docs, tests, and dotfiles from release archives (git archive, GitHub ZIPs)
+# Exclude internal docs, tests, CI files, and dotfiles from release archives (git archive, GitHub ZIPs)
 .flake8 export-ignore
 .gitattributes export-ignore
+.github/ export-ignore
 .gitignore export-ignore
+.secrets.baseline export-ignore
 QGIS_COMPATIBILITY_RULES.md export-ignore
+ci/ export-ignore
+docs/ export-ignore
 tests/ export-ignore

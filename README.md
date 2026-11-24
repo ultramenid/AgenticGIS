@@ -462,3 +462,50 @@ Run the local tests from a checkout named `AgenticGIS` with QGIS's Python:
 ```sh
 QT_QPA_PLATFORM=offscreen PYTHONPATH=.. /usr/bin/python3 -m unittest discover -s tests
 ```
+
+## Continuous Integration & Local Checks
+
+Pull requests run [`.github/workflows/qgis-ci.yml`](.github/workflows/qgis-ci.yml) with read-only permissions, `persist-credentials: false`, SHA-pinned GitHub Actions, and digest-pinned containers.
+
+### Checks and blocking rules
+
+| Check name | Blocking? | What it verifies |
+|---|---|---|
+| `Package & Validate Archive` | Blocking | Packages `HEAD` with `TZ=UTC git archive`, runs `tests/test_ci_checks.py`, validates ZIP CRC (`testzip()`), 25 MB upload limit, `LICENSE`, `metadata.txt` (`about`/`tracker`/`repository`/`author`/URLs), `classFactory`, icon, `.qm` headers, path safety, forbidden leaks, and gates artifact upload with `detect-secrets --include-metadata`. |
+| `Security Scan (Bandit)` | Blocking on medium/high or errors | Verifies manifest SHA-256 and runs Bandit recursively on the extracted plugin ZIP (`LOW` findings remain visible as informational; credential literals redacted). |
+| `Secrets Scan (detect-secrets)` | Blocking on any finding or error | Verifies manifest SHA-256 and runs `detect-secrets scan --all-files` read-only against any reviewed `.secrets.baseline` (`is_secret: false` required). |
+| `Code Quality (Compile & Flake8)` | Compile, AST guards, CI linters blocking; plugin Flake8 advisory | Compiles all packaged `.py` files against Python 3.9 syntax, enforces zero unexpected third-party dependencies and Qt 5/6 compatibility (`qgis.PyQt`, no `.exec_()`), reports plugin Flake8 drift without blocking, and runs `py_compile`/`flake8`/`zizmor`/`actionlint` on `ci/`, `tests/test_ci_checks.py`, and `.github/workflows/*.yml`. |
+| `QGIS 3 / Qt 5` | Blocking | Representative QGIS 3 (`3.44.16` / Qt `5.15.13`) container: manifest SHA-256 check, `pylupdate5` + `lrelease` QM parity, `unittest discover`, and unattended `pt_BR` desktop ZIP smoke (all packaged module imports, `QIcon`, `QgsMessageLog` Critical/Python-warning guard, unload fallback). |
+| `QGIS 4 / Qt 6` | Blocking | Representative QGIS 4 (`4.4.0` / Qt `6.8.2`) container: manifest SHA-256 check, `pylupdate6` + `lrelease` QM parity, `unittest discover`, and unattended `pt_BR` desktop ZIP smoke. |
+
+The runtime matrix tests two representative pinned QGIS Desktop releases (`3.44.16` and `4.4.0`), not every minor version across `3.22`–`4.99`, and runs completely offline (live LLM provider, CLI, and Earth Engine calls are excluded).
+
+### Alignment with QGIS Plugin Repository scanning
+
+The `bandit`, `detect-secrets`, `flake8`, archive validator, and file-analysis checks preview the checks documented in the [QGIS Security Scanning docs](https://plugins.qgis.org/docs/security-scanning) and implemented in [`QGIS-Plugins-Website` `security_scanner.py` and `validator.py`](https://github.com/qgis/QGIS-Plugins-Website/blob/e66c9281bc530256359306febbe1d41a6edea753/qgis-app/plugins/security_scanner.py) (pinned at `e66c9281bc530256359306febbe1d41a6edea753`). Because `plugins.qgis.org` administrators can toggle individual `SecurityRule` entries on the server, CI serves as a repository-aligned preview rather than an authoritative server verdict:
+
+- CI fails on missing scanner binaries, timeouts, or invalid JSON reports (the website treats missing tools gracefully).
+- `.flake8` remains `export-ignore` in release archives and is passed explicitly via `--config .flake8` in CI; `plugins.qgis.org` defaults to `--max-line-length=120` when no `.flake8` is packaged.
+- Narrowly scoped exceptions use `# nosec Bxxx` with justification (Bandit), `# pragma: allowlist secret` (detect-secrets), or a reviewed `.secrets.baseline` where false positives are explicitly audited (`"is_secret": false`) — never auto-generate or update a baseline inside a PR run.
+
+### Reproducing CI locally
+
+```sh
+# 1. Regenerate and validate the release ZIP
+TZ=UTC git archive --format=zip --prefix=AgenticGIS/ --output=/tmp/AgenticGIS.zip HEAD
+python3 ci/check_plugin.py archive /tmp/AgenticGIS.zip --extract-to /tmp/agenticgis-extracted
+
+# 2. Install scanner tools (dev-only) and run scans + unit tests
+python3 -m pip install -r ci/requirements.txt
+python3 ci/check_plugin.py scan /tmp/agenticgis-extracted/AgenticGIS --flake8-config .flake8
+AGENTICGIS_REQUIRE_REAL_SCANNERS=1 python3 -m unittest tests/test_ci_checks.py -v
+```
+
+### Automated Releases
+
+[`.github/workflows/release.yml`](.github/workflows/release.yml) builds and publishes a QGIS Plugin Repository-ready release package without ever rebuilding the tested ZIP:
+
+1. Bump `version=` (and `experimental=False` for stable, or `experimental=True` for prereleases) in `metadata.txt` on `main`.
+2. Push an annotated tag matching `vX.Y.Z` (or `vX.Y.Z-rc.N` / `-beta.N` / `-alpha.N`) on a commit reachable from `main` (for example `git tag -a v0.4.7 -m "Release v0.4.7" && git push origin v0.4.7`). Triggering `Release QGIS Plugin` manually via `workflow_dispatch` runs a non-publishing dry run.
+3. The workflow validates tag/metadata parity (`ci/check_plugin.py release-meta`), calls `qgis-ci.yml` once to package and test the commit, verifies the downloaded artifact matches the tested SHA-256 and commit SHA, attaches `AgenticGIS-<version>.zip` (containing the single `AgenticGIS/` root folder), `SHA256SUMS.txt`, `package-manifest.json`, and a GitHub build provenance attestation (`gh attestation verify AgenticGIS-<version>.zip -R <owner>/<repo>`). Keep a repository tag ruleset on `v*` blocking tag updates and deletions (and a `release` environment approval/branch rule) so a release tag cannot be moved to another commit during publishing.
+4. Upload `AgenticGIS-<version>.zip` from the GitHub Release to `plugins.qgis.org` manually (note: on `plugins.qgis.org`, the `AgenticGIS` plugin slug is owned by the original listing maintainer).
