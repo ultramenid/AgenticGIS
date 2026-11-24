@@ -165,6 +165,45 @@ class SessionTests(unittest.TestCase):
             self.assertEqual(portuguese.create_session()["name"], "Nova sessão")
             self.assertEqual(portuguese.get_session(original["id"])["name"], "My project")
 
+    def test_empty_session_name_fallbacks_localize_in_portuguese(self):
+        from qgis.PyQt.QtWidgets import QLabel
+
+        from AgenticGIS.gui.chat_dock import ChatDock
+
+        translator = load_plugin_translator("pt_BR")
+        self.assertIsNotNone(translator)
+        self.assertTrue(QCoreApplication.installTranslator(translator))
+        self.addCleanup(QCoreApplication.removeTranslator, translator)
+        with tempfile.TemporaryDirectory() as temp:
+            settings = QSettings(str(Path(temp) / "sessions.ini"), QSettings.Format.IniFormat)
+            settings.setValue(
+                SETTINGS_KEY,
+                json.dumps({
+                    "schema_version": 1,
+                    "active_session_id": "s1",
+                    "sessions": [{"id": "s1", "name": ""}],
+                }),
+            )
+            store = SessionStore(settings, default_name="Nova sessão")
+            self.assertEqual(store.active_session()["name"], "Nova sessão")
+
+            dock = ChatDock(
+                lambda: None,
+                lambda: None,
+                lambda: None,
+                session_store=store,
+                show_startup_picker=False,
+            )
+            self.addCleanup(dock.close)
+            self.assertEqual(dock._status_session_name, "Nova sessão")
+            dock._status_session_name = ""
+            dock._render_status()
+            self.assertIn("Nova sessão", dock.status.text())
+            delete_dialog = dock._build_delete_session_dialog({"id": "s1", "name": ""})
+            self.addCleanup(delete_dialog.close)
+            labels = [lbl.text() for lbl in delete_dialog.findChildren(QLabel)]
+            self.assertIn("Nova sessão", labels)
+
 class McpTests(unittest.TestCase):
     def test_stdio_and_rpc_frames_match_across_locales(self):
         bridge = object.__new__(mcp_server._RpcServer)

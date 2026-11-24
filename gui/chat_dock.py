@@ -38,7 +38,7 @@ from ..backends.base import AgentEvent, EventType, should_compact
 from ..core.dev_logging import log_ttft_event, new_trace_id
 from ..core.input_metrics import input_box_metrics
 from ..core.qt_compat import QUEUED_CONNECTION
-from ..core.session_store import DEFAULT_SESSION_NAME, SessionStore
+from ..core.session_store import SessionStore
 from .agent_turn_bubble import AgentTurnBubble, _SPINNER_FRAMES
 from .chart_widget import ChartWidget
 from .download_card import DownloadWidget
@@ -295,7 +295,7 @@ class ChatDock(QgsDockWidget):
         self._status_icon = "✓"
         self._status_spinning = False
         self._status_started_at = time.monotonic()
-        self._status_session_name = DEFAULT_SESSION_NAME
+        self._status_session_name = self._default_session_title
         self._last_escape_press_at = 0.0
         self._build_ui()
         self._status_timer = QTimer(self)
@@ -1112,7 +1112,7 @@ class ChatDock(QgsDockWidget):
                 status_text = f"{status_text} · {seconds // 60}m {seconds % 60}s"
             elif seconds >= 1:
                 status_text = f"{status_text} · {seconds}s"
-        session_name = self._status_session_name or DEFAULT_SESSION_NAME
+        session_name = self._status_session_name or self._default_session_title
         try:
             self.status.setText(
                 f"<span style='color:{self._status_color};font-size:{fs(12)}px;'>{html.escape(mark)}</span>"
@@ -1477,7 +1477,7 @@ class ChatDock(QgsDockWidget):
         return dialog, field
 
     def _build_delete_session_dialog(self, session):
-        name = (session or {}).get("name") or DEFAULT_SESSION_NAME
+        name = (session or {}).get("name") or self._default_session_title
         dialog = QDialog(self)
         dialog.setObjectName("SessionDeleteDialog")
         dialog.setWindowTitle(QCoreApplication.translate("ChatDock", "Delete session"))
@@ -1593,7 +1593,7 @@ class ChatDock(QgsDockWidget):
 
     def _update_session_name_label(self):
         session = self._session_store.get_session(self._active_session_id)
-        name = (session or {}).get("name") or DEFAULT_SESSION_NAME
+        name = (session or {}).get("name") or self._default_session_title
         self._status_session_name = name
         if hasattr(self, "status"):
             self.status.setToolTip(QCoreApplication.translate("ChatDock", "Active session: {name}").format(name=name))

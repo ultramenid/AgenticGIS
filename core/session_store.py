@@ -60,7 +60,7 @@ class SessionStore:
             if not isinstance(session, dict):
                 continue
             sid = str(session.get("id") or uuid.uuid4().hex)
-            name = str(session.get("name") or DEFAULT_SESSION_NAME)
+            name = str(session.get("name") or self._default_name)
             created = str(session.get("created_at") or _now())
             updated = str(session.get("updated_at") or created)
             sessions.append({
