@@ -14,6 +14,7 @@ from dataclasses import dataclass, field
 from itertools import count
 from typing import Any, Callable, Dict, List, Optional
 
+from .feedback import BackendFeedback, QT_TRANSLATE_NOOP
 from ..core.dev_logging import log_event
 
 
@@ -107,11 +108,16 @@ class AgentBackend(ABC):
             if p
             else self.config.get("custom_api_key")
         )
-        label = p["label"] if p else "Custom endpoint"
+        label = p["label"] if p else BackendFeedback(QT_TRANSLATE_NOOP("BackendFeedback", "Custom endpoint"))
         if not key:
-            return (
-                f"No API key set for {label}. "
-                f"Add one in Settings (or set {p['key_env'] if p else 'the provider key env'})."
+            key_env = p["key_env"] if p else BackendFeedback(QT_TRANSLATE_NOOP("BackendFeedback", "the provider key env"))
+            return BackendFeedback(
+                QT_TRANSLATE_NOOP(
+                    "BackendFeedback",
+                    "No API key set for {label}. Add one in Settings (or set {variable})."
+                ),
+                label=label,
+                variable=key_env,
             )
         return None
 
@@ -273,10 +279,17 @@ class AgentBackend(ABC):
         estimated = estimate_message_tokens(messages) + _COMPACTION_FIXED_OVERHEAD
         if estimated > limit:
             raise RuntimeError(
-                f"Conversation context ({estimated} est. tokens) exceeds the "
-                f"model's context window ({limit} tokens) even after "
-                f"compaction. Start a new chat or switch to a model with a "
-                f"larger context window."
+                BackendFeedback(
+                    QT_TRANSLATE_NOOP(
+                        "BackendFeedback",
+                        "Conversation context ({estimated} est. tokens) exceeds the "
+                        "model's context window ({limit} tokens) even after "
+                        "compaction. Start a new chat or switch to a model with a "
+                        "larger context window."
+                    ),
+                    estimated=estimated,
+                    limit=limit,
+                )
             )
         return messages
 

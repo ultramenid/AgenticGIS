@@ -7,8 +7,9 @@ Three connection modes:
 """
 
 import os
+from html import escape
 
-from qgis.PyQt.QtCore import QRectF, QSize, Qt, QThread, QTimer, pyqtSignal
+from qgis.PyQt.QtCore import QCoreApplication, QRectF, QSize, Qt, QThread, QTimer, pyqtSignal
 from qgis.PyQt.QtGui import QColor, QFont, QIcon, QPainter, QPalette, QPixmap
 from qgis.PyQt.QtWidgets import (
     QApplication,
@@ -35,7 +36,9 @@ from qgis.PyQt.QtWidgets import (
 )
 
 from .. import config as config_mod
+from ..backends.feedback import exception_feedback
 from .agent_logos import AGENT_LOGOS
+from .backend_feedback import display_backend_feedback
 from ..backends.cli_backend import CLI_AGENT_CATALOG, _agent_id_for_binary_path
 from ..backends import providers
 from .theme import (
@@ -61,15 +64,8 @@ from .theme import (
 )
 
 # ── Mode / agent constants ────────────────────────────────────────────────────
-_MODE_LABELS = [
-    ("API key", config_mod.MODE_API_KEY),
-    ("Custom endpoint", config_mod.MODE_CUSTOM),
-    ("CLI Agent", config_mod.MODE_CLI_TOOL),
-]
-_FORMAT_LABELS = [
-    ("OpenAI-compatible", "openai"),
-    ("Anthropic-compatible", "anthropic"),
-]
+_MODE_IDS = (config_mod.MODE_API_KEY, config_mod.MODE_CUSTOM, config_mod.MODE_CLI_TOOL)
+_FORMAT_IDS = ("openai", "anthropic")
 
 
 # ── Fonts ─────────────────────────────────────────────────────────────────────
@@ -337,9 +333,12 @@ class _ModelPickerWidget(QWidget):
         f"QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height: 0; }}"
     )
 
-    def __init__(self, placeholder="Select or type a model name", parent=None):
+    def __init__(self, placeholder=None, parent=None):
         super().__init__(parent)
-        self._placeholder = placeholder
+        self._placeholder = (
+            QCoreApplication.translate("SettingsDialog", "Select or type a model name")
+            if placeholder is None else placeholder
+        )
         self._models = []    # full sorted list returned by the API
         self._active = ""    # model id currently saved in config
         self._selected = ""  # what the user has chosen or typed
@@ -428,7 +427,7 @@ class _ModelPickerWidget(QWidget):
 
         search = QLineEdit()
         search.setFont(_mono(12))
-        search.setPlaceholderText("Search models or type a custom name…")
+        search.setPlaceholderText(QCoreApplication.translate("SettingsDialog", "Search models or type a custom name…"))
         vlay.addWidget(search)
 
         lst = QListWidget()
@@ -478,7 +477,7 @@ class _ModelPickerWidget(QWidget):
         # ── Active model pinned at top ────────────────────────────────────
         if self._active:
             if not q or q in self._active.lower():
-                lst.addItem(_header("  ACTIVE"))
+                lst.addItem(_header(QCoreApplication.translate("SettingsDialog", "  ACTIVE")))
                 it = QListWidgetItem(f"  {self._active}")
                 it.setData(Qt.ItemDataRole.UserRole, self._active)
                 it.setForeground(QColor(_BLUE))
@@ -491,7 +490,7 @@ class _ModelPickerWidget(QWidget):
             if m != self._active and (not q or q in m.lower())
         ]
         if filtered:
-            lst.addItem(_header("  AVAILABLE"))
+            lst.addItem(_header(QCoreApplication.translate("SettingsDialog", "  AVAILABLE")))
             for m in filtered:
                 it = QListWidgetItem(f"  {m}")
                 it.setData(Qt.ItemDataRole.UserRole, m)
@@ -499,8 +498,10 @@ class _ModelPickerWidget(QWidget):
 
         # ── Custom entry hint when nothing matches ────────────────────────
         if q and not self._active_matches(q) and not filtered:
-            lst.addItem(_header("  CUSTOM"))
-            it = QListWidgetItem(f'  Use "{query.strip()}"')
+            lst.addItem(_header(QCoreApplication.translate("SettingsDialog", "  CUSTOM")))
+            it = QListWidgetItem(QCoreApplication.translate(
+                "SettingsDialog", '  Use "{model}"'
+            ).format(model=query.strip()))
             it.setData(Qt.ItemDataRole.UserRole, query.strip())
             it.setForeground(QColor(_TEXT_2))
             lst.addItem(it)
@@ -540,7 +541,7 @@ class _ModelPickerWidget(QWidget):
 class _BgTask(QThread):
     """Runs ``fn()`` off the UI thread; emits ``done(result, error)``."""
 
-    done = pyqtSignal(object, str)
+    done = pyqtSignal(object, object)
 
     def __init__(self, fn):
         super().__init__()
@@ -550,7 +551,7 @@ class _BgTask(QThread):
         try:
             result, err = self._fn(), ""
         except Exception as exc:  # noqa: BLE001
-            result, err = None, f"{type(exc).__name__}: {exc}"
+            result, err = None, exception_feedback(exc, include_type=True)
         self.done.emit(result, err)
 
 
@@ -685,7 +686,7 @@ class SettingsDialog(QDialog):
     def __init__(self, config, parent=None):
         super().__init__(parent)
         self.config = config
-        self.setWindowTitle("AgenticGIS — Settings")
+        self.setWindowTitle(QCoreApplication.translate("SettingsDialog", "AgenticGIS — Settings"))
         self.setMinimumSize(720, 560)
         self.resize(820, 680)
         _install_tooltip_palette()
@@ -694,7 +695,6 @@ class SettingsDialog(QDialog):
         self._load()
 
     # ── build ─────────────────────────────────────────────────────────────────
-    _PAGES = ("Connection", "External agents", "Appearance")
 
     def _build_ui(self):
         root = QHBoxLayout(self)
@@ -716,14 +716,18 @@ class SettingsDialog(QDialog):
         brand.setFont(_mono(13, QFont.Weight.DemiBold))
         brand.setContentsMargins(8, 0, 0, 0)
         rail_col.addWidget(brand)
-        group_lbl = _lbl("Settings", color=_TEXT_4, size=11)
+        group_lbl = _lbl(QCoreApplication.translate("SettingsDialog", "Settings"), color=_TEXT_4, size=11)
         group_lbl.setContentsMargins(8, 8, 0, 0)
         rail_col.addWidget(group_lbl)
         self._rail = QListWidget()
         self._rail.setFont(_mono(13))
         self._rail.setStyleSheet(_RAIL_SS)
         self._rail.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        for name in self._PAGES:
+        for name in (
+            QCoreApplication.translate("SettingsDialog", "Connection"),
+            QCoreApplication.translate("SettingsDialog", "External agents"),
+            QCoreApplication.translate("SettingsDialog", "Appearance"),
+        ):
             self._rail.addItem(name)
         rail_col.addWidget(self._rail, 1)
         version = _plugin_version()
@@ -771,17 +775,17 @@ class SettingsDialog(QDialog):
         btn_row = QHBoxLayout(footer)
         btn_row.setContentsMargins(24, 12, 24, 12)
         btn_row.setSpacing(8)
-        note = _lbl("Runs entirely on QGIS's bundled Python — nothing to install.", color=_TEXT_4, size=11)
+        note = _lbl(QCoreApplication.translate("SettingsDialog", "Runs entirely on QGIS's bundled Python — nothing to install."), color=_TEXT_4, size=11)
         btn_row.addWidget(note, 1)
 
-        self._cancel_btn = QPushButton("Cancel")
+        self._cancel_btn = QPushButton(QCoreApplication.translate("SettingsDialog", "Cancel"))
         self._cancel_btn.setFont(_mono(12))
         self._cancel_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._cancel_btn.setStyleSheet(_BTN_SECONDARY_SS)
         self._cancel_btn.clicked.connect(self.reject)
         btn_row.addWidget(self._cancel_btn)
 
-        self._save_btn = QPushButton("Save")
+        self._save_btn = QPushButton(QCoreApplication.translate("SettingsDialog", "Save"))
         self._save_btn.setFont(_mono(12, QFont.Weight.DemiBold))
         self._save_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._save_btn.setStyleSheet(_BTN_PRIMARY_SS)
@@ -815,10 +819,12 @@ class SettingsDialog(QDialog):
         if index < 0:
             return
         self._pages.setCurrentIndex(index)
+        section = escape(QCoreApplication.translate("SettingsDialog", "Settings"))
+        page = escape(self._rail.item(index).text())
         self._crumb.setText(
-            f"<span style='color:{_TEXT_3};'>Settings</span>"
+            f"<span style='color:{_TEXT_3};'>{section}</span>"
             f"<span style='color:{_TEXT_4};'>&nbsp;&nbsp;›&nbsp;&nbsp;</span>"
-            f"<span style='color:{_TEXT};'>{self._PAGES[index]}</span>"
+            f"<span style='color:{_TEXT};'>{page}</span>"
         )
 
     def _connection_page(self):
@@ -827,9 +833,9 @@ class SettingsDialog(QDialog):
         v.setContentsMargins(0, 0, 0, 0)
         v.setSpacing(12)
         v.addWidget(_group_header(
-            "Connection",
-            "How AgenticGIS reaches a model. Configure any mode; the one marked "
-            "“Active” is used for chat after you Save.",
+            QCoreApplication.translate("SettingsDialog", "Connection"),
+            QCoreApplication.translate("SettingsDialog", "How AgenticGIS reaches a model. Configure any mode; the one marked "
+            "“Active” is used for chat after you Save."),
         ))
 
         track = QFrame()
@@ -846,7 +852,11 @@ class SettingsDialog(QDialog):
         self.connection_tabs.setDrawBase(False)
         self.connection_tabs.setExpanding(False)
         self.connection_tabs.setUsesScrollButtons(False)
-        for label, _ in _MODE_LABELS:
+        for label in (
+            QCoreApplication.translate("SettingsDialog", "API key"),
+            QCoreApplication.translate("SettingsDialog", "Custom endpoint"),
+            QCoreApplication.translate("SettingsDialog", "CLI Agent"),
+        ):
             self.connection_tabs.addTab(label)
         self.connection_tabs.currentChanged.connect(self.stack_set)
         track_row.addWidget(self.connection_tabs)
@@ -866,17 +876,17 @@ class SettingsDialog(QDialog):
         v.setContentsMargins(0, 0, 0, 0)
         v.setSpacing(12)
         v.addWidget(_group_header(
-            "External agents",
-            "Let agent CLIs outside QGIS drive this session through a local MCP server.",
+            QCoreApplication.translate("SettingsDialog", "External agents"),
+            QCoreApplication.translate("SettingsDialog", "Let agent CLIs outside QGIS drive this session through a local MCP server."),
         ))
         card = _Card()
         self.mcp_enabled_check = _Toggle()
         self.mcp_enabled_check.setChecked(bool(self.config.get("mcp_enabled")))
         card.add_row(
-            "Expose QGIS tools over MCP",
-            "Claude Code, Codex, OpenCode and others can use the live QGIS session via "
+            QCoreApplication.translate("SettingsDialog", "Expose QGIS tools over MCP"),
+            QCoreApplication.translate("SettingsDialog", "Claude Code, Codex, OpenCode and others can use the live QGIS session via "
             "AgenticGIS's stdio MCP proxy (setup per CLI in the README, \"External agent "
-            "access (MCP)\"). Listens on 127.0.0.1 only; takes effect immediately.",
+            "access (MCP)\"). Listens on 127.0.0.1 only; takes effect immediately."),
             self.mcp_enabled_check,
         )
         v.addWidget(card)
@@ -888,7 +898,7 @@ class SettingsDialog(QDialog):
         v = QVBoxLayout(page)
         v.setContentsMargins(0, 0, 0, 0)
         v.setSpacing(12)
-        v.addWidget(_group_header("Appearance", "Text size in the chat dock and this dialog."))
+        v.addWidget(_group_header(QCoreApplication.translate("SettingsDialog", "Appearance"), QCoreApplication.translate("SettingsDialog", "Text size in the chat dock and this dialog.")))
         card = _Card()
         self.font_scale_combo = _cmb(QComboBox())
         self.font_scale_combo.setMinimumWidth(110)
@@ -898,10 +908,10 @@ class SettingsDialog(QDialog):
             self.font_scale_combo.addItem(f"{round(scale * 100)}%", scale)
         self.font_scale_combo.setCurrentIndex(scales.index(saved))
         card.add_row(
-            "Font size",
-            "Follows the QGIS font size (Settings → Options → General) and scales on top "
+            QCoreApplication.translate("SettingsDialog", "Font size"),
+            QCoreApplication.translate("SettingsDialog", "Follows the QGIS font size (Settings → Options → General) and scales on top "
             "of it. New messages update right away; reload the plugin or restart QGIS to "
-            "resize what is already on screen.",
+            "resize what is already on screen."),
             self.font_scale_combo,
         )
         v.addWidget(card)
@@ -940,7 +950,7 @@ class SettingsDialog(QDialog):
         mode = self._current_mode()
         if mode == config_mod.MODE_SUBSCRIPTION:
             mode = config_mod.MODE_CLI_TOOL
-        return next((i for i, (_, value) in enumerate(_MODE_LABELS) if value == mode), 0)
+        return next((i for i, value in enumerate(_MODE_IDS) if value == mode), 0)
 
     def _update_connection_tab_labels(self):
         if not hasattr(self, "connection_tabs"):
@@ -950,7 +960,7 @@ class SettingsDialog(QDialog):
 
         def active_label(index, text):
             if index == active_index:
-                return f"Active · {text}"
+                return QCoreApplication.translate("SettingsDialog", "Active · {mode}").format(mode=text)
             return text
 
         provider_label = self.provider_combo.currentText() if hasattr(self, "provider_combo") else ""
@@ -958,7 +968,7 @@ class SettingsDialog(QDialog):
         api_base_url = (
             self.api_base_url_edit.text().strip() if hasattr(self, "api_base_url_edit") else ""
         )
-        api_text = "API key"
+        api_text = QCoreApplication.translate("SettingsDialog", "API key")
         self.connection_tabs.setTabText(0, active_label(0, api_text))
         self.connection_tabs.setTabToolTip(
             0,
@@ -976,7 +986,7 @@ class SettingsDialog(QDialog):
             if hasattr(self, "custom_model_picker") else ""
         )
         custom_url = self.custom_url_edit.text().strip() if hasattr(self, "custom_url_edit") else ""
-        custom_text = "Custom"
+        custom_text = QCoreApplication.translate("SettingsDialog", "Custom")
         self.connection_tabs.setTabText(1, active_label(1, custom_text))
         self.connection_tabs.setTabToolTip(
             1,
@@ -992,7 +1002,7 @@ class SettingsDialog(QDialog):
             if hasattr(self, "cli_model_picker") else ""
         )
         cli_path = self.cli_path_edit.text().strip() if hasattr(self, "cli_path_edit") else ""
-        cli_text = "CLI Agent"
+        cli_text = QCoreApplication.translate("SettingsDialog", "CLI Agent")
         self.connection_tabs.setTabText(2, active_label(2, cli_text))
         self.connection_tabs.setTabToolTip(
             2,
@@ -1001,12 +1011,12 @@ class SettingsDialog(QDialog):
 
     def _model_group(self, card, picker_attr):
         """Hidden-until-connected card row holding the model picker."""
-        picker = _ModelPickerWidget("Select or type a model name")
+        picker = _ModelPickerWidget()
         picker.setMinimumWidth(240)
         picker.modelChanged.connect(self._update_connection_tab_labels)
         setattr(self, picker_attr, picker)
         row = card.add_row(
-            "Model", "Pick from the list or type a custom name, then press Enter.", picker,
+            QCoreApplication.translate("SettingsDialog", "Model"), QCoreApplication.translate("SettingsDialog", "Pick from the list or type a custom name, then press Enter."), picker,
         )
         row.setVisible(False)
         return row
@@ -1014,19 +1024,19 @@ class SettingsDialog(QDialog):
     def _test_row(self, card, btn_attr, status_attr, mode, use_btn_attr=None):
         buttons = QHBoxLayout()
         buttons.setSpacing(6)
-        btn = _ghost_btn("Test connection")
+        btn = _ghost_btn(QCoreApplication.translate("SettingsDialog", "Test connection"))
         btn.clicked.connect(lambda: self._test_connection(mode))
         setattr(self, btn_attr, btn)
         buttons.addWidget(btn)
         if use_btn_attr:
-            use_btn = _ghost_btn("Use")
+            use_btn = _ghost_btn(QCoreApplication.translate("SettingsDialog", "Use"))
             use_btn.clicked.connect(lambda _checked=False, m=mode: self._use_connection_mode(m))
             setattr(self, use_btn_attr, use_btn)
             buttons.addWidget(use_btn)
-        status = _lbl("Not tested yet", color=_TEXT_3)
+        status = _lbl(QCoreApplication.translate("SettingsDialog", "Not tested yet"), color=_TEXT_3)
         status.setWordWrap(True)
         setattr(self, status_attr, status)
-        card.add_row("Connection", status, buttons)
+        card.add_row(QCoreApplication.translate("SettingsDialog", "Connection"), status, buttons)
 
     @staticmethod
     def _panel_column():
@@ -1045,19 +1055,19 @@ class SettingsDialog(QDialog):
         self.provider_combo.setMinimumWidth(220)
         for p in providers.all_providers():
             self.provider_combo.addItem(p["label"], p["id"])
-        card.add_row("Provider", "Built-in API provider.", self.provider_combo)
+        card.add_row(QCoreApplication.translate("SettingsDialog", "Provider"), QCoreApplication.translate("SettingsDialog", "Built-in API provider."), self.provider_combo)
 
         self.api_base_url_edit = _inp(QLineEdit())
         self.api_base_url_edit.setMinimumWidth(260)
-        self.api_base_url_edit.setPlaceholderText("Provider API base URL")
+        self.api_base_url_edit.setPlaceholderText(QCoreApplication.translate("SettingsDialog", "Provider API base URL"))
         self.api_base_url_edit.textChanged.connect(self._update_connection_tab_labels)
-        card.add_row("Base URL", "Leave the default unless you use a proxy.", self.api_base_url_edit)
+        card.add_row(QCoreApplication.translate("SettingsDialog", "Base URL"), QCoreApplication.translate("SettingsDialog", "Leave the default unless you use a proxy."), self.api_base_url_edit)
 
         self.api_key_edit = _inp(QLineEdit())
         self.api_key_edit.setMinimumWidth(260)
         self.api_key_edit.setEchoMode(QLineEdit.EchoMode.Password)
-        self.api_key_edit.setPlaceholderText("Paste your API key here")
-        card.add_row("API key", "Stored in your QGIS settings on this machine.", self.api_key_edit)
+        self.api_key_edit.setPlaceholderText(QCoreApplication.translate("SettingsDialog", "Paste your API key here"))
+        card.add_row(QCoreApplication.translate("SettingsDialog", "API key"), QCoreApplication.translate("SettingsDialog", "Stored in your QGIS settings on this machine."), self.api_key_edit)
 
         self.provider_combo.currentIndexChanged.connect(self._on_provider_changed)
         self._test_row(card, "api_test_btn", "api_status", config_mod.MODE_API_KEY, use_btn_attr="api_use_btn")
@@ -1073,23 +1083,27 @@ class SettingsDialog(QDialog):
         self.custom_url_edit.setMinimumWidth(260)
         self.custom_url_edit.setPlaceholderText("https://api.example.com")
         self.custom_url_edit.textChanged.connect(self._update_connection_tab_labels)
-        card.add_row("Base URL", "Any OpenAI- or Anthropic-compatible server.", self.custom_url_edit)
+        card.add_row(QCoreApplication.translate("SettingsDialog", "Base URL"), QCoreApplication.translate("SettingsDialog", "Any OpenAI- or Anthropic-compatible server."), self.custom_url_edit)
 
         self.custom_key_edit = _inp(QLineEdit())
         self.custom_key_edit.setMinimumWidth(260)
         self.custom_key_edit.setEchoMode(QLineEdit.EchoMode.Password)
-        self.custom_key_edit.setPlaceholderText("API key for this endpoint")
-        card.add_row("API key", "Optional for local servers.", self.custom_key_edit)
+        self.custom_key_edit.setPlaceholderText(QCoreApplication.translate("SettingsDialog", "API key for this endpoint"))
+        card.add_row(QCoreApplication.translate("SettingsDialog", "API key"), QCoreApplication.translate("SettingsDialog", "Optional for local servers."), self.custom_key_edit)
 
         self.custom_format_combo = _cmb(QComboBox())
         self.custom_format_combo.setMinimumWidth(220)
-        for label, value in _FORMAT_LABELS:
+        format_labels = (
+            QCoreApplication.translate("SettingsDialog", "OpenAI-compatible"),
+            QCoreApplication.translate("SettingsDialog", "Anthropic-compatible"),
+        )
+        for label, value in zip(format_labels, _FORMAT_IDS):
             self.custom_format_combo.addItem(label, value)
         self.custom_format_combo.currentIndexChanged.connect(self._update_connection_tab_labels)
         self.custom_format_combo.currentIndexChanged.connect(
             lambda _i: self._reset_model_group(config_mod.MODE_CUSTOM)
         )
-        card.add_row("Wire format", "The API shape the server speaks.", self.custom_format_combo)
+        card.add_row(QCoreApplication.translate("SettingsDialog", "Wire format"), QCoreApplication.translate("SettingsDialog", "The API shape the server speaks."), self.custom_format_combo)
 
         self._test_row(
             card, "custom_test_btn", "custom_status", config_mod.MODE_CUSTOM, use_btn_attr="custom_use_btn",
@@ -1109,11 +1123,11 @@ class SettingsDialog(QDialog):
 
         # Agents: icon tiles. Picking one checks sign-in and loads its models.
         self.cli_scan_btn = _ghost_btn("↻")
-        self.cli_scan_btn.setToolTip("Rescan for installed agent CLIs")
+        self.cli_scan_btn.setToolTip(QCoreApplication.translate("SettingsDialog", "Rescan for installed agent CLIs"))
         self.cli_scan_btn.clicked.connect(self._scan_cli_agents)
         self.cli_rescan_btn = self.cli_scan_btn   # one button; old name kept for _run_busy lists
         self.cli_scan_status = _lbl("", color=_TEXT_3)
-        card.add_row("Agent", self.cli_scan_status, self.cli_scan_btn)
+        card.add_row(QCoreApplication.translate("SettingsDialog", "Agent"), self.cli_scan_status, self.cli_scan_btn)
         self.cli_agent_list = _TileList()
         self.cli_agent_list.setFont(_mono(11))
         self.cli_agent_list.setStyleSheet(_AGENT_TILES_SS)
@@ -1121,13 +1135,13 @@ class SettingsDialog(QDialog):
         card.add_widget(self.cli_agent_list, margins=(8, 2, 8, 2))
 
         # Status: who, sign-in result, re-check, use.
-        self.cli_agent_name = _lbl("Select an agent", color=_TEXT, size=13)
-        self.cli_auth_status = _lbl("Not checked yet", color=_TEXT_3)
+        self.cli_agent_name = _lbl(QCoreApplication.translate("SettingsDialog", "Select an agent"), color=_TEXT, size=13)
+        self.cli_auth_status = _lbl(QCoreApplication.translate("SettingsDialog", "Not checked yet"), color=_TEXT_3)
         self.cli_auth_status.setWordWrap(True)
         self.cli_auth_btn = _ghost_btn("↻")
-        self.cli_auth_btn.setToolTip("Check sign-in again and reload models")
+        self.cli_auth_btn.setToolTip(QCoreApplication.translate("SettingsDialog", "Check sign-in again and reload models"))
         self.cli_auth_btn.clicked.connect(self._check_cli_auth)
-        self.cli_use_btn = QPushButton("Use")
+        self.cli_use_btn = QPushButton(QCoreApplication.translate("SettingsDialog", "Use"))
         self.cli_use_btn.setFont(_mono(12, QFont.Weight.DemiBold))
         self.cli_use_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.cli_use_btn.setStyleSheet(_BTN_PRIMARY_SS)
@@ -1147,7 +1161,7 @@ class SettingsDialog(QDialog):
         self.cli_model_picker.modelChanged.connect(self._refresh_cli_steps)
 
         # ─ advanced: binary path + smoke test ─
-        self._cli_adv_btn = QPushButton("Advanced  ›")
+        self._cli_adv_btn = QPushButton(QCoreApplication.translate("SettingsDialog", "Advanced  ›"))
         self._cli_adv_btn.setFlat(True)
         self._cli_adv_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._cli_adv_btn.setFont(_mono(12))
@@ -1161,7 +1175,7 @@ class SettingsDialog(QDialog):
         adv.setVisible(False)
         self._cli_adv_btn.clicked.connect(lambda: (
             adv.setVisible(not adv.isVisible()),
-            self._cli_adv_btn.setText("Advanced  ⌄" if adv.isVisible() else "Advanced  ›"),
+            self._cli_adv_btn.setText(QCoreApplication.translate("SettingsDialog", "Advanced  ⌄") if adv.isVisible() else QCoreApplication.translate("SettingsDialog", "Advanced  ›")),
         ))
         path_row = QHBoxLayout()
         path_row.setSpacing(6)
@@ -1170,27 +1184,27 @@ class SettingsDialog(QDialog):
         self._syncing_cli_selection = False
         self.cli_path_edit = _inp(QLineEdit())
         self.cli_path_edit.setMinimumWidth(220)
-        self.cli_path_edit.setPlaceholderText("Auto-detect on PATH (leave empty)")
+        self.cli_path_edit.setPlaceholderText(QCoreApplication.translate("SettingsDialog", "Auto-detect on PATH (leave empty)"))
         self.cli_path_edit.editingFinished.connect(self._scan_cli_agents)
         self.cli_path_edit.textEdited.connect(self._mark_cli_path_override)
         self.cli_path_edit.textChanged.connect(self._update_connection_tab_labels)
         path_row.addWidget(self.cli_path_edit, 1)
-        browse_cli = _ghost_btn("Browse…")
+        browse_cli = _ghost_btn(QCoreApplication.translate("SettingsDialog", "Browse…"))
         browse_cli.clicked.connect(self._browse_cli)
         path_row.addWidget(browse_cli)
         self.cli_resolved_path = _lbl("", color=_TEXT_3, size=11)
         self.cli_resolved_path.setWordWrap(True)
         self.cli_resolved_path.setVisible(False)
-        adv.add_row("Command path", self.cli_resolved_path, path_row, stretch_control=True)
-        self.cli_test_status = _lbl("Runs the CLI's version check.", color=_TEXT_3)
+        adv.add_row(QCoreApplication.translate("SettingsDialog", "Command path"), self.cli_resolved_path, path_row, stretch_control=True)
+        self.cli_test_status = _lbl(QCoreApplication.translate("SettingsDialog", "Runs the CLI's version check."), color=_TEXT_3)
         self.cli_test_status.setWordWrap(True)
-        self.cli_test_btn = _ghost_btn("Test binary")
+        self.cli_test_btn = _ghost_btn(QCoreApplication.translate("SettingsDialog", "Test binary"))
         self.cli_test_btn.clicked.connect(self._test_cli_agent)
-        adv.add_row("Binary", self.cli_test_status, self.cli_test_btn)
+        adv.add_row(QCoreApplication.translate("SettingsDialog", "Binary"), self.cli_test_status, self.cli_test_btn)
         col.addWidget(adv)
 
         self.sub_status = _lbl(
-            "Delegates to the selected local CLI. AgenticGIS never reads OAuth tokens.",
+            QCoreApplication.translate("SettingsDialog", "Delegates to the selected local CLI. AgenticGIS never reads OAuth tokens."),
             color=_TEXT_4, size=11,
         )
         self.sub_status.setContentsMargins(4, 0, 0, 0)
@@ -1210,7 +1224,7 @@ class SettingsDialog(QDialog):
             self._current_mode() == config_mod.MODE_CLI_TOOL
             and self._selected_cli_agent_id() == getattr(self, "_cli_used_agent", None)
         )
-        self.cli_use_btn.setText("✓ In use" if in_use else "Use")
+        self.cli_use_btn.setText(QCoreApplication.translate("SettingsDialog", "✓ In use") if in_use else QCoreApplication.translate("SettingsDialog", "Use"))
         self.cli_use_btn.setEnabled(self._cli_agent_ready() and not in_use)
         self._paint_cli_agent_icons()
 
@@ -1227,9 +1241,9 @@ class SettingsDialog(QDialog):
     def _use_connection_mode(self, mode):
         self._set_active_connection_mode(mode)
         if mode == config_mod.MODE_API_KEY:
-            self._set_status(self.api_status, "Using API key connection", _SUCCESS)
+            self._set_status(self.api_status, QCoreApplication.translate("SettingsDialog", "Using API key connection"), _SUCCESS)
         elif mode == config_mod.MODE_CUSTOM:
-            self._set_status(self.custom_status, "Using custom endpoint", _SUCCESS)
+            self._set_status(self.custom_status, QCoreApplication.translate("SettingsDialog", "Using custom endpoint"), _SUCCESS)
 
     def _on_provider_changed(self, index):
         pid = self.provider_combo.itemData(index)
@@ -1239,7 +1253,7 @@ class SettingsDialog(QDialog):
             self.api_base_url_edit.setText(p["base_url"])
             env = p.get("key_env", "")
             self.api_key_edit.setPlaceholderText(
-                f"Paste your key (or set {env})" if env else "Paste your key"
+                QCoreApplication.translate("SettingsDialog", "Paste your key (or set {variable})").format(variable=env) if env else QCoreApplication.translate("SettingsDialog", "Paste your key")
             )
         # Changing provider invalidates any prior successful test.
         self._reset_model_group(config_mod.MODE_API_KEY)
@@ -1259,6 +1273,7 @@ class SettingsDialog(QDialog):
 
     @staticmethod
     def _set_status(label, text, color):
+        label.setTextFormat(Qt.TextFormat.PlainText)
         label.setText(text)
         label.setStyleSheet(f"color: {color}; background: transparent;")
 
@@ -1294,7 +1309,7 @@ class SettingsDialog(QDialog):
         fmt, base_url, key = self._connection_params(mode)
 
         if mode == config_mod.MODE_CUSTOM and not base_url:
-            self._set_status(status, "Enter a base URL first.", _DANGER)
+            self._set_status(status, QCoreApplication.translate("SettingsDialog", "Enter a base URL first."), _DANGER)
             return
 
         def fetch(fmt=fmt, base_url=base_url, key=key):
@@ -1314,20 +1329,25 @@ class SettingsDialog(QDialog):
             models, fetch_err = result if result else ([], "")
             self._on_models_fetched(m, list(models or []), err or fetch_err or "")
 
-        self._run_busy(fetch, done, status, "Checking connection…", [btn])
+        self._run_busy(fetch, done, status, QCoreApplication.translate("SettingsDialog", "Checking connection…"), [btn])
 
     def _on_models_fetched(self, mode, models, err):
         status, _btn, picker, group = self._panel_widgets(mode)
 
         if err:
-            self._set_status(status, f"Failed — {err}", _DANGER)
+            self._set_status(status, QCoreApplication.translate("SettingsDialog", "Failed — {error}").format(
+                error=display_backend_feedback(err)
+            ), _DANGER)
             return
 
         count = len(models)
         if count:
             self._set_status(
                 status,
-                f"Connected · {count} model{'s' if count != 1 else ''} available",
+                QCoreApplication.translate("SettingsDialog", "Connected · 1 model available")
+                if count == 1 else QCoreApplication.translate(
+                    "SettingsDialog", "Connected · {count} models available"
+                ).format(count=count),
                 _SUCCESS,
             )
             # Mark the currently saved model as "active" inside the picker
@@ -1337,7 +1357,7 @@ class SettingsDialog(QDialog):
         else:
             self._set_status(
                 status,
-                "Connected · no models listed — type a model name below",
+                QCoreApplication.translate("SettingsDialog", "Connected · no models listed — type a model name below"),
                 _SUCCESS,
             )
         group.setVisible(True)
@@ -1346,10 +1366,10 @@ class SettingsDialog(QDialog):
     def _browse_cli(self):
         import platform as _platform
         if _platform.system() == "Windows":
-            flt = "Executables (*.exe *.cmd *.bat *.com);;All files (*)"
+            flt = QCoreApplication.translate("SettingsDialog", "Executables (*.exe *.cmd *.bat *.com);;All files (*)")
         else:
-            flt = "All files (*)"
-        path, _ = QFileDialog.getOpenFileName(self, "Select agent CLI binary", "", flt)
+            flt = QCoreApplication.translate("SettingsDialog", "All files (*)")
+        path, _ = QFileDialog.getOpenFileName(self, QCoreApplication.translate("SettingsDialog", "Select agent CLI binary"), "", flt)
         if path:
             agent_id = _agent_id_for_binary_path(path)
             if agent_id:
@@ -1445,7 +1465,7 @@ class SettingsDialog(QDialog):
         def done(rows, err):
             self._cli_scanning = False
             if err:
-                self._set_status(self.cli_scan_status, f"Scan failed · {err}", _DANGER)
+                self._set_status(self.cli_scan_status, QCoreApplication.translate("SettingsDialog", "Scan failed · {error}").format(error=display_backend_feedback(err)), _DANGER)
                 return
             self._cli_scan_rows = rows
             self._cli_scan_performed = True
@@ -1453,7 +1473,7 @@ class SettingsDialog(QDialog):
 
         self._run_busy(
             lambda: scan_cli_agents(overrides), done, self.cli_scan_status,
-            "Scanning for agent CLIs…",
+            QCoreApplication.translate("SettingsDialog", "Scanning for agent CLIs…"),
             [self.cli_scan_btn, self.cli_rescan_btn, self.cli_test_btn, self.cli_auth_btn],
         )
 
@@ -1480,13 +1500,14 @@ class SettingsDialog(QDialog):
         for row in ordered_rows:
             found += 1 if row.get("installed") else 0
             if row.get("installed") and (scanned or row.get("_selected_probe")):
-                status = "installed"
+                status = QCoreApplication.translate("SettingsDialog", "installed")
             else:
-                status = "not installed" if scanned else "not scanned"
-            active = " · in use" if row.get("id") == active_id else ""
+                status = QCoreApplication.translate("SettingsDialog", "not installed") if scanned else QCoreApplication.translate("SettingsDialog", "not scanned")
+            active = QCoreApplication.translate("SettingsDialog", " · in use") if row.get("id") == active_id else ""
             item = QListWidgetItem(row["label"].replace(" CLI", ""))
             item.setData(Qt.ItemDataRole.UserRole, row["id"])
-            item.setToolTip(f"{row['label']} · {status}{active}\n{row.get('credential_style', '')}".strip())
+            credentials = display_backend_feedback(row.get("credential_style", ""))
+            item.setToolTip(f"{row['label']} · {status}{active}\n{credentials}".strip())
             item.setTextAlignment(Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop)
             self.cli_agent_list.addItem(item)
             # Only installed agents get a tile (plus the saved one, so it stays selectable).
@@ -1497,11 +1518,13 @@ class SettingsDialog(QDialog):
         if scanned:
             missing = len(self._cli_scan_rows) - found
             self.cli_scan_status.setText(
-                f"{found} installed · {missing} more supported" if found
-                else "None found — install an agent CLI, or set its path under Advanced."
+                QCoreApplication.translate(
+                    "SettingsDialog", "{found} installed · {missing} more supported"
+                ).format(found=found, missing=missing) if found
+                else QCoreApplication.translate("SettingsDialog", "None found — install an agent CLI, or set its path under Advanced.")
             )
         else:
-            self.cli_scan_status.setText("Scanning when this tab opens…")
+            self.cli_scan_status.setText(QCoreApplication.translate("SettingsDialog", "Scanning when this tab opens…"))
         self.cli_scan_status.setStyleSheet(f"color: {_TEXT_3}; background: transparent;")
         self._update_cli_agent_detail()
 
@@ -1536,8 +1559,8 @@ class SettingsDialog(QDialog):
             # A list rebuild (scan) re-selects the same agent — keep its state.
             self._cli_detail_agent = agent_id
             self._cli_auth_state = None
-            self.cli_test_status.setText("Runs the CLI's version check.")
-            self._set_status(self.cli_auth_status, "Not checked yet", _TEXT_3)
+            self.cli_test_status.setText(QCoreApplication.translate("SettingsDialog", "Runs the CLI's version check."))
+            self._set_status(self.cli_auth_status, QCoreApplication.translate("SettingsDialog", "Not checked yet"), _TEXT_3)
             self.cli_model_picker.setModels([], keep_current=False)
             self.cli_model_picker.setCurrentText("")
             if self._cli_agent_ready():
@@ -1556,8 +1579,8 @@ class SettingsDialog(QDialog):
             return
 
         self.cli_agent_name.setText(row["label"])
-        self.cli_agent_name.setToolTip(row.get("credential_style", ""))
-        warning = row.get("warning", "")
+        self.cli_agent_name.setToolTip(display_backend_feedback(row.get("credential_style", "")))
+        warning = display_backend_feedback(row.get("warning", ""))
         self.cli_agent_warning.setText(warning)
         self.cli_agent_warning.setVisible(bool(warning))
 
@@ -1569,7 +1592,7 @@ class SettingsDialog(QDialog):
         try:
             if not self._cli_path_is_override:
                 self.cli_path_edit.setText(detected)
-            self.cli_path_edit.setPlaceholderText("Auto-detect on PATH (leave empty)")
+            self.cli_path_edit.setPlaceholderText(QCoreApplication.translate("SettingsDialog", "Auto-detect on PATH (leave empty)"))
         finally:
             self._syncing_cli_path = False
 
@@ -1617,15 +1640,22 @@ class SettingsDialog(QDialog):
             if err:
                 ok, detail = False, err
             elif result is None:
-                ok, detail = False, "Binary not found"
+                ok, detail = False, QCoreApplication.translate("BackendFeedback", "Binary not found")
             else:
                 ok, detail = result
             color = _SUCCESS if ok else _DANGER
-            text = f"{'OK' if ok else 'Failed'} · {detail}" if result else detail
+            detail = display_backend_feedback(detail)
+            if result:
+                if ok:
+                    text = QCoreApplication.translate("SettingsDialog", "OK · {detail}").format(detail=detail)
+                else:
+                    text = QCoreApplication.translate("SettingsDialog", "Failed · {detail}").format(detail=detail)
+            else:
+                text = detail
             self._set_status(self.cli_test_status, text, color)
 
         self._run_busy(
-            work, done, self.cli_test_status, "Testing…",
+            work, done, self.cli_test_status, QCoreApplication.translate("SettingsDialog", "Testing…"),
             [self.cli_test_btn, self.cli_auth_btn, self.cli_scan_btn, self.cli_rescan_btn],
         )
 
@@ -1647,24 +1677,32 @@ class SettingsDialog(QDialog):
             if err:
                 result = ("unknown", err, [])
             if result is None:
-                result = ("missing", "Binary not found", [])
+                result = ("missing", QCoreApplication.translate("BackendFeedback", "Binary not found"), [])
             self._apply_cli_auth(*result)
 
         self._run_busy(
-            work, done, self.cli_auth_status, "Checking auth…",
+            work, done, self.cli_auth_status, QCoreApplication.translate("SettingsDialog", "Checking auth…"),
             [self.cli_auth_btn, self.cli_test_btn, self.cli_scan_btn, self.cli_rescan_btn],
         )
 
     def _apply_cli_auth(self, state, detail, models):
         self._cli_auth_state = state
         n = len(models)
-        loaded = f" · {n} model{'s' if n != 1 else ''}" if n else ""
+        detail = display_backend_feedback(detail)
+        if n == 1:
+            loaded = QCoreApplication.translate("SettingsDialog", " · 1 model")
+        elif n:
+            loaded = QCoreApplication.translate("SettingsDialog", " · {count} models").format(count=n)
+        else:
+            loaded = ""
         if state == "ready":
-            self._set_status(self.cli_auth_status, f"Signed in · {detail}{loaded}", _SUCCESS)
+            self._set_status(self.cli_auth_status, QCoreApplication.translate("SettingsDialog", "Signed in · {detail}{models}").format(detail=detail, models=loaded), _SUCCESS)
         elif state == "login_required":
             self._set_status(
                 self.cli_auth_status,
-                f"Not signed in · {detail}. Run the CLI in a terminal to log in, then check again.",
+                QCoreApplication.translate(
+                    "SettingsDialog", "Not signed in · {detail}. Run the CLI in a terminal to log in, then check again."
+                ).format(detail=detail),
                 _WARN,
             )
         elif state == "missing":
@@ -1672,7 +1710,9 @@ class SettingsDialog(QDialog):
         else:
             self._set_status(
                 self.cli_auth_status,
-                f"This CLI can't report sign-in status — continue if it works in a terminal{loaded}",
+                QCoreApplication.translate(
+                    "SettingsDialog", "This CLI can't report sign-in status — continue if it works in a terminal{models}"
+                ).format(models=loaded),
                 _TEXT_3,
             )
         saved = self.config.get("cli_model") or ""
@@ -1699,7 +1739,7 @@ class SettingsDialog(QDialog):
         if mode == config_mod.MODE_SUBSCRIPTION:
             mode = config_mod.MODE_CLI_TOOL
         self._pending_connection_mode = mode
-        index = next((i for i, (_, m) in enumerate(_MODE_LABELS) if m == mode), 0)
+        index = next((i for i, m in enumerate(_MODE_IDS) if m == mode), 0)
         self.connection_tabs.setCurrentIndex(index)
         self.stack_set(index)
 
@@ -1715,7 +1755,7 @@ class SettingsDialog(QDialog):
         self.custom_url_edit.setText(self.config.get("custom_base_url") or "")
         self.custom_key_edit.setText(self.config.get("custom_api_key") or "")
         cfmt = self.config.get("custom_format")
-        fidx = next((i for i, (_, v) in enumerate(_FORMAT_LABELS) if v == cfmt), 0)
+        fidx = next((i for i, v in enumerate(_FORMAT_IDS) if v == cfmt), 0)
         self.custom_format_combo.setCurrentIndex(fidx)
 
         saved_cli_path = self.config.get("cli_path") or ""
@@ -1737,7 +1777,7 @@ class SettingsDialog(QDialog):
         if api_model:
             self.api_model_group.setVisible(True)
             self._set_status(
-                self.api_status, "Test connection to refresh the model list.", _TEXT_3
+                self.api_status, QCoreApplication.translate("SettingsDialog", "Test connection to refresh the model list."), _TEXT_3
             )
 
         custom_model = self.config.get("custom_model") or ""
@@ -1746,7 +1786,7 @@ class SettingsDialog(QDialog):
         if custom_model:
             self.custom_model_group.setVisible(True)
             self._set_status(
-                self.custom_status, "Test connection to refresh the model list.", _TEXT_3
+                self.custom_status, QCoreApplication.translate("SettingsDialog", "Test connection to refresh the model list."), _TEXT_3
             )
 
         cli_model = self.config.get("cli_model") or ""
@@ -1757,7 +1797,7 @@ class SettingsDialog(QDialog):
             self._cli_used_agent = self.config.get("cli_tool") or "claude"
             self._cli_auth_state = "saved"
             self._set_status(
-                self.cli_auth_status, "Set up previously — check again to refresh the model list.", _TEXT_3,
+                self.cli_auth_status, QCoreApplication.translate("SettingsDialog", "Set up previously — check again to refresh the model list."), _TEXT_3,
             )
         self._refresh_cli_steps()
 
@@ -1775,13 +1815,13 @@ class SettingsDialog(QDialog):
             provider_obj = providers.get_provider(pid)
             requires_key = provider_obj is None or provider_obj.get("id") != "ollama"
             if requires_key and not key:
-                QMessageBox.warning(self, "API key required",
-                                    "Please enter an API key for the selected provider.")
+                QMessageBox.warning(self, QCoreApplication.translate("SettingsDialog", "API key required"),
+                                    QCoreApplication.translate("SettingsDialog", "Please enter an API key for the selected provider."))
                 return
         elif mode == config_mod.MODE_CUSTOM:
             if not self.custom_url_edit.text().strip():
-                QMessageBox.warning(self, "Base URL required",
-                                    "Please enter a base URL for the custom endpoint.")
+                QMessageBox.warning(self, QCoreApplication.translate("SettingsDialog", "Base URL required"),
+                                    QCoreApplication.translate("SettingsDialog", "Please enter a base URL for the custom endpoint."))
                 return
 
         self.config.set("connection_mode", mode)

@@ -11,13 +11,15 @@ tooltip in place; click again or move off the chart to unpin.
 Right-click to copy the data as TSV.
 """
 
-from qgis.PyQt.QtCore import Qt, QPoint, QPointF, QSize, QRect, QRectF
+from qgis.PyQt.QtCore import QCoreApplication, Qt, QPoint, QPointF, QSize, QRect, QRectF
 from qgis.PyQt.QtGui import (
     QColor, QFont, QFontMetrics, QPainter, QPainterPath, QPen, QBrush, QPolygon, QGuiApplication,
 )
 from qgis.PyQt.QtWidgets import QFrame, QSizePolicy
 
+from .backend_feedback import display_backend_feedback
 from .downloadable import HoverDownloadButton, save_widget_png, _safe_name
+from .formatting import localize_decimal
 from .theme import (
     ui_font,
     DOCK_SURFACE as _INPUT_BG,
@@ -73,7 +75,7 @@ class ChartWidget(QFrame):
         self.setMouseTracking(True)
         self.setCursor(Qt.CursorShape.ArrowCursor)
         # Hover-to-download: save the chart as a PNG image.
-        HoverDownloadButton(self, self._save, tooltip="Save chart (PNG)")
+        HoverDownloadButton(self, self._save, tooltip=QCoreApplication.translate("ChartWidget", "Save chart (PNG)"))
 
     def _save(self):
         save_widget_png(self, self, _safe_name(self.title, "chart", ".png"))
@@ -105,7 +107,7 @@ class ChartWidget(QFrame):
                 painter.setPen(QColor(_TEXT))
                 painter.drawText(
                     rect.left(), rect.top(), rect.width(), 20,
-                    Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, self.title
+                    Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, display_backend_feedback(self.title)
                 )
                 title_h = 24
 
@@ -178,7 +180,7 @@ class ChartWidget(QFrame):
 
     def _format_value(self, value):
         if isinstance(value, float):
-            return f"{value:.3f}".rstrip("0").rstrip(".")
+            return localize_decimal(f"{value:.3f}".rstrip("0").rstrip("."))
         return str(value)
 
     def _draw_inspector(self, painter, chart_rect, region):
@@ -189,7 +191,7 @@ class ChartWidget(QFrame):
             label = f"{label} ({raw_label})"
         pct = region.get("percent")
         if pct is not None:
-            value = f"{value} ({pct:.1f}%)"
+            value = f"{value} ({localize_decimal(f'{pct:.1f}')}%)"
 
         font_label = _font(8)
         font_value = _font(9, QFont.Weight.Bold)
@@ -238,7 +240,7 @@ class ChartWidget(QFrame):
         font = _font(9)
         painter.setFont(font)
         painter.setPen(QColor(_TEXT_3))
-        painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, "No data")
+        painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, QCoreApplication.translate("ChartWidget", "No data"))
 
     def _draw_bar(self, painter, rect):
         bars = self.data[:10]
@@ -279,7 +281,8 @@ class ChartWidget(QFrame):
                 color = color.lighter(140)
             painter.fillRect(x, y, bar_w, bar_h, color)
 
-            val_str = str(item["value"])
+            val = item["value"]
+            val_str = localize_decimal(str(val)) if isinstance(val, float) else str(val)
             painter.setPen(QColor(_TEXT_2))
             painter.drawText(x, y - 2, bar_w, 12, Qt.AlignmentFlag.AlignCenter, val_str)
 
@@ -409,7 +412,7 @@ class ChartWidget(QFrame):
             self._add_hit_region(
                 kind="line",
                 rect=QRect(x - 6, y - 6, 12, 12),
-                label=str(p.get("label", f"pt {i + 1}")),
+                label=str(p.get("label", QCoreApplication.translate("ChartWidget", "pt {number}").format(number=i + 1))),
                 value=f"x {self._format_value(p['x'])}, y {self._format_value(p['y'])}",
                 anchor=QPoint(x, y),
             )
@@ -576,7 +579,7 @@ class ChartWidget(QFrame):
             self._add_hit_region(
                 kind="line",
                 rect=hit,
-                label=str(item.get("label", f"pt {i + 1}")),
+                label=str(item.get("label", QCoreApplication.translate("ChartWidget", "pt {number}").format(number=i + 1))),
                 raw_label=str(item.get("raw_label", "")),
                 value=item["value"],
                 anchor=QPoint(x, y),
@@ -585,7 +588,8 @@ class ChartWidget(QFrame):
         # Last value label at rightmost point
         if coords:
             last_x, last_y = coords[-1]
-            last_val = str(pts[-1]["value"])
+            value = pts[-1]["value"]
+            last_val = localize_decimal(str(value)) if isinstance(value, float) else str(value)
             font = _font(8)
             painter.setFont(font)
             painter.setPen(QColor(_TEXT_2))
@@ -648,7 +652,7 @@ class ChartWidget(QFrame):
 
         # Center label: total count or single label
         if len(items) > 1:
-            center_text = str(len(items)) + " cat"
+            center_text = QCoreApplication.translate("ChartWidget", "%n cat", None, len(items))
         else:
             center_text = str(items[0].get("label", "")) if items else ""
         if center_text:

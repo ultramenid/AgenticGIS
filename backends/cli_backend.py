@@ -36,6 +36,7 @@ import tempfile
 import threading
 import time
 
+from .feedback import BackendFeedback, QT_TRANSLATE_NOOP
 from ..core import tools as tools_mod
 from ..core.dev_logging import log_event
 from .adapters import (
@@ -70,127 +71,127 @@ CLI_AGENT_CATALOG = (
         "id": "claude",
         "label": "Claude Code",
         "commands": ("claude",),
-        "credential_style": "Claude subscription or Anthropic credentials",
-        "warning": "Provider policy may treat third-party automation differently.",
+        "credential_style": BackendFeedback(QT_TRANSLATE_NOOP("BackendFeedback", "Claude subscription or Anthropic credentials")),
+        "warning": BackendFeedback(QT_TRANSLATE_NOOP("BackendFeedback", "Provider policy may treat third-party automation differently.")),
         "adapter_class": ClaudeAdapter,
     },
     {
         "id": "codex",
         "label": "Codex CLI",
         "commands": ("codex",),
-        "credential_style": "OpenAI API key or ChatGPT account in Codex",
+        "credential_style": BackendFeedback(QT_TRANSLATE_NOOP("BackendFeedback", "OpenAI API key or ChatGPT account in Codex")),
         "adapter_class": CodexAdapter,
     },
     {
         "id": "cursor",
         "label": "Cursor Agent",
         "commands": ("cursor-agent", "cursor"),
-        "credential_style": "Cursor account or configured provider keys",
+        "credential_style": BackendFeedback(QT_TRANSLATE_NOOP("BackendFeedback", "Cursor account or configured provider keys")),
         "adapter_class": CursorAdapter,
     },
     {
         "id": "gemini",
         "label": "Gemini CLI",
         "commands": ("gemini",),
-        "credential_style": "Google account or Gemini API key",
+        "credential_style": BackendFeedback(QT_TRANSLATE_NOOP("BackendFeedback", "Google account or Gemini API key")),
         "adapter_class": GeminiAdapter,
     },
     {
         "id": "antigravity",
         "label": "Antigravity CLI",
         "commands": ("agy", "antigravity"),
-        "credential_style": "Google account or Antigravity credentials",
+        "credential_style": BackendFeedback(QT_TRANSLATE_NOOP("BackendFeedback", "Google account or Antigravity credentials")),
         "adapter_class": AntigravityAdapter,
     },
     {
         "id": "copilot",
         "label": "GitHub Copilot CLI",
         "commands": ("gh", "copilot"),
-        "credential_style": "GitHub Copilot subscription",
+        "credential_style": BackendFeedback(QT_TRANSLATE_NOOP("BackendFeedback", "GitHub Copilot subscription")),
         "adapter_class": CopilotAdapter,
     },
     {
         "id": "opencode",
         "label": "OpenCode",
         "commands": ("opencode",),
-        "credential_style": "Provider keys in OpenCode config",
+        "credential_style": BackendFeedback(QT_TRANSLATE_NOOP("BackendFeedback", "Provider keys in OpenCode config")),
         "adapter_class": OpenCodeAdapter,
     },
     {
         "id": "qwen",
         "label": "Qwen Code",
         "commands": ("qwen",),
-        "credential_style": "DashScope or Qwen API key",
+        "credential_style": BackendFeedback(QT_TRANSLATE_NOOP("BackendFeedback", "DashScope or Qwen API key")),
         "adapter_class": QwenAdapter,
     },
     {
         "id": "grok",
         "label": "Grok",
         "commands": ("grok",),
-        "credential_style": "xAI account or key",
+        "credential_style": BackendFeedback(QT_TRANSLATE_NOOP("BackendFeedback", "xAI account or key")),
         "adapter_class": DefaultAdapter,
     },
     {
         "id": "hermes",
         "label": "Hermes",
         "commands": ("hermes",),
-        "credential_style": "Configured provider keys",
+        "credential_style": BackendFeedback(QT_TRANSLATE_NOOP("BackendFeedback", "Configured provider keys")),
         "adapter_class": DefaultAdapter,
     },
     {
         "id": "kimi",
         "label": "Kimi CLI",
         "commands": ("kimi",),
-        "credential_style": "Moonshot/Kimi API key",
+        "credential_style": BackendFeedback(QT_TRANSLATE_NOOP("BackendFeedback", "Moonshot/Kimi API key")),
         "adapter_class": KimiAdapter,
     },
     {
         "id": "devin",
         "label": "Devin for Terminal",
         "commands": ("devin",),
-        "credential_style": "Devin account",
+        "credential_style": BackendFeedback(QT_TRANSLATE_NOOP("BackendFeedback", "Devin account")),
         "adapter_class": DevinAdapter,
     },
     {
         "id": "deepseek_tui",
         "label": "DeepSeek TUI",
         "commands": ("deepseek", "deepseek-tui"),
-        "credential_style": "DeepSeek API key",
+        "credential_style": BackendFeedback(QT_TRANSLATE_NOOP("BackendFeedback", "DeepSeek API key")),
         "adapter_class": DefaultAdapter,
     },
     {
         "id": "pi",
         "label": "Pi",
         "commands": ("pi",),
-        "credential_style": "Pi account",
+        "credential_style": BackendFeedback(QT_TRANSLATE_NOOP("BackendFeedback", "Pi account")),
         "adapter_class": PiAdapter,
     },
     {
         "id": "mistral_vibe",
         "label": "Mistral Vibe CLI",
         "commands": ("mistral-vibe", "vibe"),
-        "credential_style": "Mistral API key",
+        "credential_style": BackendFeedback(QT_TRANSLATE_NOOP("BackendFeedback", "Mistral API key")),
         "adapter_class": DefaultAdapter,
     },
     {
         "id": "kiro",
         "label": "Kiro CLI",
         "commands": ("kiro",),
-        "credential_style": "AWS credentials",
+        "credential_style": BackendFeedback(QT_TRANSLATE_NOOP("BackendFeedback", "AWS credentials")),
         "adapter_class": KiroAdapter,
     },
     {
         "id": "kilo",
         "label": "Kilo",
         "commands": ("kilo",),
-        "credential_style": "Configured provider keys",
+        "credential_style": BackendFeedback(QT_TRANSLATE_NOOP("BackendFeedback", "Configured provider keys")),
         "adapter_class": DefaultAdapter,
     },
     {
         "id": "qoder",
         "label": "Qoder CLI",
         "commands": ("qoder",),
-        "credential_style": "Qoder account or provider keys",
+        "credential_style": BackendFeedback(QT_TRANSLATE_NOOP("BackendFeedback", "Qoder account or provider keys")),
         "adapter_class": DefaultAdapter,
     },
 )
@@ -1427,9 +1428,13 @@ class CliToolBackend(AgentBackend):
 
     def validate(self):
         if self.binary is None:
-            return (
-                f"Could not find the '{self.tool}' binary. Set its path in "
-                "Settings, or make sure it is on PATH."
+            return BackendFeedback(
+                QT_TRANSLATE_NOOP(
+                    "BackendFeedback",
+                    "Could not find the '{tool}' binary. Set its path in "
+                    "Settings, or make sure it is on PATH."
+                ),
+                tool=self.tool,
             )
         return None
 
@@ -1480,11 +1485,11 @@ class CliToolBackend(AgentBackend):
         keys = _ENV_AUTH_KEYS.get(self.tool, ())
         configured = [key for key in keys if os.environ.get(key)]
         if configured:
-            return "ready", f"Env key configured: {configured[0]}"
+            return "ready", BackendFeedback(QT_TRANSLATE_NOOP("BackendFeedback", "Env key configured: {variable}"), variable=configured[0])
         if keys:
             return (
                 "unsupported",
-                "Auth check unavailable. Run the CLI directly to verify login or API keys.",
+                BackendFeedback(QT_TRANSLATE_NOOP("BackendFeedback", "Auth check unavailable. Run the CLI directly to verify login or API keys.")),
             )
         return None
 
@@ -1495,13 +1500,13 @@ class CliToolBackend(AgentBackend):
         or ``missing``.
         """
         if not self.binary:
-            return "missing", "Binary not found"
+            return "missing", BackendFeedback(QT_TRANSLATE_NOOP("BackendFeedback", "Binary not found"))
         env_status = self._env_auth_status()
         if env_status:
             return env_status
         cmd = self._check_login_cmd()
         if not cmd:
-            return "unsupported", "Auth check unavailable for this CLI."
+            return "unsupported", BackendFeedback(QT_TRANSLATE_NOOP("BackendFeedback", "Auth check unavailable for this CLI."))
         try:
             result = subprocess.run(  # nosec B603
                 _subprocess_cmd(cmd),
@@ -1522,10 +1527,10 @@ class CliToolBackend(AgentBackend):
             if isinstance(detail, tuple):
                 return detail
         if result.returncode == 0:
-            return "ready", detail or "Logged in"
+            return "ready", detail or BackendFeedback(QT_TRANSLATE_NOOP("BackendFeedback", "Logged in"))
         if result.returncode in (1, 2) and detail:
             return "login_required", detail
-        return "unsupported", detail or "No auth status command available"
+        return "unsupported", detail or BackendFeedback(QT_TRANSLATE_NOOP("BackendFeedback", "No auth status command available"))
 
     def list_models(self):
         """Return a list of available models for the selected CLI agent."""
@@ -1602,7 +1607,7 @@ class CliToolBackend(AgentBackend):
     def test_cli(self):
         """Run a lightweight smoke check for settings UI diagnostics."""
         if not self.binary:
-            return False, "Binary not found"
+            return False, BackendFeedback(QT_TRANSLATE_NOOP("BackendFeedback", "Binary not found"))
         commands = [
             [self.binary, "--version"],
             [self.binary, "version"],
@@ -1625,10 +1630,10 @@ class CliToolBackend(AgentBackend):
                 continue
             output = _process_output(result)
             if result.returncode == 0:
-                return True, (output.splitlines()[0] if output else "OK")
+                return True, (output.splitlines()[0] if output else BackendFeedback(QT_TRANSLATE_NOOP("BackendFeedback", "OK")))
             if output:
                 last_err = output.splitlines()[0]
-        return False, last_err or "CLI did not respond successfully"
+        return False, last_err or BackendFeedback(QT_TRANSLATE_NOOP("BackendFeedback", "CLI did not respond successfully"))
 
     # ------------------------------------------------------------------ #
     def _gee_available(self):
@@ -1808,7 +1813,7 @@ class CliToolBackend(AgentBackend):
 
         for _ in agent_iteration_steps(max_iters):
             if should_stop():
-                emit(AgentEvent(EventType.THINKING, {"text": "Stopped."}))
+                emit(AgentEvent(EventType.THINKING, {"text": BackendFeedback(QT_TRANSLATE_NOOP("BackendFeedback", "Stopped."))}))
                 emit(AgentEvent(EventType.DONE))
                 return messages
 
@@ -1839,7 +1844,7 @@ class CliToolBackend(AgentBackend):
                         emit(event)
                     break
                 log_event("cli.malformed_call.retry", tool=adapter.id)
-                emit(AgentEvent(EventType.THINKING, {"text": "Model sent a malformed tool call, retrying..."}))
+                emit(AgentEvent(EventType.THINKING, {"text": BackendFeedback(QT_TRANSLATE_NOOP("BackendFeedback", "Model sent a malformed tool call, retrying..."))}))
 
             # Support both the new list-based field and legacy single field (for tests).
             pending = getattr(stream, "pending_tool_calls", None) or []
@@ -1896,15 +1901,20 @@ class CliToolBackend(AgentBackend):
                 # mode would never show that JSON, so ask for a clean resend.
                 protocol_retries += 1
                 log_event("cli.protocol.retry", tool=adapter.id, attempt=protocol_retries)
-                emit(AgentEvent(EventType.THINKING, {"text": "Model sent a malformed tool call, retrying..."}))
+                emit(AgentEvent(EventType.THINKING, {"text": BackendFeedback(QT_TRANSLATE_NOOP("BackendFeedback", "Model sent a malformed tool call, retrying..."))}))
                 nudge = {"role": "user", "content": _PROTOCOL_RETRY_PROMPT}
                 messages.extend([{"role": "assistant", "content": stream.malformed_protocol}, nudge])
                 new_messages = [nudge]
                 continue
             elif getattr(stream, "malformed_protocol", "") and not stream.final_text:
                 emit(AgentEvent(EventType.ERROR, {
-                    "error": "The CLI model kept sending tool calls that weren't valid JSON. "
-                             "Try again, or switch to a stronger model.",
+                    "error": BackendFeedback(
+                        QT_TRANSLATE_NOOP(
+                            "BackendFeedback",
+                            "The CLI model kept sending tool calls that weren't valid JSON. "
+                            "Try again, or switch to a stronger model."
+                        )
+                    ),
                 }))
                 emit(AgentEvent(EventType.DONE))
                 return messages
@@ -1916,7 +1926,7 @@ class CliToolBackend(AgentBackend):
                 if full_text:
                     messages.append({"role": "assistant", "content": full_text})
             elif not stream.had_error:
-                fallback = "The CLI agent completed without returning a response."
+                fallback = BackendFeedback(QT_TRANSLATE_NOOP("BackendFeedback", "The CLI agent completed without returning a response."))
                 emit(AgentEvent(EventType.TEXT, {"text": fallback}))
                 messages.append({"role": "assistant", "content": fallback})
             emit(AgentEvent(EventType.DONE))
@@ -1925,7 +1935,7 @@ class CliToolBackend(AgentBackend):
         emit(
             AgentEvent(
                 EventType.ERROR,
-                {"error": "CLI proxy reached the maximum tool iterations."},
+                {"error": BackendFeedback(QT_TRANSLATE_NOOP("BackendFeedback", "CLI proxy reached the maximum tool iterations."))},
             )
         )
         emit(AgentEvent(EventType.DONE))
@@ -2002,7 +2012,13 @@ class CliToolBackend(AgentBackend):
                 rc = None
             if rc not in (0, None):
                 joined = "\n".join(s for s in err_acc if s).strip()
-                message = joined[:2000] if joined else f"{self.tool} exited with code {rc} and no error output."
+                message = joined[:2000] if joined else BackendFeedback(
+                    QT_TRANSLATE_NOOP(
+                        "BackendFeedback", "{tool} exited with code {code} and no error output."
+                    ),
+                    tool=self.tool,
+                    code=rc,
+                )
                 stream.had_error = True
                 stream.emit(AgentEvent(EventType.ERROR, {"error": message}))
 
@@ -2032,12 +2048,16 @@ class CliToolBackend(AgentBackend):
                 AgentEvent(
                     EventType.ERROR,
                     {
-                        "error": (
-                            f"{self.tool} cannot receive this request on Windows: "
-                            "the prompt is passed on the command line and exceeds "
-                            "the 32K CreateProcess limit (WinError 206). Use "
-                            "Claude Code, Codex, Gemini, Qwen or OpenCode in CLI "
-                            "mode, or switch to API mode in Settings."
+                        "error": BackendFeedback(
+                            QT_TRANSLATE_NOOP(
+                                "BackendFeedback",
+                                "{tool} cannot receive this request on Windows: "
+                                "the prompt is passed on the command line and exceeds "
+                                "the 32K CreateProcess limit (WinError 206). Use "
+                                "Claude Code, Codex, Gemini, Qwen or OpenCode in CLI "
+                                "mode, or switch to API mode in Settings."
+                            ),
+                            tool=self.tool,
                         )
                     },
                 )
@@ -2086,7 +2106,7 @@ class CliToolBackend(AgentBackend):
                 self._finalize_process(self._proc)
             emit(
                 AgentEvent(
-                    EventType.ERROR, {"error": f"Failed to launch {self.tool}: {err_detail}"}
+                    EventType.ERROR, {"error": BackendFeedback(QT_TRANSLATE_NOOP("BackendFeedback", "Failed to launch {tool}: {detail}"), tool=self.tool, detail=err_detail)}
                 )
             )
             stream = NormalizingStream(adapter, emit)

@@ -20,7 +20,8 @@ def _now():
 class SessionStore:
     """Small JSON store for global AgenticGIS chat sessions."""
 
-    def __init__(self, settings=None, limit=20):
+    def __init__(self, settings=None, limit=20, *, default_name=DEFAULT_SESSION_NAME):
+        self._default_name = default_name
         self._settings = settings or QSettings()
         self._limit = int(limit or 20)
         self.had_existing_sessions = False
@@ -30,7 +31,7 @@ class SessionStore:
         self._save_timer.timeout.connect(self._flush_scheduled_save)
         self._data = self._load()
         if not self._data.get("sessions"):
-            self.create_session(DEFAULT_SESSION_NAME)
+            self.create_session()
         else:
             self._normalize()
             self._persist()
@@ -59,7 +60,7 @@ class SessionStore:
             if not isinstance(session, dict):
                 continue
             sid = str(session.get("id") or uuid.uuid4().hex)
-            name = str(session.get("name") or DEFAULT_SESSION_NAME)
+            name = str(session.get("name") or self._default_name)
             created = str(session.get("created_at") or _now())
             updated = str(session.get("updated_at") or created)
             sessions.append({
@@ -142,14 +143,14 @@ class SessionStore:
         active_id = self._data.get("active_session_id")
         session = self.get_session(active_id)
         if session is None:
-            session = self.create_session(DEFAULT_SESSION_NAME)
+            session = self.create_session()
         return session
 
     def create_session(self, name=None):
         stamp = _now()
         session = {
             "id": uuid.uuid4().hex,
-            "name": (name or DEFAULT_SESSION_NAME).strip() or DEFAULT_SESSION_NAME,
+            "name": (name or self._default_name).strip() or self._default_name,
             "created_at": stamp,
             "updated_at": stamp,
             "backend_history": [],
@@ -184,7 +185,7 @@ class SessionStore:
         return None
 
     def rename_session(self, session_id, name):
-        clean = (name or DEFAULT_SESSION_NAME).strip() or DEFAULT_SESSION_NAME
+        clean = (name or self._default_name).strip() or self._default_name
         for session in self._data.get("sessions", []):
             if session.get("id") == session_id:
                 session["name"] = clean
@@ -193,7 +194,7 @@ class SessionStore:
                 return dict(session)
         return None
 
-    def delete_session(self, session_id):
+    def delete_session(self, session_id, *, default_name=None):
         before = len(self._data.get("sessions", []))
         self._data["sessions"] = [
             session for session in self._data.get("sessions", [])
@@ -202,7 +203,7 @@ class SessionStore:
         if len(self._data["sessions"]) == before:
             return None
         if not self._data["sessions"]:
-            fallback = self.create_session(DEFAULT_SESSION_NAME)
+            fallback = self.create_session(default_name)
             return fallback
         self._normalize()
         if self._data.get("active_session_id") == session_id:

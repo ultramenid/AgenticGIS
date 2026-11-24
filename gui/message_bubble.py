@@ -8,7 +8,7 @@ surfaces in the project's dark-minimal palette.
 import html
 import re
 
-from qgis.PyQt.QtCore import Qt, QPropertyAnimation, QEasingCurve
+from qgis.PyQt.QtCore import QCoreApplication, Qt, QPropertyAnimation, QEasingCurve
 from qgis.PyQt.QtGui import QFont
 from qgis.PyQt.QtWidgets import (
     QApplication,
@@ -136,16 +136,24 @@ def _build_code_context_menu(parent, code_blocks: list, copy_message: str = ""):
     """Build an opaque context menu for copying code blocks/message text."""
     menu = QMenu(parent)
     menu.setStyleSheet(_CODE_MENU_STYLE)
-    title = menu.addAction("Code block" if code_blocks else "Message")
+    title = menu.addAction(
+        QCoreApplication.translate("MessageBubble", "Code block")
+        if code_blocks else QCoreApplication.translate("MessageBubble", "Message")
+    )
     title.setEnabled(False)
 
     for index, code in enumerate(code_blocks):
-        label = "Copy code" if len(code_blocks) == 1 else f"Copy code block {index + 1}"
+        label = (
+            QCoreApplication.translate("MessageBubble", "Copy code")
+            if len(code_blocks) == 1 else QCoreApplication.translate("MessageBubble", "Copy code block {number}").format(
+                number=index + 1
+            )
+        )
         action = menu.addAction(label)
         action.triggered.connect(lambda _checked=False, c=code: _copy_to_clipboard(c))
 
     if copy_message and not code_blocks:
-        action = menu.addAction("Copy message")
+        action = menu.addAction(QCoreApplication.translate("MessageBubble", "Copy message"))
         action.triggered.connect(lambda _checked=False, t=copy_message: _copy_to_clipboard(t))
     return menu
 
@@ -595,7 +603,7 @@ class MessageBubble(QFrame):
 
         # Hover-to-download for agent answers: save the response as Markdown.
         if not self.is_user and not self.is_tool:
-            HoverDownloadButton(self, self._save, tooltip="Save response (.md)")
+            HoverDownloadButton(self, self._save, tooltip=QCoreApplication.translate("MessageBubble", "Save response (.md)"))
 
     def _save(self):
         text = self.text or self._last_text or ""

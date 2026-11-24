@@ -5,7 +5,7 @@ Matches ChartWidget styling and design tokens.
 """
 
 import os
-from qgis.PyQt.QtCore import Qt
+from qgis.PyQt.QtCore import QCoreApplication, Qt
 from qgis.PyQt.QtGui import QMovie
 from qgis.PyQt.QtWidgets import (
     QFrame, QVBoxLayout, QLabel
@@ -59,12 +59,14 @@ class GifWidget(QFrame):
         layout.setSpacing(8)
 
         # Title label (muted)
-        title_label = QLabel(name)
+        title_label = QLabel(data.get("name") or QCoreApplication.translate("GifWidget", "Animation"))
+        title_label.setTextFormat(Qt.TextFormat.PlainText)
         title_label.setStyleSheet(f"color: {_TEXT_2}; font-size: {fs(12)}px;")
 
         # Animation label
         animation_label = QLabel()
         animation_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        animation_label.setWordWrap(True)
         animation_label.setMinimumHeight(200)
         animation_label.setStyleSheet(
             f"background-color: {_SURFACE}; color: {_TEXT};"
@@ -84,11 +86,11 @@ class GifWidget(QFrame):
                 movie.start()
             else:
                 # GIF file exists but is not valid
-                animation_label.setText("Animation no longer available.")
+                animation_label.setText(QCoreApplication.translate("GifWidget", "Animation no longer available."))
                 self._movie = None
         else:
             # GIF path is missing, None, or file does not exist
-            animation_label.setText("Animation no longer available.")
+            animation_label.setText(QCoreApplication.translate("GifWidget", "Animation no longer available."))
             self._movie = None
 
         layout.addWidget(title_label)
@@ -97,11 +99,12 @@ class GifWidget(QFrame):
         self.setLayout(layout)
 
         # Hover-to-download: save the animated GIF to disk.
-        HoverDownloadButton(self, self._save, tooltip="Save GIF")
+        HoverDownloadButton(self, self._save, tooltip=QCoreApplication.translate("GifWidget", "Save GIF"))
 
     def _build_label_overlay(self, host):
         """Create the per-frame caption overlaid on the animation."""
         overlay = QLabel(host)
+        overlay.setTextFormat(Qt.TextFormat.PlainText)
         overlay.setStyleSheet(
             "background-color: rgba(0, 0, 0, 160); color: #ffffff;"
             " font-size: 14px; font-weight: 600; padding: 2px 8px;"

@@ -8,6 +8,7 @@ runs on a stock QGIS with no packages. The model's tool_calls map onto
 import json
 import os
 
+from .feedback import BackendFeedback, QT_TRANSLATE_NOOP, exception_feedback
 from ..core import tools as tools_mod
 from .base import (
     AgentBackend,
@@ -919,7 +920,7 @@ class OpenAIBackend(AgentBackend):
         is_unlimited = unlimited_iterations(max_iters)
         for _ in agent_iteration_steps(max_iters):
             if should_stop():
-                emit(AgentEvent(EventType.THINKING, {"text": "Stopped."}))
+                emit(AgentEvent(EventType.THINKING, {"text": BackendFeedback(QT_TRANSLATE_NOOP("BackendFeedback", "Stopped."))}))
                 emit(AgentEvent(EventType.DONE))
                 return messages
 
@@ -931,7 +932,7 @@ class OpenAIBackend(AgentBackend):
                     messages, model, emit, should_stop
                 )
             except Exception as exc:  # noqa: BLE001
-                emit(AgentEvent(EventType.ERROR, {"error": str(exc)}))
+                emit(AgentEvent(EventType.ERROR, {"error": exception_feedback(exc)}))
                 return messages
 
             try:
@@ -946,12 +947,12 @@ class OpenAIBackend(AgentBackend):
                     on_connecting=lambda: emit(AgentEvent(EventType.CONNECTING)),
                 )
             except OpenAIHttpError as exc:
-                emit(AgentEvent(EventType.ERROR, {"error": str(exc)}))
+                emit(AgentEvent(EventType.ERROR, {"error": exception_feedback(exc)}))
                 return messages
             except Exception as exc:  # noqa: BLE001
                 emit(
                     AgentEvent(
-                        EventType.ERROR, {"error": f"{type(exc).__name__}: {exc}"}
+                        EventType.ERROR, {"error": exception_feedback(exc, include_type=True)}
                     )
                 )
                 return messages
@@ -977,7 +978,12 @@ class OpenAIBackend(AgentBackend):
             # CRITICAL: detect truncated output before saving dangling tool calls.
             if finish_reason == "length" and tool_calls:
                 emit(AgentEvent(EventType.THINKING, {
-                    "text": "Response truncated mid-tool-call (output token limit). Asking model to retry."
+                    "text": BackendFeedback(
+                        QT_TRANSLATE_NOOP(
+                            "BackendFeedback",
+                            "Response truncated mid-tool-call (output token limit). Asking model to retry."
+                        )
+                    )
                 }))
                 messages.append({
                     "role": "user",
@@ -1026,10 +1032,14 @@ class OpenAIBackend(AgentBackend):
         else:
             if is_unlimited:
                 return messages
-            limit_msg = (
-                f"Reached the maximum of {max_iters} tool-iteration steps. "
-                "If the task is not complete, the user can send a follow-up "
-                "message to continue."
+            limit_msg = BackendFeedback(
+                QT_TRANSLATE_NOOP(
+                    "BackendFeedback",
+                    "Reached the maximum of {count} tool-iteration steps. "
+                    "If the task is not complete, the user can send a follow-up "
+                    "message to continue."
+                ),
+                count=max_iters,
             )
             emit(AgentEvent(EventType.THINKING, {"text": limit_msg}))
             messages.append({"role": "user", "content": f"[System note: {limit_msg}]"})
